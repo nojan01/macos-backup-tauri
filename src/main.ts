@@ -991,6 +991,11 @@ async function cancelBackup(): Promise<void> {
   try {
     await invoke("cancel_backup");
     log(t("backupCancelled"));
+    // Reset UI state
+    progressFill.style.width = "0%";
+    progressMessage.textContent = t("backupCancelled");
+    btnBackup.disabled = false;
+    btnCancel.disabled = true;
   } catch (e) {
     log(`${t("backupFailed")} ${e}`);
   }
@@ -1236,6 +1241,12 @@ restoreStart.addEventListener("click", async () => {
   const targetPath = getFullTargetPath();
   
   restoreModal.style.display = "none";
+  
+  // Reset progress bar and start animation
+  progressFill.style.width = "0%";
+  progressFill.classList.add("animating");
+  progressMessage.textContent = "Bereite Wiederherstellung vor...";
+  
   log(`🔄 ${t("restoring")} ${selectedItems.length} Elemente...`);
   
   try {
@@ -1257,8 +1268,13 @@ restoreStart.addEventListener("click", async () => {
         log(`   ❌ ${err}`);
       }
     }
+    progressFill.classList.remove("animating");
+    progressFill.style.width = "100%";
+    progressMessage.textContent = t("restoreComplete");
   } catch (e) {
     log(`❌ Restore-Fehler: ${e}`);
+    progressFill.classList.remove("animating");
+    progressMessage.textContent = "Fehler bei Wiederherstellung";
   }
 });
 

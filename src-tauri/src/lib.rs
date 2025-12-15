@@ -11,9 +11,10 @@ use sha2::{Sha256, Digest};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use walkdir::WalkDir;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 static BACKUP_CANCELLED: AtomicBool = AtomicBool::new(false);
+static TAR_PID: AtomicU32 = AtomicU32::new(0);
 
 fn default_language() -> String {
     "de".to_string()
@@ -783,32 +784,82 @@ fn hash_file(path: &Path) -> Result<String, String> {
 }
 
 fn create_tar_gz(source: &Path, target: &Path) -> Result<(), String> {
-    // Use system tar command which handles sockets gracefully
+    use std::os::unix::process::CommandExt;
+    
+    // Use system tar command with zstd compression (faster than gzip, better ratio)
     let source_parent = source.parent().unwrap_or(Path::new("/"));
     let source_name = source.file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "backup".to_string());
     
-    let output = Command::new("tar")
-        .current_dir(source_parent)
-        .args([
-            "-czf",
-            &target.to_string_lossy(),
-            "--exclude", "*.sock",
-            "--exclude", "*/sockets/*",
-            &source_name,
-        ])
+    // Check if zstd is available, fallback to gzip
+    let zstd_available = Command::new("which")
+        .arg("zstd")
         .output()
-        .map_err(|e| format!("Failed to run tar: {}", e))?;
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    
+    // Spawn the process so we can track and kill it
+    let mut child = if zstd_available {
+        // Use zstd compression (much faster, better compression)
+        let mut cmd = Command::new("tar");
+        cmd.current_dir(source_parent)
+            .args([
+                "--use-compress-program=/opt/homebrew/bin/zstd -T0",  // -T0 uses all CPU cores
+                "-cf",
+                &target.to_string_lossy(),
+                "--exclude", "*.sock",
+                "--exclude", "*/sockets/*",
+                &source_name,
+            ]);
+        // Create new process group so we can kill all children
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setpgid(0, 0);
+                Ok(())
+            });
+        }
+        cmd.spawn().map_err(|e| format!("Failed to spawn tar with zstd: {}", e))?
+    } else {
+        // Fallback to gzip
+        let mut cmd = Command::new("tar");
+        cmd.current_dir(source_parent)
+            .args([
+                "-czf",
+                &target.to_string_lossy(),
+                "--exclude", "*.sock",
+                "--exclude", "*/sockets/*",
+                &source_name,
+            ]);
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setpgid(0, 0);
+                Ok(())
+            });
+        }
+        cmd.spawn().map_err(|e| format!("Failed to spawn tar: {}", e))?
+    };
+    
+    // Store PID for potential cancellation
+    TAR_PID.store(child.id(), Ordering::SeqCst);
+    
+    // Wait for completion
+    let status = child.wait().map_err(|e| format!("Failed to wait for tar: {}", e))?;
+    
+    // Clear PID
+    TAR_PID.store(0, Ordering::SeqCst);
+    
+    // Check if cancelled
+    if BACKUP_CANCELLED.load(Ordering::SeqCst) {
+        let _ = fs::remove_file(target);
+        return Err("Cancelled".to_string());
+    }
     
     // tar returns exit code 1 for warnings (sockets, permission denied on some files, etc.)
     // This is acceptable as long as the archive was created
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stderr_lower = stderr.to_lowercase();
-        
+    if !status.success() {
         // Exit code 1 with socket/pipe warnings is fine - archive is still valid
-        if output.status.code() == Some(1) {
+        if status.code() == Some(1) {
             // Check if archive was created successfully
             if target.exists() {
                 return Ok(());
@@ -820,7 +871,7 @@ fn create_tar_gz(source: &Path, target: &Path) -> Result<(), String> {
             return Ok(());
         }
         
-        return Err(format!("tar failed: {}", stderr));
+        return Err("tar failed".to_string());
     }
     
     Ok(())
@@ -886,6 +937,17 @@ async fn create_backup(
     let total = directories.len();
     
     for (i, dir) in directories.iter().enumerate() {
+        // Check for cancellation before each directory
+        if BACKUP_CANCELLED.load(Ordering::SeqCst) {
+            let _ = window.emit("backup-log", "⚠️ Backup abgebrochen!");
+            let _ = window.emit("backup-progress", serde_json::json!({
+                "progress": 0,
+                "message": "Backup abgebrochen"
+            }));
+            BACKUP_CANCELLED.store(false, Ordering::SeqCst);
+            return Err("Backup wurde abgebrochen".to_string());
+        }
+        
         let expanded = if dir.starts_with("~/") {
             home.join(&dir[2..])
         } else if dir == "~" {
@@ -905,7 +967,8 @@ async fn create_backup(
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "backup".to_string());
         
-        let archive_name = format!("{}.tar.gz", name.to_lowercase().replace(' ', "-").replace('.', "_"));
+        let archive_ext = if Path::new("/opt/homebrew/bin/zstd").exists() || Path::new("/usr/local/bin/zstd").exists() { "tar.zst" } else { "tar.gz" };
+        let archive_name = format!("{}.{}", name.to_lowercase().replace(' ', "-").replace('.', "_"), archive_ext);
         let archive_path = backup_root.join(&archive_name);
         
         let _ = window.emit("backup-log", format!("Archiviere {} ...", dir));
@@ -931,6 +994,19 @@ async fn create_backup(
             create_tar_gz(&expanded, &archive_path)?;
         }
         
+        // Check for cancellation after archive
+        if BACKUP_CANCELLED.load(Ordering::SeqCst) {
+            // Clean up partial archive
+            let _ = fs::remove_file(&archive_path);
+            let _ = window.emit("backup-log", "⚠️ Backup abgebrochen!");
+            let _ = window.emit("backup-progress", serde_json::json!({
+                "progress": 0,
+                "message": "Backup abgebrochen"
+            }));
+            BACKUP_CANCELLED.store(false, Ordering::SeqCst);
+            return Err("Backup wurde abgebrochen".to_string());
+        }
+        
         let archive_size = fs::metadata(&archive_path)
             .map(|m| m.len())
             .unwrap_or(0);
@@ -948,7 +1024,7 @@ async fn create_backup(
 
     // Archive Homebrew packages as a restorable item
     if let Ok(brewfile) = get_brew_packages() {
-        let brew_archive_name = "homebrew-packages.tar.gz";
+        let brew_archive_name = if Path::new("/opt/homebrew/bin/zstd").exists() || Path::new("/usr/local/bin/zstd").exists() { "homebrew-packages.tar.zst" } else { "homebrew-packages.tar.gz" };
         let brew_archive_path = backup_root.join(brew_archive_name);
         let brew_temp = std::env::temp_dir().join("homebrew_packages.txt");
         let _ = fs::write(&brew_temp, &brewfile);
@@ -991,7 +1067,7 @@ async fn create_backup(
         }
         
         if mas_temp.exists() {
-            let mas_archive_name = "mas-apps.tar.gz";
+            let mas_archive_name = if Path::new("/opt/homebrew/bin/zstd").exists() || Path::new("/usr/local/bin/zstd").exists() { "mas-apps.tar.zst" } else { "mas-apps.tar.gz" };
             let mas_archive_path = backup_root.join(mas_archive_name);
             let source_size = fs::metadata(&mas_temp).map(|m| m.len()).unwrap_or(0);
             
@@ -1018,7 +1094,7 @@ async fn create_backup(
     
     // Archive VS Code extensions as a restorable item
     if let Ok(extensions) = get_vscode_extensions() {
-        let vscode_archive_name = "vscode-extensions.tar.gz";
+        let vscode_archive_name = if Path::new("/opt/homebrew/bin/zstd").exists() || Path::new("/usr/local/bin/zstd").exists() { "vscode-extensions.tar.zst" } else { "vscode-extensions.tar.gz" };
         let vscode_archive_path = backup_root.join(vscode_archive_name);
         let vscode_temp = std::env::temp_dir().join("vscode_extensions.txt");
         let vscode_content = extensions.join("
@@ -1066,6 +1142,34 @@ async fn create_backup(
     
     let metadata_json = serde_json::to_string_pretty(&metadata).map_err(|e| e.to_string())?;
     fs::write(backup_root.join("metadata.json"), &metadata_json).map_err(|e| e.to_string())?;
+    
+    // Copy the DMG installer to backup root (always include app in backup)
+    let dmg_filename = "macOS Backup Suite.dmg";
+    let dmg_dest = suite_root.join(dmg_filename);
+    let mut dmg_copied = false;
+    
+    // Look for DMG in the app bundle's Resources folder
+    if let Ok(exe) = std::env::current_exe() {
+        // exe is at: App.app/Contents/MacOS/binary
+        // We need: App.app/Contents/Resources/
+        if let Some(macos_dir) = exe.parent() {
+            let resources_dmg = macos_dir.parent()
+                .map(|contents| contents.join("Resources").join(dmg_filename));
+            
+            if let Some(ref src) = resources_dmg {
+                if src.exists() {
+                    if fs::copy(src, &dmg_dest).is_ok() {
+                        let _ = window.emit("backup-log", format!("App-Installer kopiert: {}", dmg_filename));
+                        dmg_copied = true;
+                    }
+                }
+            }
+        }
+    }
+    
+    if !dmg_copied {
+        let _ = window.emit("backup-log", "⚠️ App-Installer (DMG) nicht in App eingebettet");
+    }
     
     let latest = serde_json::json!({
         "latest": timestamp,
@@ -1268,9 +1372,12 @@ async fn restore_items(
     let total = items.len();
     
     for (i, item_path) in items.iter().enumerate() {
-        let progress = ((i + 1) * 100) / total;
+        // Progress: Start each item at a percentage, complete after operation
+        let start_progress = (i * 100) / total;
+        let end_progress = ((i + 1) * 100) / total;
+        
         let _ = window.emit("restore-progress", serde_json::json!({
-            "progress": progress,
+            "progress": start_progress,
             "message": format!("Stelle wieder her: {}", item_path)
         }));
         
@@ -1301,6 +1408,10 @@ async fn restore_items(
                     let _ = window.emit("restore-log", format!("❌ Homebrew-Fehler: {}", e));
                 }
             }
+            let _ = window.emit("restore-progress", serde_json::json!({
+                "progress": end_progress,
+                "message": "Homebrew abgeschlossen"
+            }));
             continue;
         }
         
@@ -1317,6 +1428,10 @@ async fn restore_items(
                     let _ = window.emit("restore-log", format!("❌ MAS-Fehler: {}", e));
                 }
             }
+            let _ = window.emit("restore-progress", serde_json::json!({
+                "progress": end_progress,
+                "message": "MAS Apps abgeschlossen"
+            }));
             continue;
         }
         
@@ -1333,6 +1448,10 @@ async fn restore_items(
                     let _ = window.emit("restore-log", format!("❌ VS Code-Fehler: {}", e));
                 }
             }
+            let _ = window.emit("restore-progress", serde_json::json!({
+                "progress": end_progress,
+                "message": "VS Code abgeschlossen"
+            }));
             continue;
         }
         
@@ -1402,19 +1521,60 @@ fn extract_tar_gz(archive: &Path, target: &Path, overwrite: bool) -> Result<(), 
         .map_err(|e| format!("ditto Fehler: {}", e))?;
     
     if !output.status.success() {
-        // Fallback to tar if ditto fails (for .tar.gz files)
-        // macOS tar overwrites by default, use -k to keep existing
+        // Fallback to tar if ditto fails (for .tar.gz or .tar.zst files)
         let archive_str = archive.to_string_lossy().to_string();
-        let tar_output = if overwrite {
-            Command::new("tar")
-                .current_dir(target.parent().unwrap_or(Path::new("/")))
-                .args(["-xzf", &archive_str])
-                .output()
+        
+        // Check if zstd is available for decompression
+        let zstd_available = Command::new("which")
+            .arg("zstd")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        
+        let tar_output = if zstd_available {
+            // Try zstd first (handles both .zst and auto-detects format)
+            let result = if overwrite {
+                Command::new("tar")
+                    .current_dir(target.parent().unwrap_or(Path::new("/")))
+                    .args(["--use-compress-program=zstd -d", "-xf", &archive_str])
+                    .output()
+            } else {
+                Command::new("tar")
+                    .current_dir(target.parent().unwrap_or(Path::new("/")))
+                    .args(["-k", "--use-compress-program=zstd -d", "-xf", &archive_str])
+                    .output()
+            };
+            
+            // If zstd fails, try gzip (for older backups)
+            match result {
+                Ok(o) if !o.status.success() => {
+                    if overwrite {
+                        Command::new("tar")
+                            .current_dir(target.parent().unwrap_or(Path::new("/")))
+                            .args(["-xzf", &archive_str])
+                            .output()
+                    } else {
+                        Command::new("tar")
+                            .current_dir(target.parent().unwrap_or(Path::new("/")))
+                            .args(["-k", "-xzf", &archive_str])
+                            .output()
+                    }
+                }
+                other => other
+            }
         } else {
-            Command::new("tar")
-                .current_dir(target.parent().unwrap_or(Path::new("/")))
-                .args(["-k", "-xzf", &archive_str])
-                .output()
+            // No zstd, use gzip
+            if overwrite {
+                Command::new("tar")
+                    .current_dir(target.parent().unwrap_or(Path::new("/")))
+                    .args(["-xzf", &archive_str])
+                    .output()
+            } else {
+                Command::new("tar")
+                    .current_dir(target.parent().unwrap_or(Path::new("/")))
+                    .args(["-k", "-xzf", &archive_str])
+                    .output()
+            }
         }.map_err(|e| format!("tar Fehler: {}", e))?;
         
         if !tar_output.status.success() {
@@ -1436,11 +1596,38 @@ fn restore_homebrew_packages(backup_path: &Path, archive_name: &str, reinstall: 
     let temp_dir = std::env::temp_dir().join("macos-backup-restore");
     fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
     
-    let output = Command::new("tar")
-        .current_dir(&temp_dir)
-        .args(["-xzf", &archive.to_string_lossy()])
+    // Try zstd first, fallback to gzip for older backups
+    let zstd_available = Command::new("which")
+        .arg("zstd")
         .output()
-        .map_err(|e| e.to_string())?;
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    
+    let output = if zstd_available {
+        let zstd_result = Command::new("tar")
+            .current_dir(&temp_dir)
+            .args(["--use-compress-program=zstd -d", "-xf", &archive.to_string_lossy()])
+            .output();
+        
+        match zstd_result {
+            Ok(o) if !o.status.success() => {
+                // Fallback to gzip for older backups
+                Command::new("tar")
+                    .current_dir(&temp_dir)
+                    .args(["-xzf", &archive.to_string_lossy()])
+                    .output()
+                    .map_err(|e| e.to_string())?
+            }
+            Ok(o) => o,
+            Err(e) => return Err(e.to_string())
+        }
+    } else {
+        Command::new("tar")
+            .current_dir(&temp_dir)
+            .args(["-xzf", &archive.to_string_lossy()])
+            .output()
+            .map_err(|e| e.to_string())?
+    };
     
     if !output.status.success() {
         return Err("Entpacken fehlgeschlagen".to_string());
@@ -1511,11 +1698,38 @@ fn restore_mas_apps(backup_path: &Path, archive_name: &str, _reinstall: bool) ->
     let temp_dir = std::env::temp_dir().join("macos-backup-restore-mas");
     fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
     
-    let output = Command::new("tar")
-        .current_dir(&temp_dir)
-        .args(["-xzf", &archive.to_string_lossy()])
+    // Try zstd first, fallback to gzip for older backups
+    let zstd_available = Command::new("which")
+        .arg("zstd")
         .output()
-        .map_err(|e| e.to_string())?;
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    
+    let output = if zstd_available {
+        let zstd_result = Command::new("tar")
+            .current_dir(&temp_dir)
+            .args(["--use-compress-program=zstd -d", "-xf", &archive.to_string_lossy()])
+            .output();
+        
+        match zstd_result {
+            Ok(o) if !o.status.success() => {
+                // Fallback to gzip for older backups
+                Command::new("tar")
+                    .current_dir(&temp_dir)
+                    .args(["-xzf", &archive.to_string_lossy()])
+                    .output()
+                    .map_err(|e| e.to_string())?
+            }
+            Ok(o) => o,
+            Err(e) => return Err(e.to_string())
+        }
+    } else {
+        Command::new("tar")
+            .current_dir(&temp_dir)
+            .args(["-xzf", &archive.to_string_lossy()])
+            .output()
+            .map_err(|e| e.to_string())?
+    };
     
     if !output.status.success() {
         return Err("Entpacken fehlgeschlagen".to_string());
@@ -1526,25 +1740,104 @@ fn restore_mas_apps(backup_path: &Path, archive_name: &str, _reinstall: bool) ->
         return Err("App-Liste nicht gefunden".to_string());
     }
     
+    // Get list of currently installed apps
+    let installed_before = Command::new("/bin/zsh")
+        .args(["-l", "-c", "mas list"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    
     let file_content = fs::read_to_string(&apps_file).map_err(|e| e.to_string())?;
-    let mut count = 0;
+    let mut apps_to_install: Vec<String> = Vec::new();
     
     for line in file_content.lines() {
-        if line.is_empty() { continue; }
-        // Format: "app_id app_name" - we only need the id
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if let Some(app_id) = parts.first() {
-            // mas install will skip already installed apps automatically
-            let _ = Command::new("/bin/zsh")
-                .args(["-l", "-c", &format!("mas install {}", app_id)])
-                .output();
-            count += 1;
+        if line.is_empty() || !line.starts_with("mas ") { continue; }
+        
+        // Format: mas "App Name", id: 123456
+        if let Some(id_part) = line.split("id: ").nth(1) {
+            let app_id = id_part.trim();
+            
+            // Check if already installed (always skip - reinstall makes no sense for MAS)
+            if installed_before.contains(app_id) {
+                continue;
+            }
+            
+            apps_to_install.push(app_id.to_string());
         }
     }
     
     let _ = fs::remove_dir_all(&temp_dir);
-    Ok(count)
+    
+    // If no apps need to be installed, return 0
+    if apps_to_install.is_empty() {
+        return Ok(0);
+    }
+    
+    // Build the mas install command for all apps
+    let app_ids = apps_to_install.join(" ");
+    let num_to_install = apps_to_install.len();
+    
+    // Create a temporary script that will run mas install and write a marker file when done
+    let script_path = std::env::temp_dir().join("mas_install.sh");
+    let marker_path = std::env::temp_dir().join("mas_install_done.marker");
+    
+    // Remove old marker if exists
+    let _ = fs::remove_file(&marker_path);
+    
+    let script_content = format!(
+        "#!/bin/zsh\nexport PATH=\"/opt/homebrew/bin:$PATH\"\nmas install {}\necho \"done\" > \"{}\"\necho \"\nInstallation abgeschlossen. Dieses Fenster kann geschlossen werden.\"\nread -k1\n",
+        app_ids,
+        marker_path.to_string_lossy()
+    );
+    
+    if fs::write(&script_path, &script_content).is_err() {
+        return Err("Konnte Installations-Skript nicht erstellen".to_string());
+    }
+    
+    // Make the script executable
+    let _ = Command::new("chmod")
+        .args(["+x", &script_path.to_string_lossy()])
+        .output();
+    
+    // Open Terminal and run the script
+    let result = Command::new("open")
+        .args(["-a", "Terminal", &script_path.to_string_lossy()])
+        .output();
+    
+    if result.is_err() {
+        return Err("Konnte Terminal nicht öffnen".to_string());
+    }
+    
+    // Wait for installation to complete by checking for marker file
+    // No timeout - wait as long as needed for downloads to complete
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        
+        // Check if marker file exists (script finished)
+        if marker_path.exists() {
+            // Clean up marker
+            let _ = fs::remove_file(&marker_path);
+            break;
+        }
+    }
+    
+    // Check how many were actually installed
+    let check = Command::new("/bin/zsh")
+        .args(["-l", "-c", "mas list"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    
+    let installed_count = apps_to_install.iter()
+        .filter(|id| check.contains(id.as_str()))
+        .count();
+    
+    // Clean up
+    let _ = fs::remove_file(&script_path);
+    
+    Ok(installed_count)
 }
+
 
 fn restore_vscode_extensions(backup_path: &Path, archive_name: &str, _reinstall: bool) -> Result<usize, String> {
     let archive = backup_path.join(archive_name);
@@ -1552,11 +1845,38 @@ fn restore_vscode_extensions(backup_path: &Path, archive_name: &str, _reinstall:
     let temp_dir = std::env::temp_dir().join("macos-backup-restore-vscode");
     fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
     
-    let output = Command::new("tar")
-        .current_dir(&temp_dir)
-        .args(["-xzf", &archive.to_string_lossy()])
+    // Try zstd first, fallback to gzip for older backups
+    let zstd_available = Command::new("which")
+        .arg("zstd")
         .output()
-        .map_err(|e| e.to_string())?;
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    
+    let output = if zstd_available {
+        let zstd_result = Command::new("tar")
+            .current_dir(&temp_dir)
+            .args(["--use-compress-program=zstd -d", "-xf", &archive.to_string_lossy()])
+            .output();
+        
+        match zstd_result {
+            Ok(o) if !o.status.success() => {
+                // Fallback to gzip for older backups
+                Command::new("tar")
+                    .current_dir(&temp_dir)
+                    .args(["-xzf", &archive.to_string_lossy()])
+                    .output()
+                    .map_err(|e| e.to_string())?
+            }
+            Ok(o) => o,
+            Err(e) => return Err(e.to_string())
+        }
+    } else {
+        Command::new("tar")
+            .current_dir(&temp_dir)
+            .args(["-xzf", &archive.to_string_lossy()])
+            .output()
+            .map_err(|e| e.to_string())?
+    };
     
     if !output.status.success() {
         return Err("Entpacken fehlgeschlagen".to_string());
@@ -1602,21 +1922,25 @@ fn restore_vscode_extensions(backup_path: &Path, archive_name: &str, _reinstall:
 
 #[tauri::command]
 fn delete_backup(target_path: String, timestamp: String) -> Result<(), String> {
-    let backup_path = PathBuf::from(&target_path)
-        .join("macos-backup-suite")
-        .join("data")
-        .join(&timestamp);
+    let suite_root = PathBuf::from(&target_path).join("macos-backup-suite");
+    
+    let backup_path = suite_root.join("data").join(&timestamp);
     
     if !backup_path.exists() {
         return Err(format!("Backup {} nicht gefunden", timestamp));
     }
     
-    // Remove the backup directory recursively
+    // Remove the backup data directory recursively
     fs::remove_dir_all(&backup_path)
-        .map_err(|e| format!("Fehler beim Löschen: {}", e))?;
+        .map_err(|e| format!("Fehler beim Löschen (data): {}", e))?;
+    
+    // Also remove the inventories directory for this timestamp
+    let inventories_path = suite_root.join("inventories").join(&timestamp);
+    if inventories_path.exists() {
+        let _ = fs::remove_dir_all(&inventories_path);
+    }
     
     // Update latest.json if we deleted the latest backup
-    let suite_root = PathBuf::from(&target_path).join("macos-backup-suite");
     let latest_path = suite_root.join("latest.json");
     
     if latest_path.exists() {
@@ -1748,6 +2072,17 @@ fn build_menu(app_handle: &AppHandle) -> Result<(), Box<dyn std::error::Error>> 
 #[tauri::command]
 fn cancel_backup() -> Result<(), String> {
     BACKUP_CANCELLED.store(true, Ordering::SeqCst);
+    
+    // Kill any running tar process
+    let pid = TAR_PID.load(Ordering::SeqCst);
+    if pid > 0 {
+        // Kill the process group to also kill zstd child
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGTERM);
+        }
+        TAR_PID.store(0, Ordering::SeqCst);
+    }
+    
     Ok(())
 }
 

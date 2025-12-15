@@ -28,3 +28,5 @@ tar = "0.4"
 walkdir = "2"
 dirs = "5"
 tauri-plugin-store = "2.4.1"
+
+libc = "0.2"
