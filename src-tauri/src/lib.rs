@@ -945,6 +945,109 @@ async fn create_backup(
         });
     }
     
+
+    // Archive Homebrew packages as a restorable item
+    if let Ok(brewfile) = get_brew_packages() {
+        let brew_archive_name = "homebrew-packages.tar.gz";
+        let brew_archive_path = backup_root.join(brew_archive_name);
+        let brew_temp = std::env::temp_dir().join("homebrew_packages.txt");
+        let _ = fs::write(&brew_temp, &brewfile);
+        
+        if brew_temp.exists() {
+            let source_size = fs::metadata(&brew_temp).map(|m| m.len()).unwrap_or(0);
+            let file = fs::File::create(&brew_archive_path).map_err(|e| e.to_string())?;
+            let encoder = GzEncoder::new(file, Compression::default());
+            let mut archive = tar::Builder::new(encoder);
+            archive.append_path_with_name(&brew_temp, "homebrew_packages.txt").map_err(|e| e.to_string())?;
+            archive.finish().map_err(|e| e.to_string())?;
+            
+            let archive_size = fs::metadata(&brew_archive_path).map(|m| m.len()).unwrap_or(0);
+            let hash = hash_file(&brew_archive_path)?;
+            
+            items.push(BackupItem {
+                path: "homebrew-packages".to_string(),
+                archive: brew_archive_name.to_string(),
+                hash,
+                archive_size_bytes: archive_size,
+                source_size_bytes: source_size,
+            });
+            let _ = window.emit("backup-log", format!("Homebrew-Pakete archiviert: {} Bytes", source_size));
+        }
+        let _ = fs::remove_file(&brew_temp);
+    }
+    
+    // Archive MAS apps as a restorable item
+    {
+        let mas_temp = std::env::temp_dir().join("mas_apps.txt");
+        if let Ok(brewfile) = get_brew_packages() {
+            let mas_lines: Vec<&str> = brewfile.lines()
+                .filter(|line| line.trim().starts_with("mas "))
+                .collect();
+            if !mas_lines.is_empty() {
+                let mas_content = mas_lines.join("
+");
+                let _ = fs::write(&mas_temp, &mas_content);
+            }
+        }
+        
+        if mas_temp.exists() {
+            let mas_archive_name = "mas-apps.tar.gz";
+            let mas_archive_path = backup_root.join(mas_archive_name);
+            let source_size = fs::metadata(&mas_temp).map(|m| m.len()).unwrap_or(0);
+            
+            let file = fs::File::create(&mas_archive_path).map_err(|e| e.to_string())?;
+            let encoder = GzEncoder::new(file, Compression::default());
+            let mut archive = tar::Builder::new(encoder);
+            archive.append_path_with_name(&mas_temp, "mas_apps.txt").map_err(|e| e.to_string())?;
+            archive.finish().map_err(|e| e.to_string())?;
+            
+            let archive_size = fs::metadata(&mas_archive_path).map(|m| m.len()).unwrap_or(0);
+            let hash = hash_file(&mas_archive_path)?;
+            
+            items.push(BackupItem {
+                path: "mas-apps".to_string(),
+                archive: mas_archive_name.to_string(),
+                hash,
+                archive_size_bytes: archive_size,
+                source_size_bytes: source_size,
+            });
+            let _ = window.emit("backup-log", format!("MAS Apps archiviert: {} Bytes", source_size));
+            let _ = fs::remove_file(&mas_temp);
+        }
+    }
+    
+    // Archive VS Code extensions as a restorable item
+    if let Ok(extensions) = get_vscode_extensions() {
+        let vscode_archive_name = "vscode-extensions.tar.gz";
+        let vscode_archive_path = backup_root.join(vscode_archive_name);
+        let vscode_temp = std::env::temp_dir().join("vscode_extensions.txt");
+        let vscode_content = extensions.join("
+");
+        let _ = fs::write(&vscode_temp, &vscode_content);
+        
+        if vscode_temp.exists() {
+            let source_size = fs::metadata(&vscode_temp).map(|m| m.len()).unwrap_or(0);
+            let file = fs::File::create(&vscode_archive_path).map_err(|e| e.to_string())?;
+            let encoder = GzEncoder::new(file, Compression::default());
+            let mut archive = tar::Builder::new(encoder);
+            archive.append_path_with_name(&vscode_temp, "vscode_extensions.txt").map_err(|e| e.to_string())?;
+            archive.finish().map_err(|e| e.to_string())?;
+            
+            let archive_size = fs::metadata(&vscode_archive_path).map(|m| m.len()).unwrap_or(0);
+            let hash = hash_file(&vscode_archive_path)?;
+            
+            items.push(BackupItem {
+                path: "vscode-extensions".to_string(),
+                archive: vscode_archive_name.to_string(),
+                hash,
+                archive_size_bytes: archive_size,
+                source_size_bytes: source_size,
+            });
+            let _ = window.emit("backup-log", format!("VS Code Extensions archiviert: {} Extensions", extensions.len()));
+        }
+        let _ = fs::remove_file(&vscode_temp);
+    }
+
     let end = Local::now();
     let end_time_str = end.format("%d.%m.%Y %H:%M:%S").to_string();
     let duration = (end - start).num_seconds() as u64;
@@ -1181,6 +1284,12 @@ async fn restore_items(
         
         // Special handling for different item types
         if item_path == "homebrew-packages" {
+            // Skip package restore if overwrite is false (packages already installed)
+            if !overwrite {
+                let _ = window.emit("restore-log", format!("⏭️ Homebrew-Pakete übersprungen (nicht überschreiben)"));
+                skipped.push(item_path.clone());
+                continue;
+            }
             let _ = window.emit("restore-log", format!("Installiere Homebrew-Pakete..."));
             match restore_homebrew_packages(&backup_path, &backup_item.archive) {
                 Ok(count) => {
@@ -1196,6 +1305,12 @@ async fn restore_items(
         }
         
         if item_path == "mas-apps" {
+            // Skip package restore if overwrite is false
+            if !overwrite {
+                let _ = window.emit("restore-log", format!("⏭️ MAS Apps übersprungen (nicht überschreiben)"));
+                skipped.push(item_path.clone());
+                continue;
+            }
             let _ = window.emit("restore-log", format!("Installiere Mac App Store Apps..."));
             match restore_mas_apps(&backup_path, &backup_item.archive) {
                 Ok(count) => {
@@ -1211,6 +1326,12 @@ async fn restore_items(
         }
         
         if item_path == "vscode-extensions" {
+            // Skip package restore if overwrite is false
+            if !overwrite {
+                let _ = window.emit("restore-log", format!("⏭️ VS Code Extensions übersprungen (nicht überschreiben)"));
+                skipped.push(item_path.clone());
+                continue;
+            }
             let _ = window.emit("restore-log", format!("Installiere VS Code Extensions..."));
             match restore_vscode_extensions(&backup_path, &backup_item.archive) {
                 Ok(count) => {
@@ -1336,7 +1457,7 @@ fn restore_homebrew_packages(backup_path: &Path, archive_name: &str) -> Result<u
     }
     
     // Read packages list
-    let packages_file = temp_dir.join("homebrew-packages.txt");
+    let packages_file = temp_dir.join("homebrew_packages.txt");
     if !packages_file.exists() {
         return Err("Paketliste nicht gefunden".to_string());
     }
@@ -1379,7 +1500,7 @@ fn restore_mas_apps(backup_path: &Path, archive_name: &str) -> Result<usize, Str
         return Err("Entpacken fehlgeschlagen".to_string());
     }
     
-    let apps_file = temp_dir.join("mas-apps.txt");
+    let apps_file = temp_dir.join("mas_apps.txt");
     if !apps_file.exists() {
         return Err("App-Liste nicht gefunden".to_string());
     }
@@ -1419,7 +1540,7 @@ fn restore_vscode_extensions(backup_path: &Path, archive_name: &str) -> Result<u
         return Err("Entpacken fehlgeschlagen".to_string());
     }
     
-    let ext_file = temp_dir.join("vscode-extensions.txt");
+    let ext_file = temp_dir.join("vscode_extensions.txt");
     if !ext_file.exists() {
         return Err("Extensions-Liste nicht gefunden".to_string());
     }
