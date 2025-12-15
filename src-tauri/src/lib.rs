@@ -1284,17 +1284,17 @@ async fn restore_items(
         
         // Special handling for different item types
         if item_path == "homebrew-packages" {
-            // Skip package restore if overwrite is false (packages already installed)
-            if !overwrite {
-                let _ = window.emit("restore-log", format!("⏭️ Homebrew-Pakete übersprungen (nicht überschreiben)"));
-                skipped.push(item_path.clone());
-                continue;
-            }
-            let _ = window.emit("restore-log", format!("Installiere Homebrew-Pakete..."));
-            match restore_homebrew_packages(&backup_path, &backup_item.archive) {
+            let action = if overwrite { "Reinstalliere" } else { "Installiere fehlende" };
+            let _ = window.emit("restore-log", format!("{} Homebrew-Pakete...", action));
+            match restore_homebrew_packages(&backup_path, &backup_item.archive, overwrite) {
                 Ok(count) => {
-                    restored.push(format!("{} ({} Pakete)", item_path, count));
-                    let _ = window.emit("restore-log", format!("✅ {} Homebrew-Pakete installiert", count));
+                    if count > 0 {
+                        restored.push(format!("{} ({} neu installiert)", item_path, count));
+                        let _ = window.emit("restore-log", format!("✅ {} Homebrew-Pakete neu installiert/aktualisiert", count));
+                    } else {
+                        restored.push(format!("{} (alle bereits vorhanden)", item_path));
+                        let _ = window.emit("restore-log", format!("✅ Alle Homebrew-Pakete waren bereits installiert"));
+                    }
                 }
                 Err(e) => {
                     errors.push(format!("{}: {}", item_path, e));
@@ -1305,14 +1305,9 @@ async fn restore_items(
         }
         
         if item_path == "mas-apps" {
-            // Skip package restore if overwrite is false
-            if !overwrite {
-                let _ = window.emit("restore-log", format!("⏭️ MAS Apps übersprungen (nicht überschreiben)"));
-                skipped.push(item_path.clone());
-                continue;
-            }
-            let _ = window.emit("restore-log", format!("Installiere Mac App Store Apps..."));
-            match restore_mas_apps(&backup_path, &backup_item.archive) {
+            let action = if overwrite { "Reinstalliere" } else { "Installiere fehlende" };
+            let _ = window.emit("restore-log", format!("{} Mac App Store Apps...", action));
+            match restore_mas_apps(&backup_path, &backup_item.archive, overwrite) {
                 Ok(count) => {
                     restored.push(format!("{} ({} Apps)", item_path, count));
                     let _ = window.emit("restore-log", format!("✅ {} MAS Apps installiert", count));
@@ -1326,14 +1321,9 @@ async fn restore_items(
         }
         
         if item_path == "vscode-extensions" {
-            // Skip package restore if overwrite is false
-            if !overwrite {
-                let _ = window.emit("restore-log", format!("⏭️ VS Code Extensions übersprungen (nicht überschreiben)"));
-                skipped.push(item_path.clone());
-                continue;
-            }
-            let _ = window.emit("restore-log", format!("Installiere VS Code Extensions..."));
-            match restore_vscode_extensions(&backup_path, &backup_item.archive) {
+            let action = if overwrite { "Reinstalliere" } else { "Installiere fehlende" };
+            let _ = window.emit("restore-log", format!("{} VS Code Extensions...", action));
+            match restore_vscode_extensions(&backup_path, &backup_item.archive, overwrite) {
                 Ok(count) => {
                     restored.push(format!("{} ({} Extensions)", item_path, count));
                     let _ = window.emit("restore-log", format!("✅ {} VS Code Extensions installiert", count));
@@ -1439,7 +1429,7 @@ fn extract_tar_gz(archive: &Path, target: &Path, overwrite: bool) -> Result<(), 
     Ok(())
 }
 
-fn restore_homebrew_packages(backup_path: &Path, archive_name: &str) -> Result<usize, String> {
+fn restore_homebrew_packages(backup_path: &Path, archive_name: &str, reinstall: bool) -> Result<usize, String> {
     let archive = backup_path.join(archive_name);
     
     // Extract to temp dir
@@ -1456,35 +1446,66 @@ fn restore_homebrew_packages(backup_path: &Path, archive_name: &str) -> Result<u
         return Err("Entpacken fehlgeschlagen".to_string());
     }
     
-    // Read packages list
+    // The file is a Brewfile, rename it for brew bundle
     let packages_file = temp_dir.join("homebrew_packages.txt");
+    let brewfile = temp_dir.join("Brewfile");
     if !packages_file.exists() {
         return Err("Paketliste nicht gefunden".to_string());
     }
     
-    let content = fs::read_to_string(&packages_file).map_err(|e| e.to_string())?;
-    let packages: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
-    let count = packages.len();
+    // Rename to Brewfile for brew bundle
+    fs::rename(&packages_file, &brewfile).map_err(|e| e.to_string())?;
+    
+    // Count entries (brew and cask lines only, not mas - those are handled separately)
+    let file_content = fs::read_to_string(&brewfile).map_err(|e| e.to_string())?;
+    let count = file_content.lines()
+        .filter(|l| l.starts_with("brew ") || l.starts_with("cask ") || l.starts_with("tap "))
+        .count();
     
     if count == 0 {
+        let _ = fs::remove_dir_all(&temp_dir);
         return Ok(0);
     }
     
-    // Install packages using brew
-    let output = Command::new("brew")
-        .args(["install"])
-        .args(&packages)
+    // Use brew bundle to install from Brewfile
+    // --force will reinstall already installed packages
+    let force_flag = if reinstall { " --force" } else { "" };
+    let output = Command::new("/bin/zsh")
+        .args(["-l", "-c", &format!("cd {:?} && brew bundle{}", temp_dir, force_flag)])
         .output()
-        .map_err(|e| format!("brew Fehler: {}", e))?;
+        .map_err(|e| format!("brew bundle Fehler: {}", e))?;
     
     // Cleanup
     let _ = fs::remove_dir_all(&temp_dir);
     
-    // brew install returns 0 even if some packages fail, so we consider it success
-    Ok(count)
+    // Parse output to count what was actually installed/upgraded
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let installed = stdout.lines()
+        .filter(|l| l.starts_with("Installing ") || l.starts_with("Upgrading "))
+        .count();
+    let already_present = stdout.lines()
+        .filter(|l| l.starts_with("Using "))
+        .count();
+    
+    // brew bundle returns non-zero if some packages fail, but we still count it as partial success
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Only error if completely failed
+        if stderr.contains("error") && installed == 0 {
+            return Err(format!("brew bundle fehlgeschlagen: {}", stderr));
+        }
+    }
+    
+    // Return installed count, or if nothing new was installed, return the already_present count with a note
+    if installed > 0 {
+        Ok(installed)
+    } else {
+        // All packages were already present - return 0 to indicate nothing new
+        Ok(0)
+    }
 }
 
-fn restore_mas_apps(backup_path: &Path, archive_name: &str) -> Result<usize, String> {
+fn restore_mas_apps(backup_path: &Path, archive_name: &str, _reinstall: bool) -> Result<usize, String> {
     let archive = backup_path.join(archive_name);
     
     let temp_dir = std::env::temp_dir().join("macos-backup-restore-mas");
@@ -1505,16 +1526,17 @@ fn restore_mas_apps(backup_path: &Path, archive_name: &str) -> Result<usize, Str
         return Err("App-Liste nicht gefunden".to_string());
     }
     
-    let content = fs::read_to_string(&apps_file).map_err(|e| e.to_string())?;
+    let file_content = fs::read_to_string(&apps_file).map_err(|e| e.to_string())?;
     let mut count = 0;
     
-    for line in content.lines() {
+    for line in file_content.lines() {
         if line.is_empty() { continue; }
         // Format: "app_id app_name" - we only need the id
         let parts: Vec<&str> = line.split_whitespace().collect();
         if let Some(app_id) = parts.first() {
-            let _ = Command::new("mas")
-                .args(["install", app_id])
+            // mas install will skip already installed apps automatically
+            let _ = Command::new("/bin/zsh")
+                .args(["-l", "-c", &format!("mas install {}", app_id)])
                 .output();
             count += 1;
         }
@@ -1524,7 +1546,7 @@ fn restore_mas_apps(backup_path: &Path, archive_name: &str) -> Result<usize, Str
     Ok(count)
 }
 
-fn restore_vscode_extensions(backup_path: &Path, archive_name: &str) -> Result<usize, String> {
+fn restore_vscode_extensions(backup_path: &Path, archive_name: &str, _reinstall: bool) -> Result<usize, String> {
     let archive = backup_path.join(archive_name);
     
     let temp_dir = std::env::temp_dir().join("macos-backup-restore-vscode");
@@ -1545,19 +1567,37 @@ fn restore_vscode_extensions(backup_path: &Path, archive_name: &str) -> Result<u
         return Err("Extensions-Liste nicht gefunden".to_string());
     }
     
-    let content = fs::read_to_string(&ext_file).map_err(|e| e.to_string())?;
-    let extensions: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
-    let count = extensions.len();
+    let file_content = fs::read_to_string(&ext_file).map_err(|e| e.to_string())?;
+    let extensions: Vec<&str> = file_content.lines().filter(|l| !l.is_empty()).collect();
+    let total = extensions.len();
+    let mut installed = 0;
     
-    // Install extensions
+    // Install extensions using shell to get proper PATH
+    // --force flag only used when reinstall/overwrite is enabled
     for ext in &extensions {
-        let _ = Command::new("code")
-            .args(["--install-extension", ext, "--force"])
+        let cmd = if _reinstall {
+            format!("code --install-extension {} --force", ext)
+        } else {
+            format!("code --install-extension {}", ext)
+        };
+        let result = Command::new("/bin/zsh")
+            .args(["-l", "-c", &cmd])
             .output();
+        
+        if let Ok(output) = result {
+            if output.status.success() {
+                installed += 1;
+            }
+        }
     }
     
     let _ = fs::remove_dir_all(&temp_dir);
-    Ok(count)
+    
+    if installed == 0 && total > 0 {
+        return Err(format!("Keine Extensions installiert (0/{})", total));
+    }
+    
+    Ok(installed)
 }
 
 #[tauri::command]
