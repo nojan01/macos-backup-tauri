@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>macOS Backup Suite</title>
+  <link rel="stylesheet" href="/src/styles.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="header-top">
+        <h1>🛡️ macOS Backup Suite</h1>
+        <div class="header-controls">
+          <button id="btn-settings" class="icon-btn" title="Einstellungen">⚙️</button>
+          <button id="btn-language" class="icon-btn" title="Sprache wechseln">🌐</button>
+          <button id="btn-theme" class="icon-btn" title="Design wechseln">🌓</button>
+        </div>
+      </div>
+      <p id="status">Bereit</p>
+    </header>
+
+    <!-- Full Disk Access Warning -->
+    <div id="fda-warning" class="fda-warning" style="display: none;"></div>
+
+    <main>
+      <!-- Row 1 -->
+      <div class="two-column-layout">
+        <!-- Left: Backup-Ziel -->
+        <section class="section">
+          <h2>📁 Backup-Ziel</h2>
+          <div class="form-group">
+            <label for="volume-select">Volume:</label>
+            <div class="input-group">
+              <select id="volume-select">
+                <option value="">Bitte wählen...</option>
+              </select>
+              <button id="refresh-volumes" title="Volumes aktualisieren">🔄</button>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Zielverzeichnis:</label>
+            <div class="input-group target-path-group">
+              <span id="target-path-display" class="path-display">Nicht ausgewählt</span>
+              <button id="browse-target" title="Verzeichnis auswählen">📂</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Right: Zu sichernde Ordner -->
+        <section class="section">
+          <h2>📂 Zu sichernde Ordner</h2>
+          <ul id="directories-list" class="directories-list"></ul>
+          <div class="button-row">
+            <button id="add-directory" class="btn-secondary">+ Ordner hinzufügen</button>
+            <button id="add-user-directory" class="btn-secondary">👤 Benutzerordner...</button>
+            <button id="add-system-configs" class="btn-secondary" title="Wichtige Konfig-Dateien für schnelle Wiederherstellung">📦 System-Configs</button>
+            <button id="reset-directories" class="btn-secondary">↻ Zurücksetzen</button>
+          </div>
+        </section>
+      </div>
+
+      <!-- Row 2 -->
+      <div class="two-column-layout">
+        <!-- Left: Aktionen -->
+        <section class="section">
+          <h2>🚀 Aktionen</h2>
+          <div class="button-row primary-actions">
+            <button id="btn-backup" class="btn-primary">Backup erstellen</button>
+            <button id="btn-cancel" class="btn-danger" style="display: none;">Abbrechen</button>
+            <button id="btn-restore" class="btn-secondary">Wiederherstellen</button>
+          </div>
+          
+          <div class="progress-section">
+            <p id="progress-message">Bereit</p>
+            <div class="progress-bar">
+              <div id="progress-fill" class="progress-fill"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Right: Vorhandene Backups -->
+        <section class="section">
+          <h2>🔄 Vorhandene Backups</h2>
+          <div class="form-group">
+            <select id="backup-select">
+              <option value="">Backup wählen...</option>
+            </select>
+          </div>
+          <div class="button-row">
+            <button id="show-files" class="btn-secondary">📋 Dateien anzeigen</button>
+            <button id="btn-restore-test" class="btn-secondary">✓ Verifizieren</button>
+            <button id="btn-delete-backup" class="btn-danger">🗑️ Löschen</button>
+          </div>
+        </section>
+      </div>
+
+      <!-- Row 3: Log Section - Full Width -->
+      <section class="section log-section">
+        <h2>📜 Protokoll</h2>
+        <pre id="log-output"></pre>
+        <div class="button-row">
+          <button id="copy-log" class="btn-secondary">📋 Kopieren</button>
+          <button id="save-log" class="btn-secondary">�� Speichern</button>
+          <button id="clear-log" class="btn-secondary">🗑️ Löschen</button>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <p>macOS Backup Suite v1.0 – Sichere Datensicherung für deinen Mac</p>
+    </footer>
+  </div>
+
+  <script type="module" src="/src/main.ts"></script>
+
+  <!-- Settings Modal -->
+  <dialog id="settings-dialog" class="modal">
+    <div class="modal-content">
+      <h2>⚙️ <span data-i18n="settings">Einstellungen</span></h2>
+      
+      <div class="settings-section">
+        <h3><span data-i18n="defaultFolders">Standard-Ordner</span></h3>
+        <p class="settings-hint"><span data-i18n="defaultFoldersHint">Diese Ordner werden beim Zurücksetzen verwendet:</span></p>
+        <ul id="default-directories-list" class="directories-list"></ul>
+        <div class="button-row">
+          <button id="add-default-directory" class="btn-secondary">+ <span data-i18n="addFolder">Ordner hinzufügen</span></button>
+        </div>
+      </div>
+      
+      <div class="modal-actions">
+        <button id="settings-cancel" class="btn-secondary"><span data-i18n="cancel">Abbrechen</span></button>
+        <button id="settings-save" class="btn-primary"><span data-i18n="save">Speichern</span></button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- User Folder Picker Modal -->
+  <dialog id="user-folder-dialog" class="modal">
+    <div class="modal-content modal-large">
+      <h2>👥 <span data-i18n="selectUserFolder">Benutzerordner auswählen</span></h2>
+      
+      <div class="user-folder-section">
+        <ul id="user-folder-list" class="user-folder-list"></ul>
+      </div>
+      
+      <div class="modal-actions">
+        <button id="user-folder-close" class="btn-secondary"><span data-i18n="close">Schließen</span></button>
+      </div>
+    </div>
+  </dialog>
+</body>
+</html>

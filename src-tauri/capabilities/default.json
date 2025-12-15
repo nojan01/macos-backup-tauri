@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default permissions for the macOS Backup Suite",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "opener:default",
+    "dialog:default",
+    "fs:default",
+    "fs:allow-home-read-recursive",
+    "fs:allow-home-write-recursive",
+    "shell:default",
+    "shell:allow-execute",
+    "notification:default",
+    "store:default"
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "macOS Backup Suite",
+  "version": "1.0.0",
+  "identifier": "com.nojan.macos-backup-suite",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "macOS Backup Suite",
+        "width": 1020,
+        "height": 720,
+        "minWidth": 960,
+        "minHeight": 660,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["dmg", "app"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "DeveloperTool",
+    "shortDescription": "Backup & Restore für macOS",
+    "longDescription": "GUI-Tool zum Erfassen von Software-Inventar, Sichern von Ordnern auf externe Laufwerke und Wiederherstellen inklusive Homebrew, MAS und VS Code Extensions.",
+    "macOS": {
+      "minimumSystemVersion": "12.0",
+      "entitlements": null
+    }
+  }
+}
