@@ -149,5 +149,36 @@
       </div>
     </div>
   </dialog>
-</body>
+
+    <!-- Restore Modal -->
+    <div id="restore-modal" class="restore-overlay" style="display: none;">
+      <div class="modal-content restore-modal-content">
+        <h2 id="restore-modal-title">🔄 Wiederherstellung</h2>
+        <p id="restore-select-text">Elemente zur Wiederherstellung auswählen:</p>
+        
+        <div class="restore-actions-top">
+          <button id="restore-select-all" class="btn-small">Alle auswählen</button>
+          <button id="restore-deselect-all" class="btn-small">Alle abwählen</button>
+        </div>
+        
+        <div id="restore-items-list" class="restore-items-list">
+          <!-- Items will be populated dynamically -->
+        </div>
+        
+        <div class="restore-options">
+          <label class="checkbox-label">
+            <input type="checkbox" id="restore-overwrite" />
+            <span id="overwrite-label">Bestehende Dateien überschreiben</span>
+          </label>
+          <p class="hint" id="overwrite-hint">Wenn deaktiviert, werden existierende Dateien übersprungen</p>
+        </div>
+        
+        <div class="modal-buttons">
+          <button id="restore-cancel" class="btn-secondary">Abbrechen</button>
+          <button id="restore-start" class="btn-primary">🔄 Wiederherstellen</button>
+        </div>
+      </div>
+    </div>
+
+  </body>
 </html>

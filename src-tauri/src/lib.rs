@@ -149,6 +149,16 @@ pub struct FullDiskAccessStatus {
     pub inaccessible_paths: Vec<String>,
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct RestoreResult {
+    pub restored_count: usize,
+    pub skipped_count: usize,
+    pub error_count: usize,
+    pub restored: Vec<String>,
+    pub skipped: Vec<String>,
+    pub errors: Vec<String>,
+}
+
 fn get_config_path() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_default();
     home.join(".macos_backup_suite").join("config.json")
@@ -1125,6 +1135,311 @@ fn list_backups(target_path: String) -> Result<Vec<BackupListItem>, String> {
 }
 
 #[tauri::command]
+async fn restore_items(
+    target_path: String,
+    timestamp: String,
+    items: Vec<String>,
+    overwrite: bool,
+    window: tauri::Window,
+) -> Result<RestoreResult, String> {
+    let backup_path = PathBuf::from(&target_path)
+        .join("macos-backup-suite")
+        .join("data")
+        .join(&timestamp);
+    
+    let metadata_path = backup_path.join("metadata.json");
+    if !metadata_path.exists() {
+        return Err(format!("Backup nicht gefunden: {}", timestamp));
+    }
+    
+    let metadata_content = fs::read_to_string(&metadata_path)
+        .map_err(|e| format!("Fehler beim Lesen der Metadaten: {}", e))?;
+    let metadata: BackupMetadata = serde_json::from_str(&metadata_content)
+        .map_err(|e| format!("Fehler beim Parsen: {}", e))?;
+    
+    let home = dirs::home_dir().ok_or("Home-Verzeichnis nicht gefunden")?;
+    let mut restored: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    
+    let total = items.len();
+    
+    for (i, item_path) in items.iter().enumerate() {
+        let progress = ((i + 1) * 100) / total;
+        let _ = window.emit("restore-progress", serde_json::json!({
+            "progress": progress,
+            "message": format!("Stelle wieder her: {}", item_path)
+        }));
+        
+        // Find the backup item
+        let backup_item = metadata.items.iter().find(|it| &it.path == item_path);
+        if backup_item.is_none() {
+            errors.push(format!("{}: Nicht im Backup gefunden", item_path));
+            continue;
+        }
+        let backup_item = backup_item.unwrap();
+        
+        // Special handling for different item types
+        if item_path == "homebrew-packages" {
+            let _ = window.emit("restore-log", format!("Installiere Homebrew-Pakete..."));
+            match restore_homebrew_packages(&backup_path, &backup_item.archive) {
+                Ok(count) => {
+                    restored.push(format!("{} ({} Pakete)", item_path, count));
+                    let _ = window.emit("restore-log", format!("✅ {} Homebrew-Pakete installiert", count));
+                }
+                Err(e) => {
+                    errors.push(format!("{}: {}", item_path, e));
+                    let _ = window.emit("restore-log", format!("❌ Homebrew-Fehler: {}", e));
+                }
+            }
+            continue;
+        }
+        
+        if item_path == "mas-apps" {
+            let _ = window.emit("restore-log", format!("Installiere Mac App Store Apps..."));
+            match restore_mas_apps(&backup_path, &backup_item.archive) {
+                Ok(count) => {
+                    restored.push(format!("{} ({} Apps)", item_path, count));
+                    let _ = window.emit("restore-log", format!("✅ {} MAS Apps installiert", count));
+                }
+                Err(e) => {
+                    errors.push(format!("{}: {}", item_path, e));
+                    let _ = window.emit("restore-log", format!("❌ MAS-Fehler: {}", e));
+                }
+            }
+            continue;
+        }
+        
+        if item_path == "vscode-extensions" {
+            let _ = window.emit("restore-log", format!("Installiere VS Code Extensions..."));
+            match restore_vscode_extensions(&backup_path, &backup_item.archive) {
+                Ok(count) => {
+                    restored.push(format!("{} ({} Extensions)", item_path, count));
+                    let _ = window.emit("restore-log", format!("✅ {} VS Code Extensions installiert", count));
+                }
+                Err(e) => {
+                    errors.push(format!("{}: {}", item_path, e));
+                    let _ = window.emit("restore-log", format!("❌ VS Code-Fehler: {}", e));
+                }
+            }
+            continue;
+        }
+        
+        // Regular directory/file restore
+        let archive_path = backup_path.join(&backup_item.archive);
+        if !archive_path.exists() {
+            errors.push(format!("{}: Archiv nicht gefunden", item_path));
+            continue;
+        }
+        
+        // Determine target path
+        let target = if item_path.starts_with("~/") {
+            home.join(&item_path[2..])
+        } else if item_path.starts_with('/') {
+            PathBuf::from(item_path)
+        } else {
+            home.join(item_path)
+        };
+        
+        // Check if target exists
+        if target.exists() && !overwrite {
+            skipped.push(format!("{}: Existiert bereits", item_path));
+            let _ = window.emit("restore-log", format!("⏭️ Übersprungen: {} (existiert)", item_path));
+            continue;
+        }
+        
+        // Extract archive
+        let _ = window.emit("restore-log", format!("📦 Extrahiere: {}", item_path));
+        match extract_tar_gz(&archive_path, &target, overwrite) {
+            Ok(_) => {
+                restored.push(item_path.clone());
+                let _ = window.emit("restore-log", format!("✅ Wiederhergestellt: {}", item_path));
+            }
+            Err(e) => {
+                errors.push(format!("{}: {}", item_path, e));
+                let _ = window.emit("restore-log", format!("❌ Fehler: {} - {}", item_path, e));
+            }
+        }
+    }
+    
+    Ok(RestoreResult {
+        restored_count: restored.len(),
+        skipped_count: skipped.len(),
+        error_count: errors.len(),
+        restored,
+        skipped,
+        errors,
+    })
+}
+
+fn extract_tar_gz(archive: &Path, target: &Path, overwrite: bool) -> Result<(), String> {
+    // Create parent directory if needed
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Fehler beim Erstellen des Verzeichnisses: {}", e))?;
+    }
+    
+    // Check if target exists and we're not overwriting
+    if !overwrite && target.exists() {
+        return Err("Ziel existiert bereits und Überschreiben ist deaktiviert".to_string());
+    }
+    
+    // Use ditto to extract (better for macOS, preserves attributes, merges into existing dirs)
+    // ditto extracts archives and merges with existing directories
+    let output = Command::new("ditto")
+        .args(["-x", "-k", &archive.to_string_lossy(), &target.parent().unwrap_or(Path::new("/")).to_string_lossy()])
+        .output()
+        .map_err(|e| format!("ditto Fehler: {}", e))?;
+    
+    if !output.status.success() {
+        // Fallback to tar if ditto fails (for .tar.gz files)
+        // macOS tar overwrites by default, use -k to keep existing
+        let archive_str = archive.to_string_lossy().to_string();
+        let tar_output = if overwrite {
+            Command::new("tar")
+                .current_dir(target.parent().unwrap_or(Path::new("/")))
+                .args(["-xzf", &archive_str])
+                .output()
+        } else {
+            Command::new("tar")
+                .current_dir(target.parent().unwrap_or(Path::new("/")))
+                .args(["-k", "-xzf", &archive_str])
+                .output()
+        }.map_err(|e| format!("tar Fehler: {}", e))?;
+        
+        if !tar_output.status.success() {
+            let tar_stderr = String::from_utf8_lossy(&tar_output.stderr);
+            // -k causes error if files exist but that's expected when not overwriting
+            if !(overwrite == false && tar_stderr.contains("exist")) {
+                return Err(format!("Extraktion fehlgeschlagen: {}", tar_stderr));
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+fn restore_homebrew_packages(backup_path: &Path, archive_name: &str) -> Result<usize, String> {
+    let archive = backup_path.join(archive_name);
+    
+    // Extract to temp dir
+    let temp_dir = std::env::temp_dir().join("macos-backup-restore");
+    fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+    
+    let output = Command::new("tar")
+        .current_dir(&temp_dir)
+        .args(["-xzf", &archive.to_string_lossy()])
+        .output()
+        .map_err(|e| e.to_string())?;
+    
+    if !output.status.success() {
+        return Err("Entpacken fehlgeschlagen".to_string());
+    }
+    
+    // Read packages list
+    let packages_file = temp_dir.join("homebrew-packages.txt");
+    if !packages_file.exists() {
+        return Err("Paketliste nicht gefunden".to_string());
+    }
+    
+    let content = fs::read_to_string(&packages_file).map_err(|e| e.to_string())?;
+    let packages: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+    let count = packages.len();
+    
+    if count == 0 {
+        return Ok(0);
+    }
+    
+    // Install packages using brew
+    let output = Command::new("brew")
+        .args(["install"])
+        .args(&packages)
+        .output()
+        .map_err(|e| format!("brew Fehler: {}", e))?;
+    
+    // Cleanup
+    let _ = fs::remove_dir_all(&temp_dir);
+    
+    // brew install returns 0 even if some packages fail, so we consider it success
+    Ok(count)
+}
+
+fn restore_mas_apps(backup_path: &Path, archive_name: &str) -> Result<usize, String> {
+    let archive = backup_path.join(archive_name);
+    
+    let temp_dir = std::env::temp_dir().join("macos-backup-restore-mas");
+    fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+    
+    let output = Command::new("tar")
+        .current_dir(&temp_dir)
+        .args(["-xzf", &archive.to_string_lossy()])
+        .output()
+        .map_err(|e| e.to_string())?;
+    
+    if !output.status.success() {
+        return Err("Entpacken fehlgeschlagen".to_string());
+    }
+    
+    let apps_file = temp_dir.join("mas-apps.txt");
+    if !apps_file.exists() {
+        return Err("App-Liste nicht gefunden".to_string());
+    }
+    
+    let content = fs::read_to_string(&apps_file).map_err(|e| e.to_string())?;
+    let mut count = 0;
+    
+    for line in content.lines() {
+        if line.is_empty() { continue; }
+        // Format: "app_id app_name" - we only need the id
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if let Some(app_id) = parts.first() {
+            let _ = Command::new("mas")
+                .args(["install", app_id])
+                .output();
+            count += 1;
+        }
+    }
+    
+    let _ = fs::remove_dir_all(&temp_dir);
+    Ok(count)
+}
+
+fn restore_vscode_extensions(backup_path: &Path, archive_name: &str) -> Result<usize, String> {
+    let archive = backup_path.join(archive_name);
+    
+    let temp_dir = std::env::temp_dir().join("macos-backup-restore-vscode");
+    fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+    
+    let output = Command::new("tar")
+        .current_dir(&temp_dir)
+        .args(["-xzf", &archive.to_string_lossy()])
+        .output()
+        .map_err(|e| e.to_string())?;
+    
+    if !output.status.success() {
+        return Err("Entpacken fehlgeschlagen".to_string());
+    }
+    
+    let ext_file = temp_dir.join("vscode-extensions.txt");
+    if !ext_file.exists() {
+        return Err("Extensions-Liste nicht gefunden".to_string());
+    }
+    
+    let content = fs::read_to_string(&ext_file).map_err(|e| e.to_string())?;
+    let extensions: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+    let count = extensions.len();
+    
+    // Install extensions
+    for ext in &extensions {
+        let _ = Command::new("code")
+            .args(["--install-extension", ext, "--force"])
+            .output();
+    }
+    
+    let _ = fs::remove_dir_all(&temp_dir);
+    Ok(count)
+}
+
+#[tauri::command]
 fn delete_backup(target_path: String, timestamp: String) -> Result<(), String> {
     let backup_path = PathBuf::from(&target_path)
         .join("macos-backup-suite")
@@ -1304,6 +1619,7 @@ pub fn run() {
             create_backup,
             list_backups,
             delete_backup,
+            restore_items,
             list_backup_files,
             verify_backup,
             cancel_backup,

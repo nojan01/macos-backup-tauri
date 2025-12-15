@@ -22,6 +22,58 @@ interface BackupItem {
   hash_verified: boolean;
 }
 
+interface BackupFileInfo {
+  path: string;
+  archive: string;
+  archive_size_bytes: number;
+  source_size_bytes: number;
+}
+
+interface BackupDetails {
+  timestamp: string;
+  items: BackupFileInfo[];
+  total_source_size_bytes: number;
+  total_archive_size_bytes: number;
+  start_time: string;
+  end_time: string;
+  duration_seconds: number;
+}
+
+interface RestoreResult {
+  restored_count: number;
+  skipped_count: number;
+  error_count: number;
+  restored: string[];
+  skipped: string[];
+  errors: string[];
+}
+
+interface BackupFileInfo {
+  path: string;
+  archive: string;
+  archive_size_bytes: number;
+  source_size_bytes: number;
+}
+
+interface BackupDetails {
+  timestamp: string;
+  items: BackupFileInfo[];
+  total_source_size_bytes: number;
+  total_archive_size_bytes: number;
+  start_time: string;
+  end_time: string;
+  duration_seconds: number;
+}
+
+interface RestoreResult {
+  restored_count: number;
+  skipped_count: number;
+  error_count: number;
+  restored: string[];
+  skipped: string[];
+  errors: string[];
+}
+
 interface Volume {
   name: string;
   path: string;
@@ -144,6 +196,20 @@ const translations: Record<string, Record<string, string>> = {
     addSystemConfigs: "System-Configs",
     systemConfigsAdded: "System-Konfigurationspfade hinzugefügt:",
     systemConfigsHint: "Wichtige Konfig-Dateien für schnelle Wiederherstellung",
+    restoreModalTitle: "Wiederherstellung",
+    selectItemsToRestore: "Elemente zur Wiederherstellung auswählen:",
+    overwriteExisting: "Bestehende Dateien überschreiben",
+    overwriteHint: "Wenn deaktiviert, werden existierende Dateien übersprungen",
+    startRestore: "Wiederherstellen",
+    cancelRestore: "Abbrechen",
+    selectAll: "Alle auswählen",
+    deselectAll: "Alle abwählen",
+    restoreComplete: "Wiederherstellung abgeschlossen",
+    restoredItems: "Wiederhergestellt",
+    skippedItems: "Übersprungen",
+    errorItems: "Fehler",
+    restoring: "Wiederherstellen von",
+    noItemsSelected: "Keine Elemente ausgewählt!",
   },
   en: {
     ready: "Ready",
@@ -264,6 +330,13 @@ const btnRestoreTest = document.getElementById("btn-restore-test") as HTMLButton
 const backupSelect = document.getElementById("backup-select") as HTMLSelectElement;
 const showFilesBtn = document.getElementById("show-files") as HTMLButtonElement;
 const btnDeleteBackup = document.getElementById("btn-delete-backup") as HTMLButtonElement;
+const restoreModal = document.getElementById("restore-modal") as HTMLDivElement;
+const restoreItemsList = document.getElementById("restore-items-list") as HTMLDivElement;
+const restoreSelectAll = document.getElementById("restore-select-all") as HTMLButtonElement;
+const restoreDeselectAll = document.getElementById("restore-deselect-all") as HTMLButtonElement;
+const restoreOverwrite = document.getElementById("restore-overwrite") as HTMLInputElement;
+const restoreCancel = document.getElementById("restore-cancel") as HTMLButtonElement;
+const restoreStart = document.getElementById("restore-start") as HTMLButtonElement;
 const progressMessage = document.getElementById("progress-message") as HTMLParagraphElement;
 const progressFill = document.getElementById("progress-fill") as HTMLDivElement;
 const logOutput = document.getElementById("log-output") as HTMLPreElement;
@@ -1067,8 +1140,135 @@ btnRestore.addEventListener("click", async () => {
     return;
   }
   
-  log(`${t("restoreStarted")} ${timestamp}...`);
-  log(t("restoreComingSoon"));
+  const targetPath = getFullTargetPath();
+  if (!targetPath) {
+    log(t("selectTargetFirst"));
+    return;
+  }
+  
+  try {
+    const details = await invoke<BackupDetails>("list_backup_files", {
+      targetPath: targetPath,
+      timestamp: timestamp,
+    });
+    showRestoreModal(details);
+  } catch (e) {
+    log(`❌ Fehler beim Laden der Backup-Details: ${e}`);
+  }
+});
+
+function showRestoreModal(details: BackupDetails): void {
+  document.getElementById("restore-modal-title")!.textContent = `🔄 ${t("restoreModalTitle")} - ${formatTimestamp(details.timestamp)}`;
+  document.getElementById("restore-select-text")!.textContent = t("selectItemsToRestore");
+  document.getElementById("overwrite-label")!.textContent = t("overwriteExisting");
+  document.getElementById("overwrite-hint")!.textContent = t("overwriteHint");
+  restoreSelectAll.textContent = t("selectAll");
+  restoreDeselectAll.textContent = t("deselectAll");
+  restoreCancel.textContent = t("cancelRestore");
+  restoreStart.textContent = `🔄 ${t("startRestore")}`;
+  
+  restoreItemsList.innerHTML = "";
+  for (const item of details.items) {
+    const icon = getRestoreItemIcon(item.path);
+    const size = formatRestoreBytes(item.source_size_bytes);
+    const div = document.createElement("div");
+    div.className = "restore-item";
+    div.innerHTML = `
+      <input type="checkbox" class="restore-checkbox" value="${item.path}" checked />
+      <span class="restore-item-icon">${icon}</span>
+      <div class="restore-item-info">
+        <div class="restore-item-path">${item.path}</div>
+        <div class="restore-item-size">${size}</div>
+      </div>
+    `;
+    restoreItemsList.appendChild(div);
+  }
+  restoreModal.style.display = "flex";
+}
+
+function getRestoreItemIcon(path: string): string {
+  if (path === "homebrew-packages") return "🍺";
+  if (path === "mas-apps") return "🛒";
+  if (path === "vscode-extensions") return "💻";
+  if (path.includes("ssh")) return "🔑";
+  if (path.includes("config")) return "⚙️";
+  if (path.includes("Documents")) return "📄";
+  if (path.includes("Desktop")) return "🖥️";
+  if (path.includes("Pictures")) return "🖼️";
+  if (path.includes("Music")) return "🎵";
+  if (path.includes("Downloads")) return "📥";
+  return "📁";
+}
+
+function formatRestoreBytes(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
+}
+
+restoreSelectAll.addEventListener("click", () => {
+  restoreItemsList.querySelectorAll<HTMLInputElement>(".restore-checkbox").forEach(cb => cb.checked = true);
+});
+
+restoreDeselectAll.addEventListener("click", () => {
+  restoreItemsList.querySelectorAll<HTMLInputElement>(".restore-checkbox").forEach(cb => cb.checked = false);
+});
+
+restoreCancel.addEventListener("click", () => {
+  restoreModal.style.display = "none";
+});
+
+restoreStart.addEventListener("click", async () => {
+  const selectedItems: string[] = [];
+  restoreItemsList.querySelectorAll<HTMLInputElement>(".restore-checkbox:checked").forEach(cb => {
+    selectedItems.push(cb.value);
+  });
+  
+  if (selectedItems.length === 0) {
+    log(t("noItemsSelected"));
+    return;
+  }
+  
+  const overwrite = restoreOverwrite.checked;
+  const timestamp = backupSelect.value;
+  const targetPath = getFullTargetPath();
+  
+  restoreModal.style.display = "none";
+  log(`🔄 ${t("restoring")} ${selectedItems.length} Elemente...`);
+  
+  try {
+    const result = await invoke<RestoreResult>("restore_items", {
+      targetPath: targetPath,
+      timestamp: timestamp,
+      items: selectedItems,
+      overwrite: overwrite,
+    });
+    
+    log(`✅ ${t("restoreComplete")}:`);
+    log(`   ${t("restoredItems")}: ${result.restored_count}`);
+    if (result.skipped_count > 0) {
+      log(`   ${t("skippedItems")}: ${result.skipped_count}`);
+    }
+    if (result.error_count > 0) {
+      log(`   ${t("errorItems")}: ${result.error_count}`);
+      for (const err of result.errors) {
+        log(`   ❌ ${err}`);
+      }
+    }
+  } catch (e) {
+    log(`❌ Restore-Fehler: ${e}`);
+  }
+});
+
+listen("restore-log", (event: { payload: string }) => {
+  log(event.payload);
+});
+
+listen("restore-progress", (event: { payload: { progress: number; message: string } }) => {
+  progressFill.style.width = `${event.payload.progress}%`;
+  progressMessage.textContent = event.payload.message;
 });
 
 btnRestoreTest.addEventListener("click", async () => {
