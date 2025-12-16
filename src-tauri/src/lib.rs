@@ -989,7 +989,9 @@ async fn create_backup(
             let encoder = GzEncoder::new(file, Compression::default());
             let mut archive = tar::Builder::new(encoder);
             archive.append_path_with_name(&expanded, &name).map_err(|e| e.to_string())?;
-            archive.finish().map_err(|e| e.to_string())?;
+            // Finish tar archive and get back the GzEncoder, then finish the GzEncoder to flush all data
+            let encoder = archive.into_inner().map_err(|e| e.to_string())?;
+            encoder.finish().map_err(|e| e.to_string())?;
         } else {
             create_tar_gz(&expanded, &archive_path)?;
         }
@@ -1035,7 +1037,9 @@ async fn create_backup(
             let encoder = GzEncoder::new(file, Compression::default());
             let mut archive = tar::Builder::new(encoder);
             archive.append_path_with_name(&brew_temp, "homebrew_packages.txt").map_err(|e| e.to_string())?;
-            archive.finish().map_err(|e| e.to_string())?;
+            // Finish tar archive and get back the GzEncoder, then finish the GzEncoder to flush all data
+            let encoder = archive.into_inner().map_err(|e| e.to_string())?;
+            encoder.finish().map_err(|e| e.to_string())?;
             
             let archive_size = fs::metadata(&brew_archive_path).map(|m| m.len()).unwrap_or(0);
             let hash = hash_file(&brew_archive_path)?;
@@ -1075,7 +1079,9 @@ async fn create_backup(
             let encoder = GzEncoder::new(file, Compression::default());
             let mut archive = tar::Builder::new(encoder);
             archive.append_path_with_name(&mas_temp, "mas_apps.txt").map_err(|e| e.to_string())?;
-            archive.finish().map_err(|e| e.to_string())?;
+            // Finish tar archive and get back the GzEncoder, then finish the GzEncoder to flush all data
+            let encoder = archive.into_inner().map_err(|e| e.to_string())?;
+            encoder.finish().map_err(|e| e.to_string())?;
             
             let archive_size = fs::metadata(&mas_archive_path).map(|m| m.len()).unwrap_or(0);
             let hash = hash_file(&mas_archive_path)?;
@@ -1107,7 +1113,9 @@ async fn create_backup(
             let encoder = GzEncoder::new(file, Compression::default());
             let mut archive = tar::Builder::new(encoder);
             archive.append_path_with_name(&vscode_temp, "vscode_extensions.txt").map_err(|e| e.to_string())?;
-            archive.finish().map_err(|e| e.to_string())?;
+            // Finish tar archive and get back the GzEncoder, then finish the GzEncoder to flush all data
+            let encoder = archive.into_inner().map_err(|e| e.to_string())?;
+            encoder.finish().map_err(|e| e.to_string())?;
             
             let archive_size = fs::metadata(&vscode_archive_path).map(|m| m.len()).unwrap_or(0);
             let hash = hash_file(&vscode_archive_path)?;
@@ -1339,6 +1347,57 @@ fn list_backups(target_path: String) -> Result<Vec<BackupListItem>, String> {
     
     backups.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     Ok(backups)
+}
+
+#[tauri::command]
+fn get_manual_apps_from_backup(target_path: String, timestamp: String) -> Result<Vec<String>, String> {
+    let inventory_path = PathBuf::from(&target_path)
+        .join("macos-backup-suite")
+        .join("inventories")
+        .join(&timestamp)
+        .join("manual_apps.txt");
+    
+    if !inventory_path.exists() {
+        return Err("Datei manual_apps.txt nicht gefunden".to_string());
+    }
+    
+    let content = fs::read_to_string(&inventory_path)
+        .map_err(|e| format!("Fehler beim Lesen: {}", e))?;
+    
+    let apps: Vec<String> = content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.to_string())
+        .collect();
+    
+    Ok(apps)
+}
+
+#[tauri::command]
+fn show_help_window(app_handle: tauri::AppHandle) -> Result<(), String> {
+    use tauri::WebviewUrl;
+    
+    // Check if help window already exists
+    if let Some(window) = app_handle.get_webview_window("help") {
+        window.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    
+    // Create help window
+    let help_window = tauri::WebviewWindowBuilder::new(
+        &app_handle,
+        "help",
+        WebviewUrl::App("help.html".into())
+    )
+    .title("macOS Backup Suite - Hilfe")
+    .inner_size(800.0, 600.0)
+    .resizable(true)
+    .build()
+    .map_err(|e| e.to_string())?;
+    
+    help_window.set_focus().map_err(|e| e.to_string())?;
+    
+    Ok(())
 }
 
 #[tauri::command]
@@ -1670,7 +1729,7 @@ fn restore_homebrew_packages(backup_path: &Path, archive_name: &str, reinstall: 
     let installed = stdout.lines()
         .filter(|l| l.starts_with("Installing ") || l.starts_with("Upgrading "))
         .count();
-    let already_present = stdout.lines()
+    let _already_present = stdout.lines()
         .filter(|l| l.starts_with("Using "))
         .count();
     
@@ -1775,7 +1834,7 @@ fn restore_mas_apps(backup_path: &Path, archive_name: &str, _reinstall: bool) ->
     
     // Build the mas install command for all apps
     let app_ids = apps_to_install.join(" ");
-    let num_to_install = apps_to_install.len();
+    let _num_to_install = apps_to_install.len();
     
     // Create a temporary script that will run mas install and write a marker file when done
     let script_path = std::env::temp_dir().join("mas_install.sh");
@@ -2111,6 +2170,7 @@ pub fn run() {
             get_brew_packages,
             get_mas_apps,
             get_manual_apps,
+            get_manual_apps_from_backup,
             get_vscode_extensions,
             create_backup,
             list_backups,
@@ -2125,6 +2185,7 @@ pub fn run() {
             check_full_disk_access,
             open_privacy_settings,
             restart_app,
+            show_help_window,
             get_window_state,
             save_window_state,
         ])

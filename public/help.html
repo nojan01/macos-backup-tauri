@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>macOS Backup Suite - Hilfe</title>
+    <style>
+        :root {
+            --bg-primary: #1a1a2e;
+            --bg-secondary: #16213e;
+            --bg-card: #1f2940;
+            --text-primary: #e8e8e8;
+            --text-secondary: #a0a0a0;
+            --accent: #4a90d9;
+            --accent-hover: #5ba0e9;
+            --success: #4ade80;
+            --warning: #fbbf24;
+            --danger: #f87171;
+        }
+        
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+            background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
+            color: var(--text-primary);
+            line-height: 1.6;
+            min-height: 100vh;
+            padding: 2rem;
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        
+        h1 {
+            font-size: 2rem;
+            margin-bottom: 1.5rem;
+            color: var(--accent);
+            border-bottom: 2px solid var(--accent);
+            padding-bottom: 0.5rem;
+        }
+        
+        h2 {
+            font-size: 1.4rem;
+            margin: 2rem 0 1rem;
+            color: var(--text-primary);
+        }
+        
+        h3 {
+            font-size: 1.1rem;
+            margin: 1.5rem 0 0.5rem;
+            color: var(--accent);
+        }
+        
+        p {
+            margin-bottom: 1rem;
+            color: var(--text-secondary);
+        }
+        
+        .section {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+        
+        ul, ol {
+            margin-left: 1.5rem;
+            margin-bottom: 1rem;
+            color: var(--text-secondary);
+        }
+        
+        li {
+            margin-bottom: 0.5rem;
+        }
+        
+        .emoji {
+            font-size: 1.2rem;
+            margin-right: 0.5rem;
+        }
+        
+        .shortcut {
+            display: inline-block;
+            background: var(--bg-secondary);
+            border: 1px solid var(--accent);
+            border-radius: 4px;
+            padding: 0.1rem 0.5rem;
+            font-family: monospace;
+            font-size: 0.9rem;
+            color: var(--accent);
+        }
+        
+        .tip {
+            background: rgba(74, 144, 217, 0.1);
+            border-left: 4px solid var(--accent);
+            padding: 1rem;
+            margin: 1rem 0;
+            border-radius: 0 8px 8px 0;
+        }
+        
+        .warning {
+            background: rgba(251, 191, 36, 0.1);
+            border-left: 4px solid var(--warning);
+            padding: 1rem;
+            margin: 1rem 0;
+            border-radius: 0 8px 8px 0;
+        }
+        
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin: 1rem 0;
+        }
+        
+        .feature-item {
+            background: var(--bg-secondary);
+            border-radius: 8px;
+            padding: 1rem;
+            text-align: center;
+        }
+        
+        .feature-item .emoji {
+            font-size: 2rem;
+            display: block;
+            margin-bottom: 0.5rem;
+        }
+        
+        footer {
+            text-align: center;
+            margin-top: 2rem;
+            padding-top: 1rem;
+            border-top: 1px solid var(--bg-card);
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📖 macOS Backup Suite - Hilfe</h1>
+        
+        <div class="section">
+            <h2><span class="emoji">👋</span>Willkommen</h2>
+            <p>Die <strong>macOS Backup Suite</strong> ist ein umfassendes Backup- und Wiederherstellungswerkzeug für Ihren Mac. Es sichert nicht nur Ihre Dateien, sondern auch Ihre gesamte Software-Konfiguration.</p>
+            
+            <div class="feature-grid">
+                <div class="feature-item">
+                    <span class="emoji">📁</span>
+                    <strong>Ordner-Backup</strong>
+                    <p>Sichern Sie wichtige Ordner</p>
+                </div>
+                <div class="feature-item">
+                    <span class="emoji">🍺</span>
+                    <strong>Homebrew</strong>
+                    <p>Paketlisten sichern</p>
+                </div>
+                <div class="feature-item">
+                    <span class="emoji">🛒</span>
+                    <strong>App Store</strong>
+                    <p>MAS-Apps erfassen</p>
+                </div>
+                <div class="feature-item">
+                    <span class="emoji">💻</span>
+                    <strong>VS Code</strong>
+                    <p>Extensions sichern</p>
+                </div>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2><span class="emoji">🚀</span>Schnellstart</h2>
+            <ol>
+                <li><strong>Backup-Ziel wählen:</strong> Wählen Sie ein externes Laufwerk oder Volume aus der Liste.</li>
+                <li><strong>Ordner auswählen:</strong> Markieren Sie die Ordner, die gesichert werden sollen.</li>
+                <li><strong>Backup starten:</strong> Klicken Sie auf "Backup starten" und warten Sie auf die Fertigstellung.</li>
+            </ol>
+            
+            <div class="tip">
+                <strong>💡 Tipp:</strong> Für ein vollständiges System-Backup aktivieren Sie auch die Systemkonfigurationen in den Einstellungen.
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2><span class="emoji">📦</span>Was wird gesichert?</h2>
+            
+            <h3>Ordner & Dateien</h3>
+            <p>Alle ausgewählten Ordner werden als komprimierte Archive (.tar.zst) gespeichert.</p>
+            
+            <h3>Software-Inventar</h3>
+            <ul>
+                <li><strong>Brewfile:</strong> Alle Homebrew-Formulas und Casks</li>
+                <li><strong>MAS Apps:</strong> Liste aller App Store Anwendungen</li>
+                <li><strong>VS Code Extensions:</strong> Alle installierten Erweiterungen</li>
+                <li><strong>Manuell installierte Apps:</strong> Apps, die nicht über Homebrew oder App Store installiert wurden</li>
+            </ul>
+            
+            <h3>Konfigurationsdateien</h3>
+            <ul>
+                <li><code>~/.ssh</code> - SSH-Schlüssel und Konfiguration</li>
+                <li><code>~/.zshrc</code> - Shell-Konfiguration</li>
+                <li><code>~/.gitconfig</code> - Git-Einstellungen</li>
+                <li><code>~/Library/Preferences</code> - App-Einstellungen</li>
+            </ul>
+        </div>
+        
+        <div class="section">
+            <h2><span class="emoji">♻️</span>Wiederherstellung</h2>
+            
+            <h3>Ordner wiederherstellen</h3>
+            <ol>
+                <li>Wählen Sie ein vorhandenes Backup aus</li>
+                <li>Klicken Sie auf "Wiederherstellen"</li>
+                <li>Wählen Sie die gewünschten Elemente</li>
+                <li>Bestätigen Sie die Wiederherstellung</li>
+            </ol>
+            
+            <h3>Software wiederherstellen</h3>
+            <p>Die Software-Wiederherstellung stellt automatisch her:</p>
+            <ul>
+                <li>Homebrew-Pakete über <code>brew bundle</code></li>
+                <li>App Store Apps über <code>mas install</code></li>
+                <li>VS Code Extensions über <code>code --install-extension</code></li>
+            </ul>
+            
+            <div class="warning">
+                <strong>⚠️ Wichtig:</strong> Für manuell installierte Apps zeigt die App eine Liste an. Diese müssen Sie selbst von den jeweiligen Websites herunterladen.
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2><span class="emoji">✓</span>Verifizierung</h2>
+            <p>Nach jedem Backup können Sie die Integrität prüfen:</p>
+            <ul>
+                <li>Wählen Sie ein Backup aus der Liste</li>
+                <li>Klicken Sie auf "Verifizieren"</li>
+                <li>Die App prüft alle SHA-256 Hashes</li>
+            </ul>
+            <p>Ein ✓ in der Backup-Liste zeigt an, dass die Verifizierung erfolgreich war.</p>
+        </div>
+        
+        <div class="section">
+            <h2><span class="emoji">⌨️</span>Tastenkürzel</h2>
+            <ul>
+                <li><span class="shortcut">⌘B</span> - Backup starten</li>
+                <li><span class="shortcut">⌘R</span> - Wiederherstellung starten</li>
+                <li><span class="shortcut">⌘V</span> - Backup verifizieren</li>
+                <li><span class="shortcut">⌘,</span> - Einstellungen öffnen</li>
+                <li><span class="shortcut">F1</span> - Diese Hilfe anzeigen</li>
+            </ul>
+        </div>
+        
+        <div class="section">
+            <h2><span class="emoji">🔒</span>Sicherheit & Datenschutz</h2>
+            <p>Die macOS Backup Suite benötigt <strong>Festplattenvollzugriff</strong> (Full Disk Access) um alle Systemdateien lesen zu können.</p>
+            
+            <h3>So aktivieren Sie den Vollzugriff:</h3>
+            <ol>
+                <li>Öffnen Sie <strong>Systemeinstellungen → Datenschutz & Sicherheit</strong></li>
+                <li>Wählen Sie <strong>Festplattenvollzugriff</strong></li>
+                <li>Fügen Sie die <strong>macOS Backup Suite</strong> hinzu</li>
+                <li>Starten Sie die App neu</li>
+            </ol>
+        </div>
+        
+        <div class="section">
+            <h2><span class="emoji">📂</span>Backup-Struktur</h2>
+            <p>Die Backups werden in folgender Struktur gespeichert:</p>
+            <pre style="background: var(--bg-secondary); padding: 1rem; border-radius: 8px; overflow-x: auto;">
+/Volumes/[Ziel]/macos-backup-suite/
+├── data/
+│   └── [timestamp]/
+│       ├── metadata.json
+│       ├── desktop.tar.zst
+│       ├── documents.tar.zst
+│       └── ...
+├── inventories/
+│   └── [timestamp]/
+│       ├── Brewfile
+│       ├── manual_apps.txt
+│       └── vscode_extensions.txt
+└── macOS Backup Suite.dmg
+            </pre>
+        </div>
+        
+        <div class="section">
+            <h2><span class="emoji">❓</span>Häufige Fragen</h2>
+            
+            <h3>Wie oft sollte ich ein Backup machen?</h3>
+            <p>Wir empfehlen mindestens wöchentliche Backups, idealerweise vor größeren Systemänderungen.</p>
+            
+            <h3>Kann ich Backups auf verschiedenen Laufwerken speichern?</h3>
+            <p>Ja! Wählen Sie einfach ein anderes Ziel-Volume aus. Jedes Backup enthält alle nötigen Informationen.</p>
+            
+            <h3>Was passiert bei einem Abbruch?</h3>
+            <p>Unvollständige Backups werden automatisch bereinigt. Nur vollständige Backups erscheinen in der Liste.</p>
+        </div>
+        
+        <footer>
+            <p>macOS Backup Suite v1.0 – © 2024</p>
+            <p>Bei Fragen oder Problemen erstellen Sie bitte ein Issue auf GitHub.</p>
+        </footer>
+    </div>
+</body>
+</html>

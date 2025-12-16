@@ -126,6 +126,12 @@ const translations: Record<string, Record<string, string>> = {
     deleteError: "Fehler beim Löschen:",
     selectBackup: "Backup wählen...",
     showFiles: "Dateien anzeigen",
+    showManualApps: "Manuelle Apps",
+    manualAppsTitle: "Manuell installierte Apps",
+    manualAppsDescription: "Diese Apps wurden nicht über Homebrew oder den App Store installiert und müssen manuell heruntergeladen werden:",
+    noManualApps: "Keine manuell installierten Apps gefunden.",
+    manualAppsError: "Fehler beim Laden der manuellen Apps:",
+    selectBackupForManualApps: "Bitte wählen Sie zuerst ein Backup aus!",
     verify: "Verifizieren",
     protocol: "Protokoll",
     copy: "Kopieren",
@@ -233,6 +239,12 @@ const translations: Record<string, Record<string, string>> = {
     deleteError: "Error deleting:",
     selectBackup: "Select backup...",
     showFiles: "Show Files",
+    showManualApps: "Manual Apps",
+    manualAppsTitle: "Manually Installed Apps",
+    manualAppsDescription: "These apps were not installed via Homebrew or App Store and need to be downloaded manually:",
+    noManualApps: "No manually installed apps found.",
+    manualAppsError: "Error loading manual apps:",
+    selectBackupForManualApps: "Please select a backup first!",
     verify: "Verify",
     protocol: "Log",
     copy: "Copy",
@@ -329,6 +341,7 @@ const btnRestore = document.getElementById("btn-restore") as HTMLButtonElement;
 const btnRestoreTest = document.getElementById("btn-restore-test") as HTMLButtonElement;
 const backupSelect = document.getElementById("backup-select") as HTMLSelectElement;
 const showFilesBtn = document.getElementById("show-files") as HTMLButtonElement;
+const showManualAppsBtn = document.getElementById("show-manual-apps") as HTMLButtonElement;
 const btnDeleteBackup = document.getElementById("btn-delete-backup") as HTMLButtonElement;
 const restoreModal = document.getElementById("restore-modal") as HTMLDivElement;
 const restoreItemsList = document.getElementById("restore-items-list") as HTMLDivElement;
@@ -484,9 +497,9 @@ function updateUITranslations(): void {
     }
   });
   
-  btnBackup.textContent = t("createBackup");
+  btnBackup.innerHTML = `📤 ${t("createBackup")}`;
   btnCancel.textContent = t("cancel");
-  btnRestore.textContent = t("restore");
+  btnRestore.innerHTML = `📥 ${t("restore")}`;
   addDirectoryBtn.innerHTML = `+ ${t("addFolder")}`;
   if (addUserDirectoryBtn) {
     addUserDirectoryBtn.innerHTML = `👤 ${t("addUserFolder")}`;
@@ -1401,6 +1414,53 @@ showFilesBtn.addEventListener("click", async () => {
   }
 });
 
+// Show manual apps handler
+showManualAppsBtn.addEventListener("click", async () => {
+  const timestamp = backupSelect.value;
+  if (!timestamp) {
+    log(t("selectBackupForManualApps"));
+    return;
+  }
+  
+  const fullPath = getFullTargetPath();
+  if (!fullPath) {
+    log(t("selectTargetFirst"));
+    return;
+  }
+  
+  try {
+    const manualApps: string[] = await invoke("get_manual_apps_from_backup", {
+      targetPath: fullPath,
+      timestamp: timestamp
+    });
+    
+    log("");
+    log(`=== 📦 ${t("manualAppsTitle")} (${timestamp}) ===`);
+    log("");
+    
+    if (manualApps.length === 0) {
+      log(t("noManualApps"));
+    } else {
+      log(t("manualAppsDescription"));
+      log("");
+      
+      // Sort alphabetically
+      manualApps.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+      
+      for (const app of manualApps) {
+        log(`   • ${app}`);
+      }
+      
+      log("");
+      log(`📊 ${manualApps.length} ${manualApps.length === 1 ? "App" : "Apps"} gefunden`);
+    }
+    
+    log("");
+  } catch (error) {
+    log(`❌ ${t("manualAppsError")} ${error}`);
+  }
+});
+
 // Delete backup handler
 btnDeleteBackup.addEventListener("click", async () => {
   const selectedBackup = backupSelect.value;
@@ -1626,3 +1686,12 @@ interface WindowState {
     moveTimeout = setTimeout(saveWindowState, 500);
   });
 })();
+
+// Global function for help menu
+(window as unknown as { showHelp: () => void }).showHelp = async function() {
+  try {
+    await invoke("show_help_window");
+  } catch (error) {
+    console.error("Error showing help:", error);
+  }
+};
