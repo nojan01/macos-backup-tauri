@@ -21,6 +21,18 @@
 
 ## ✨ Features
 
+### 🛡️ Allgemein
+- Dieses Programm ist kein Backup Programm im klassischen Sinn. Es installiert
+  nicht das Betriebssystem MacOS nach einem Crash oder während einer geplanten
+  Neuinstallation. Dieses Software ermöglicht es Ihre Software/ Apps, bestimmte
+  Betriebssystemsettings und Ihre persönlichen Ordner auf eine effiziente
+  Art wieder herzustellen. Dies ist besonders dann hilfreich wenn Ihr System
+  fehlerhaft ist, die Performance nicht Ihren Vorstellungen entspricht oder Ihr 
+  System mit allen möglichen nicht mehr benötigten Daten zugemüllt ist.
+  Programme, welche manuell, also nicht über den Apple App Store oder über Homebrew,
+  installiert wurden, müssen auch manuell wieder hergestellt werden. Eine Liste dieser
+  Programme wird erstellt.
+
 ### 📦 Backup
 - **Ordner-Backup** – Wichtige Verzeichnisse als komprimierte Archive (.tar.zst)
 - **Homebrew** – Paketlisten (Brewfile) + optionaler Cache (max. 2 GB)
