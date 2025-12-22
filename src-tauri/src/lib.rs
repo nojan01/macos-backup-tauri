@@ -1301,7 +1301,7 @@ async fn create_backup(
             if let Some(ref src) = resources_dmg {
                 if src.exists() {
                     if fs::copy(src, &dmg_dest).is_ok() {
-                        let _ = window.emit("backup-log", format!("App-Installer kopiert: {}", dmg_filename));
+                        let _ = window.emit("backup-log", format!("✅ App-Installer kopiert: {}", dmg_filename));
                         dmg_copied = true;
                     }
                 }
@@ -1309,8 +1309,33 @@ async fn create_backup(
         }
     }
     
+    // Fallback: Look in multiple locations
     if !dmg_copied {
-        let _ = window.emit("backup-log", "⚠️ App-Installer (DMG) nicht in App eingebettet");
+        let home = dirs::home_dir().unwrap_or_default();
+        let dev_paths = [
+            // Development build paths (relative)
+            PathBuf::from("src-tauri/target/release/bundle/dmg/macOS Backup Suite_1.0.0_aarch64.dmg"),
+            PathBuf::from("src-tauri/target/release/bundle/macos/macOS Backup Suite.app/Contents/Resources/macOS Backup Suite.dmg"),
+            // Common development locations (absolute)
+            home.join("Documents/GitHub/macos-backup-tauri/src-tauri/target/release/bundle/dmg/macOS Backup Suite_1.0.0_aarch64.dmg"),
+            home.join("Documents/GitHub/macos-backup-tauri/src-tauri/target/release/bundle/macos/macOS Backup Suite.app/Contents/Resources/macOS Backup Suite.dmg"),
+            // Applications folder
+            PathBuf::from("/Applications/macOS Backup Suite.app/Contents/Resources/macOS Backup Suite.dmg"),
+        ];
+        
+        for dev_path in &dev_paths {
+            if dev_path.exists() {
+                if fs::copy(dev_path, &dmg_dest).is_ok() {
+                    let _ = window.emit("backup-log", format!("✅ App-Installer kopiert: {}", dmg_filename));
+                    dmg_copied = true;
+                    break;
+                }
+            }
+        }
+    }
+    
+    if !dmg_copied {
+        let _ = window.emit("backup-log", "ℹ️ App-Installer (DMG) nicht gefunden - führen Sie 'npm run tauri build' aus");
     }
     
     let latest = serde_json::json!({
