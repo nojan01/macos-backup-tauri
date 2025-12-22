@@ -69,7 +69,9 @@ Laden Sie die neueste Version herunter:
 ## 🖥️ Screenshots
 
 <p align="center">
-  <em>Hauptfenster mit Backup-Übersicht</em>
+  <img src="docs/screenshots/main-window.png" alt="macOS Backup Suite - Hauptfenster" width="700">
+  <br>
+  <em>Hauptfenster mit Backup-Übersicht, Ordnerauswahl und Protokoll</em>
 </p>
 
 ---
