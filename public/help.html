@@ -159,17 +159,27 @@
                 <div class="feature-item">
                     <span class="emoji">🍺</span>
                     <strong>Homebrew</strong>
-                    <p>Paketlisten sichern</p>
+                    <p>Paketlisten + Cache</p>
                 </div>
                 <div class="feature-item">
                     <span class="emoji">🛒</span>
                     <strong>App Store</strong>
-                    <p>MAS-Apps erfassen</p>
+                    <p>MAS-Apps (4× parallel)</p>
                 </div>
                 <div class="feature-item">
                     <span class="emoji">💻</span>
                     <strong>VS Code</strong>
-                    <p>Extensions sichern</p>
+                    <p>Extensions (6× parallel)</p>
+                </div>
+                <div class="feature-item">
+                    <span class="emoji">🧭</span>
+                    <strong>Safari</strong>
+                    <p>Lesezeichen & Settings</p>
+                </div>
+                <div class="feature-item">
+                    <span class="emoji">⚡</span>
+                    <strong>Quick-Restore</strong>
+                    <p>Essentials in &lt;10 Min</p>
                 </div>
             </div>
         </div>
@@ -208,10 +218,39 @@
                 <li><code>~/.gitconfig</code> - Git-Einstellungen</li>
                 <li><code>~/Library/Preferences</code> - App-Einstellungen</li>
             </ul>
+            
+            <h3>🧭 Safari-Einstellungen (NEU)</h3>
+            <p>Aktivierbar in den Einstellungen – sichert alle Safari-Daten:</p>
+            <ul>
+                <li><strong>Bookmarks.plist</strong> - Alle Lesezeichen</li>
+                <li><strong>ReadingListArchives</strong> - Leseliste mit Offline-Inhalten</li>
+                <li><strong>Extensions</strong> - Installierte Safari-Erweiterungen</li>
+                <li><strong>TopSites.plist</strong> - Häufig besuchte Seiten</li>
+                <li><strong>LastSession.plist</strong> - Letzte Browser-Sitzung</li>
+                <li><strong>Preferences</strong> - Safari-Einstellungen</li>
+            </ul>
+            
+            <h3>🍺 Homebrew-Cache (NEU)</h3>
+            <p>Optional können Sie den Homebrew Download-Cache sichern (max. 2 GB):</p>
+            <ul>
+                <li>Ermöglicht Offline-Installationen bei der Wiederherstellung</li>
+                <li>Spart Zeit und Bandbreite beim Neuaufsetzen</li>
+                <li>Aktivierbar unter <strong>Einstellungen → Homebrew-Cache sichern</strong></li>
+            </ul>
         </div>
         
         <div class="section">
             <h2><span class="emoji">♻️</span>Wiederherstellung</h2>
+            
+            <h3>⚡ Quick-Restore (NEU)</h3>
+            <p>Mit dem <strong>Quick-Restore</strong> Button können Sie essentielle Pakete zuerst installieren:</p>
+            <ul>
+                <li><strong>Basis-Tools:</strong> git, vim, python, node, wget, curl, jq, zsh</li>
+                <li><strong>Essential Apps:</strong> VS Code, iTerm2, Chrome, Firefox, Alfred, Raycast</li>
+            </ul>
+            <div class="tip">
+                <strong>💡 Vorteil:</strong> Ihr System ist in unter 10 Minuten wieder arbeitsfähig, während der Rest im Hintergrund installiert wird.
+            </div>
             
             <h3>Ordner wiederherstellen</h3>
             <ol>
@@ -224,9 +263,11 @@
             <h3>Software wiederherstellen</h3>
             <p>Die Software-Wiederherstellung stellt automatisch her:</p>
             <ul>
-                <li>Homebrew-Pakete über <code>brew bundle</code></li>
-                <li>App Store Apps über <code>mas install</code></li>
-                <li>VS Code Extensions über <code>code --install-extension</code></li>
+                <li><strong>Homebrew-Pakete</strong> über <code>brew bundle</code></li>
+                <li><strong>App Store Apps</strong> über <code>mas install</code> – <span style="color: var(--success);">4 parallele Downloads (~60-80% schneller)</span></li>
+                <li><strong>VS Code Extensions</strong> über <code>code --install-extension</code> – <span style="color: var(--success);">6 parallele Installationen</span></li>
+                <li><strong>Safari-Einstellungen</strong> – Lesezeichen, Erweiterungen und Preferences</li>
+                <li><strong>Homebrew-Cache</strong> – Ermöglicht Offline-Installationen</li>
             </ul>
             
             <div class="warning">
@@ -240,7 +281,7 @@
             <ul>
                 <li>Wählen Sie ein Backup aus der Liste</li>
                 <li>Klicken Sie auf "Verifizieren"</li>
-                <li>Die App prüft alle SHA-256 Hashes</li>
+                <li>Die App prüft alle SHA-256 Hashes <strong>parallel</strong> (4 Threads, ~40% schneller)</li>
             </ul>
             <p>Ein ✓ in der Backup-Liste zeigt an, dass die Verifizierung erfolgreich war.</p>
         </div>
@@ -279,6 +320,8 @@
 │       ├── metadata.json
 │       ├── desktop.tar.zst
 │       ├── documents.tar.zst
+│       ├── safari-settings.tar.zst  (NEU)
+│       ├── homebrew-cache.tar.zst   (NEU)
 │       └── ...
 ├── inventories/
 │   └── [timestamp]/
@@ -303,7 +346,7 @@
         </div>
         
         <footer>
-            <p>macOS Backup Suite v1.0 – © 2024</p>
+            <p>macOS Backup Suite v1.1 – © 2024-2025</p>
             <p>Bei Fragen oder Problemen erstellen Sie bitte ein Issue auf GitHub.</p>
         </footer>
     </div>

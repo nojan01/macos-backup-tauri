@@ -129,6 +129,24 @@
         </div>
       </div>
       
+      <div class="settings-section">
+        <h3>🍺 Homebrew-Optionen</h3>
+        <label class="checkbox-label">
+          <input type="checkbox" id="backup-homebrew-cache" />
+          <span>Homebrew Download-Cache sichern (max. 2 GB)</span>
+        </label>
+        <p class="settings-hint">Ermöglicht Offline-Installationen beim Wiederherstellen</p>
+      </div>
+      
+      <div class="settings-section">
+        <h3>🧭 Safari-Einstellungen</h3>
+        <label class="checkbox-label">
+          <input type="checkbox" id="backup-safari-settings" />
+          <span>Safari-Einstellungen sichern</span>
+        </label>
+        <p class="settings-hint">Lesezeichen, Leseliste, Extensions, Top Sites</p>
+      </div>
+      
       <div class="modal-actions">
         <button id="settings-cancel" class="btn-secondary"><span data-i18n="cancel">Abbrechen</span></button>
         <button id="settings-save" class="btn-primary"><span data-i18n="save">Speichern</span></button>
@@ -160,6 +178,7 @@
         <div class="restore-actions-top">
           <button id="restore-select-all" class="btn-small">Alle auswählen</button>
           <button id="restore-deselect-all" class="btn-small">Alle abwählen</button>
+          <button id="restore-quick" class="btn-small btn-quick" title="Installiert nur essentielle Pakete zuerst (git, vim, python, node, VS Code, iTerm2, etc.)">⚡ Quick-Restore</button>
         </div>
         
         <div id="restore-items-list" class="restore-items-list">

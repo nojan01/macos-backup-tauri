@@ -553,6 +553,19 @@ footer {
   background: rgba(255, 255, 255, 0.35);
 }
 
+/* Quick-Restore Button */
+.btn-quick {
+  background: linear-gradient(135deg, #f5a623, #f57c00) !important;
+  color: white !important;
+  border: none !important;
+  font-weight: 600 !important;
+}
+
+.btn-quick:hover {
+  background: linear-gradient(135deg, #f7b84e, #f58920) !important;
+  transform: scale(1.02);
+}
+
 /* User Folder Picker */
 .modal-large {
   max-width: 550px;

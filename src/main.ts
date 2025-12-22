@@ -15,6 +15,8 @@ interface BackupConfig {
   default_directories: string[];
   language: string;
   theme: string;
+  backup_homebrew_cache: boolean;
+  backup_safari_settings: boolean;
 }
 
 interface BackupItem {
@@ -365,6 +367,9 @@ const defaultDirectoriesList = document.getElementById("default-directories-list
 const addDefaultDirectoryBtn = document.getElementById("add-default-directory") as HTMLButtonElement;
 const settingsCancelBtn = document.getElementById("settings-cancel") as HTMLButtonElement;
 const settingsSaveBtn = document.getElementById("settings-save") as HTMLButtonElement;
+const backupHomebrewCacheCheckbox = document.getElementById("backup-homebrew-cache") as HTMLInputElement;
+const backupSafariSettingsCheckbox = document.getElementById("backup-safari-settings") as HTMLInputElement;
+const restoreQuickBtn = document.getElementById("restore-quick") as HTMLButtonElement;
 const userFolderDialog = document.getElementById("user-folder-dialog") as HTMLDialogElement;
 const userFolderList = document.getElementById("user-folder-list") as HTMLUListElement;
 const userFolderCloseBtn = document.getElementById("user-folder-close") as HTMLButtonElement;
@@ -380,6 +385,8 @@ let config: BackupConfig = {
   default_directories: [],
   language: "de",
   theme: "auto",
+  backup_homebrew_cache: false,
+  backup_safari_settings: false,
 };
 
 let currentVolumes: Volume[] = [];
@@ -1208,6 +1215,8 @@ function getRestoreItemIcon(path: string): string {
   if (path === "homebrew-packages") return "🍺";
   if (path === "mas-apps") return "🛒";
   if (path === "vscode-extensions") return "💻";
+  if (path === "homebrew-cache") return "📦";
+  if (path === "safari-settings") return "🧭";
   if (path.includes("ssh")) return "🔑";
   if (path.includes("config")) return "⚙️";
   if (path.includes("Documents")) return "📄";
@@ -1237,6 +1246,52 @@ restoreDeselectAll.addEventListener("click", () => {
 restoreCancel.addEventListener("click", () => {
   restoreModal.style.display = "none";
 });
+
+// Quick-Restore: Install essential packages first for rapid productivity
+if (restoreQuickBtn) {
+  restoreQuickBtn.addEventListener("click", async () => {
+    const timestamp = backupSelect.value;
+    const targetPath = getFullTargetPath();
+    
+    if (!timestamp || !targetPath) {
+      log("❌ Kein Backup oder Ziel ausgewählt");
+      return;
+    }
+    
+    restoreModal.style.display = "none";
+    
+    progressFill.style.width = "0%";
+    progressFill.classList.add("animating");
+    progressMessage.textContent = "⚡ Quick-Restore: Installiere essentielle Pakete...";
+    
+    log("⚡ Quick-Restore gestartet...");
+    log("   Installiert: git, vim, python, node, curl, wget, VS Code, iTerm2, etc.");
+    
+    try {
+      const result = await invoke<RestoreResult>("quick_restore_essentials", {
+        targetPath: targetPath,
+        timestamp: timestamp,
+      });
+      
+      log(`✅ Quick-Restore abgeschlossen:`);
+      log(`   Installiert: ${result.restored_count}`);
+      if (result.skipped_count > 0) {
+        log(`   Übersprungen: ${result.skipped_count}`);
+      }
+      if (result.error_count > 0) {
+        log(`   Fehler: ${result.error_count}`);
+      }
+      
+      progressFill.classList.remove("animating");
+      progressFill.style.width = "100%";
+      progressMessage.textContent = "⚡ Quick-Restore abgeschlossen - System arbeitsfähig!";
+    } catch (e) {
+      log(`❌ Quick-Restore-Fehler: ${e}`);
+      progressFill.classList.remove("animating");
+      progressMessage.textContent = "Fehler bei Quick-Restore";
+    }
+  });
+}
 
 restoreStart.addEventListener("click", async () => {
   const selectedItems: string[] = [];
@@ -1532,6 +1587,13 @@ clearLogBtn.addEventListener("click", () => {
 btnSettings.addEventListener("click", () => {
   tempDefaultDirectories = [...config.default_directories];
   updateDefaultDirectoriesList();
+  // Load new settings checkboxes
+  if (backupHomebrewCacheCheckbox) {
+    backupHomebrewCacheCheckbox.checked = config.backup_homebrew_cache || false;
+  }
+  if (backupSafariSettingsCheckbox) {
+    backupSafariSettingsCheckbox.checked = config.backup_safari_settings || false;
+  }
   settingsDialog.showModal();
 });
 
@@ -1541,6 +1603,13 @@ settingsCancelBtn.addEventListener("click", () => {
 
 settingsSaveBtn.addEventListener("click", async () => {
   config.default_directories = [...tempDefaultDirectories];
+  // Save new settings
+  if (backupHomebrewCacheCheckbox) {
+    config.backup_homebrew_cache = backupHomebrewCacheCheckbox.checked;
+  }
+  if (backupSafariSettingsCheckbox) {
+    config.backup_safari_settings = backupSafariSettingsCheckbox.checked;
+  }
   await saveConfig();
   log(t("settingsSaved"));
   settingsDialog.close();
