@@ -12,6 +12,7 @@
       <div class="header-top">
         <h1>🛡️ macOS Backup Suite</h1>
         <div class="header-controls">
+          <button id="btn-help" class="icon-btn" title="Hilfe">❓</button>
           <button id="btn-settings" class="icon-btn" title="Einstellungen">⚙️</button>
           <button id="btn-language" class="icon-btn" title="Sprache wechseln">🌐</button>
           <button id="btn-theme" class="icon-btn" title="Design wechseln">🌓</button>
@@ -90,6 +91,7 @@
           <div class="button-row">
             <button id="show-files" class="btn-secondary">📋 Dateien anzeigen</button>
             <button id="show-manual-apps" class="btn-secondary">📦 Manuelle Apps</button>
+            <button id="show-license-data" class="btn-secondary">🔑 Lizenzen</button>
             <button id="btn-restore-test" class="btn-secondary">✓ Verifizieren</button>
             <button id="btn-delete-backup" class="btn-danger">🗑️ Löschen</button>
           </div>
@@ -109,7 +111,7 @@
     </main>
 
     <footer>
-      <p>macOS Backup Suite v1.0 – Sichere Datensicherung für deinen Mac</p>
+      <p>macOS Backup Suite v1.0.0 – Sichere Datensicherung für deinen Mac</p>
     </footer>
   </div>
 
@@ -199,6 +201,65 @@
         </div>
       </div>
     </div>
+
+    <!-- Help Modal -->
+    <dialog id="help-dialog" class="modal">
+      <div class="modal-content modal-help">
+        <h2>❓ <span id="help-modal-title">Hilfe – Anleitung</span></h2>
+        
+        <div class="help-section">
+          <h3 id="help-backup-title">📤 Backup erstellen</h3>
+          <ol class="help-steps" id="help-backup-steps">
+            <li>Externes Volume anschließen und unter "Backup-Ziel" auswählen</li>
+            <li>Zu sichernde Ordner prüfen/anpassen (+ Ordner, System-Configs)</li>
+            <li>"Backup erstellen" klicken – Fortschritt im Protokoll</li>
+            <li>Nach Abschluss: Backup über "Verifizieren" prüfen</li>
+            <li>Optional: Registrierungsdaten über 🔑 Lizenzen eintragen</li>
+          </ol>
+        </div>
+        
+        <div class="help-section">
+          <h3 id="help-restore-title">📥 Wiederherstellung</h3>
+          <ol class="help-steps" id="help-restore-steps">
+            <li>Volume mit vorhandenem Backup auswählen</li>
+            <li>Backup aus der Liste wählen</li>
+            <li>"Wiederherstellen" klicken und gewünschte Elemente wählen</li>
+            <li>Optional: ⚡ Quick-Restore für essentielle Pakete zuerst</li>
+            <li>Manuelle Apps & Lizenzen über die Buttons einsehen</li>
+          </ol>
+        </div>
+        
+        <div class="help-section">
+          <h3 id="help-tips-title">💡 Tipps</h3>
+          <ul class="help-tips" id="help-tips-list">
+            <li>Voller Festplattenzugriff in den Systemeinstellungen aktivieren</li>
+            <li>System-Configs sichert wichtige Konfig-Dateien (.ssh, .gitconfig, etc.)</li>
+            <li>Backups regelmäßig verifizieren für Datenintegrität</li>
+          </ul>
+        </div>
+        
+        <div class="modal-actions">
+          <button id="help-close" class="btn-secondary"><span data-i18n="close">Schließen</span></button>
+        </div>
+      </div>
+    </dialog>
+
+    <!-- License Data Modal -->
+    <dialog id="license-dialog" class="modal">
+      <div class="modal-content modal-license">
+        <h2>🔑 <span id="license-modal-title">Registrierungsdaten</span></h2>
+        <p id="license-modal-description" class="settings-hint">Registrierungsdaten für manuell installierte Apps:</p>
+        
+        <div id="license-apps-list" class="license-apps-list">
+          <!-- Populated dynamically -->
+        </div>
+        
+        <div class="modal-actions">
+          <button id="license-cancel" class="btn-secondary">Abbrechen</button>
+          <button id="license-save" class="btn-primary">💾 Speichern</button>
+        </div>
+      </div>
+    </dialog>
 
   </body>
 </html>

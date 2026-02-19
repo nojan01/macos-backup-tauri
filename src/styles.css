@@ -806,3 +806,164 @@ footer {
 .btn-small:hover {
   background: var(--bg-secondary);
 }
+
+/* Help Modal */
+.modal-help {
+  max-width: 550px;
+  width: 95%;
+}
+
+.help-section {
+  margin-bottom: 16px;
+}
+
+.help-section h3 {
+  font-size: 0.95rem;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.help-steps,
+.help-tips {
+  padding-left: 20px;
+  margin: 0;
+}
+
+.help-steps li,
+.help-tips li {
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+  line-height: 1.45;
+}
+
+.help-tips {
+  list-style-type: disc;
+}
+
+.help-tips li {
+  color: var(--text-secondary);
+}
+
+/* License Data Modal */
+.modal-license {
+  max-width: 650px;
+  width: 95%;
+}
+
+.license-apps-list {
+  max-height: 400px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.license-app-entry {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.license-app-entry.has-data {
+  border-color: var(--accent-color);
+  border-width: 2px;
+}
+
+.license-app-name {
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.license-app-name .app-icon {
+  font-size: 1.1rem;
+}
+
+.license-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.license-fields.three-cols {
+  grid-template-columns: 1fr 1fr 1fr;
+}
+
+.license-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.license-field label {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.license-field input {
+  padding: 6px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  font-family: inherit;
+  transition: border-color 0.2s;
+}
+
+.license-field input:focus {
+  outline: none;
+  border-color: var(--accent-color);
+}
+
+.license-field input::placeholder {
+  color: var(--text-secondary);
+  opacity: 0.6;
+}
+
+.license-readonly input {
+  background: transparent;
+  border-color: transparent;
+  cursor: default;
+}
+
+.license-readonly input:focus {
+  border-color: transparent;
+}
+
+.license-filter {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  align-items: center;
+}
+
+.license-filter input[type="text"] {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+}
+
+.license-filter input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent-color);
+}
+
+.license-stats {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  text-align: right;
+  margin-bottom: 8px;
+}

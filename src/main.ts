@@ -50,32 +50,6 @@ interface RestoreResult {
   errors: string[];
 }
 
-interface BackupFileInfo {
-  path: string;
-  archive: string;
-  archive_size_bytes: number;
-  source_size_bytes: number;
-}
-
-interface BackupDetails {
-  timestamp: string;
-  items: BackupFileInfo[];
-  total_source_size_bytes: number;
-  total_archive_size_bytes: number;
-  start_time: string;
-  end_time: string;
-  duration_seconds: number;
-}
-
-interface RestoreResult {
-  restored_count: number;
-  skipped_count: number;
-  error_count: number;
-  restored: string[];
-  skipped: string[];
-  errors: string[];
-}
-
 interface Volume {
   name: string;
   path: string;
@@ -83,6 +57,13 @@ interface Volume {
   writable: boolean;
   is_internal: boolean;
   free_space_gb: number;
+}
+
+interface DetectedBackupVolume {
+  volume_path: string;
+  volume_name: string;
+  backup_count: number;
+  latest_timestamp: string | null;
 }
 
 interface UserFolder {
@@ -102,6 +83,13 @@ interface FullDiskAccessStatus {
   has_full_disk_access: boolean;
   tested_paths: string[];
   inaccessible_paths: string[];
+}
+
+interface AppLicenseEntry {
+  app_name: string;
+  registered_name: string;
+  license_key: string;
+  notes: string;
 }
 
 // Translations
@@ -151,6 +139,9 @@ const translations: Record<string, Record<string, string>> = {
     backupComplete: "Backup abgeschlossen!",
     backupFailed: "Backup fehlgeschlagen!",
     backupCancelled: "Backup abgebrochen!",
+    verifyCancelled: "Verifizierung abgebrochen!",
+    verifyRunning: "Verifizierung läuft...",
+    operationCancelled: "Operation abgebrochen!",
     configLoaded: "Konfiguration geladen.",
     defaultConfigUsed: "Standardkonfiguration verwendet.",
     volumesFound: "beschreibbare Volumes gefunden (Time Machine ausgeschlossen).",
@@ -181,6 +172,9 @@ const translations: Record<string, Record<string, string>> = {
     filesComingSoon: "Dateiliste wird in Kürze implementiert.",
     selectVolumeFirst: "Bitte zuerst ein Volume auswählen.",
     backupTargetSet: "Backup-Ziel:",
+    backupVolumeDetected: "📀 Backup-Medium erkannt",
+    backupVolumeDetectedMsg: "Backup-Volume erkannt: {name} ({count} Backups). Möchten Sie direkt zur Wiederherstellung wechseln?",
+    restoreModeActivated: "🔄 Restore-Modus aktiviert – Volume automatisch ausgewählt.",
     selectBackupTarget: "Bitte ein Backup-Ziel auswählen!",
     settingsSaved: "Einstellungen gespeichert.",
     freeSpace: "frei",
@@ -218,6 +212,58 @@ const translations: Record<string, Record<string, string>> = {
     errorItems: "Fehler",
     restoring: "Wiederherstellen von",
     noItemsSelected: "Keine Elemente ausgewählt!",
+    loadBackupDetailsError: "Fehler beim Laden der Backup-Details:",
+    noBackupOrTargetSelected: "Kein Backup oder Ziel ausgewählt",
+    quickRestoreStarted: "Quick-Restore gestartet...",
+    quickRestoreInstalling: "Installiert: git, vim, python, node, curl, wget, VS Code, iTerm2, etc.",
+    quickRestoreProgress: "Quick-Restore: Installiere essentielle Pakete...",
+    quickRestoreComplete: "Quick-Restore abgeschlossen:",
+    quickRestoreDone: "Quick-Restore abgeschlossen - System arbeitsfähig!",
+    quickRestoreError: "Quick-Restore-Fehler:",
+    installed: "Installiert",
+    skipped: "Übersprungen",
+    errors: "Fehler",
+    errorGeneric: "Fehler",
+    preparingRestore: "Bereite Wiederherstellung vor...",
+    restoreError: "Restore-Fehler:",
+    restoreErrorProgress: "Fehler bei Wiederherstellung",
+    quickRestoreErrorProgress: "Fehler bei Quick-Restore",
+    items: "Elemente",
+    appsFound: "Apps gefunden",
+    deletingBackup: "Lösche Backup",
+    help: "Hilfe",
+    helpTitle: "Hilfe – Anleitung",
+    helpBackupTitle: "Backup erstellen",
+    helpBackupStep1: "1. Externes Volume anschließen und unter \"Backup-Ziel\" auswählen",
+    helpBackupStep2: "2. Zu sichernde Ordner prüfen/anpassen (+ Ordner hinzufügen, System-Configs)",
+    helpBackupStep3: "3. \"Backup erstellen\" klicken – Fortschritt wird im Protokoll angezeigt",
+    helpBackupStep4: "4. Nach Abschluss: Backup über \"Verifizieren\" prüfen",
+    helpBackupStep5: "5. Optional: Registrierungsdaten über 🔑 Lizenzen hinterlegen",
+    helpRestoreTitle: "Wiederherstellen",
+    helpRestoreStep1: "1. Volume mit bestehendem Backup auswählen",
+    helpRestoreStep2: "2. Backup aus der Liste wählen",
+    helpRestoreStep3: "3. \"Wiederherstellen\" klicken und gewünschte Elemente auswählen",
+    helpRestoreStep4: "4. Optional: ⚡ Quick-Restore für essentielle Pakete zuerst",
+    helpRestoreStep5: "5. Manuelle Apps & Lizenzen über die Buttons einsehen",
+    helpTipsTitle: "Tipps",
+    helpTip1: "Full Disk Access in Systemeinstellungen aktivieren für vollen Zugriff",
+    helpTip2: "System-Configs sichern wichtige Konfigurationsdateien (.ssh, .gitconfig, etc.)",
+    helpTip3: "Backups regelmäßig verifizieren, um Datenintegrität sicherzustellen",
+    licenseDataTitle: "Registrierungsdaten",
+    licenseDataDescription: "Registrierungsdaten für manuell installierte Apps:",
+    licenseRegisteredName: "Name",
+    licenseLicenseKey: "Lizenzschlüssel",
+    licenseNotes: "Notizen",
+    licenseSave: "Speichern",
+    licenseCancel: "Abbrechen",
+    licenseSaved: "Registrierungsdaten gespeichert.",
+    licenseSaveError: "Fehler beim Speichern der Registrierungsdaten:",
+    licenseLoadError: "Fehler beim Laden der Registrierungsdaten:",
+    licenseNoApps: "Keine manuell installierten Apps gefunden.",
+    licenseFilter: "Apps filtern...",
+    licenseStats: "{filled} von {total} Apps mit Registrierungsdaten",
+    licenseBtn: "🔑 Lizenzen",
+    selectBackupForLicense: "Bitte wählen Sie zuerst ein Backup aus!",
   },
   en: {
     ready: "Ready",
@@ -264,6 +310,9 @@ const translations: Record<string, Record<string, string>> = {
     backupComplete: "Backup complete!",
     backupFailed: "Backup failed!",
     backupCancelled: "Backup cancelled!",
+    verifyCancelled: "Verification cancelled!",
+    verifyRunning: "Verification running...",
+    operationCancelled: "Operation cancelled!",
     configLoaded: "Configuration loaded.",
     defaultConfigUsed: "Default configuration used.",
     volumesFound: "writable volumes found (Time Machine excluded).",
@@ -294,6 +343,9 @@ const translations: Record<string, Record<string, string>> = {
     filesComingSoon: "File list coming soon.",
     selectVolumeFirst: "Please select a volume first.",
     backupTargetSet: "Backup target:",
+    backupVolumeDetected: "📀 Backup medium detected",
+    backupVolumeDetectedMsg: "Backup volume detected: {name} ({count} backups). Would you like to switch to restore mode?",
+    restoreModeActivated: "🔄 Restore mode activated – volume auto-selected.",
     selectBackupTarget: "Please select a backup target!",
     settingsSaved: "Settings saved.",
     freeSpace: "free",
@@ -317,6 +369,72 @@ const translations: Record<string, Record<string, string>> = {
     addSystemConfigs: "System Configs",
     systemConfigsAdded: "System config paths added:",
     systemConfigsHint: "Important config files for quick restore",
+    licenseDataTitle: "Registration Data",
+    licenseDataDescription: "Registration data for manually installed apps:",
+    licenseRegisteredName: "Name",
+    licenseLicenseKey: "License Key",
+    licenseNotes: "Notes",
+    licenseSave: "Save",
+    licenseCancel: "Cancel",
+    licenseSaved: "Registration data saved.",
+    licenseSaveError: "Error saving registration data:",
+    licenseLoadError: "Error loading registration data:",
+    licenseNoApps: "No manually installed apps found.",
+    licenseFilter: "Filter apps...",
+    licenseStats: "{filled} of {total} apps with registration data",
+    licenseBtn: "🔑 Licenses",
+    selectBackupForLicense: "Please select a backup first!",
+    restoreModalTitle: "Restore",
+    selectItemsToRestore: "Select items to restore:",
+    overwriteExisting: "Overwrite existing files",
+    overwriteHint: "If disabled, existing files will be skipped",
+    startRestore: "Restore",
+    cancelRestore: "Cancel",
+    selectAll: "Select all",
+    deselectAll: "Deselect all",
+    restoreComplete: "Restore complete",
+    restoredItems: "Restored",
+    skippedItems: "Skipped",
+    errorItems: "Errors",
+    restoring: "Restoring",
+    noItemsSelected: "No items selected!",
+    loadBackupDetailsError: "Error loading backup details:",
+    noBackupOrTargetSelected: "No backup or target selected",
+    quickRestoreStarted: "Quick-Restore started...",
+    quickRestoreInstalling: "Installing: git, vim, python, node, curl, wget, VS Code, iTerm2, etc.",
+    quickRestoreProgress: "Quick-Restore: Installing essential packages...",
+    quickRestoreComplete: "Quick-Restore complete:",
+    quickRestoreDone: "Quick-Restore complete - system ready to work!",
+    quickRestoreError: "Quick-Restore error:",
+    installed: "Installed",
+    skipped: "Skipped",
+    errors: "Errors",
+    errorGeneric: "Error",
+    preparingRestore: "Preparing restore...",
+    restoreError: "Restore error:",
+    restoreErrorProgress: "Restore error",
+    quickRestoreErrorProgress: "Quick-Restore error",
+    items: "items",
+    appsFound: "apps found",
+    deletingBackup: "Deleting backup",
+    help: "Help",
+    helpTitle: "Help – Guide",
+    helpBackupTitle: "Create Backup",
+    helpBackupStep1: "1. Connect external volume and select it under \"Backup Target\"",
+    helpBackupStep2: "2. Review/adjust folders to backup (+ Add Folder, System Configs)",
+    helpBackupStep3: "3. Click \"Create Backup\" – progress shown in the log",
+    helpBackupStep4: "4. After completion: verify backup via \"Verify\"",
+    helpBackupStep5: "5. Optional: enter registration data via 🔑 Licenses",
+    helpRestoreTitle: "Restore",
+    helpRestoreStep1: "1. Select volume with existing backup",
+    helpRestoreStep2: "2. Choose backup from the list",
+    helpRestoreStep3: "3. Click \"Restore\" and select desired items",
+    helpRestoreStep4: "4. Optional: ⚡ Quick-Restore for essential packages first",
+    helpRestoreStep5: "5. View manual apps & licenses via the buttons",
+    helpTipsTitle: "Tips",
+    helpTip1: "Enable Full Disk Access in System Settings for full access",
+    helpTip2: "System Configs backup important config files (.ssh, .gitconfig, etc.)",
+    helpTip3: "Verify backups regularly to ensure data integrity",
   }
 };
 
@@ -344,6 +462,7 @@ const btnRestoreTest = document.getElementById("btn-restore-test") as HTMLButton
 const backupSelect = document.getElementById("backup-select") as HTMLSelectElement;
 const showFilesBtn = document.getElementById("show-files") as HTMLButtonElement;
 const showManualAppsBtn = document.getElementById("show-manual-apps") as HTMLButtonElement;
+const showLicenseDataBtn = document.getElementById("show-license-data") as HTMLButtonElement;
 const btnDeleteBackup = document.getElementById("btn-delete-backup") as HTMLButtonElement;
 const restoreModal = document.getElementById("restore-modal") as HTMLDivElement;
 const restoreItemsList = document.getElementById("restore-items-list") as HTMLDivElement;
@@ -374,6 +493,13 @@ const userFolderDialog = document.getElementById("user-folder-dialog") as HTMLDi
 const userFolderList = document.getElementById("user-folder-list") as HTMLUListElement;
 const userFolderCloseBtn = document.getElementById("user-folder-close") as HTMLButtonElement;
 const fdaWarning = document.getElementById("fda-warning") as HTMLDivElement;
+const licenseDialog = document.getElementById("license-dialog") as HTMLDialogElement;
+const licenseAppsList = document.getElementById("license-apps-list") as HTMLDivElement;
+const licenseCancelBtn = document.getElementById("license-cancel") as HTMLButtonElement;
+const licenseSaveBtn = document.getElementById("license-save") as HTMLButtonElement;
+const helpDialog = document.getElementById("help-dialog") as HTMLDialogElement;
+const helpCloseBtn = document.getElementById("help-close") as HTMLButtonElement;
+const btnHelp = document.getElementById("btn-help") as HTMLButtonElement;
 
 // State
 let config: BackupConfig = {
@@ -391,6 +517,8 @@ let config: BackupConfig = {
 
 let currentVolumes: Volume[] = [];
 let backupInProgress = false;
+let verifyInProgress = false;
+let operationInProgress = false; // Generic flag for any long-running operation
 let tempDefaultDirectories: string[] = [];
 let hasFDA = true; // Full Disk Access status
 let fdaMessageShown = false; // Track if FDA message was already shown
@@ -407,33 +535,49 @@ const INITIAL_DEFAULT_DIRECTORIES = [
 ];
 // System configuration directories for quick restore after OS reinstall
 const SYSTEM_CONFIG_DIRECTORIES = [
-  // Developer configs
+  // Shell & developer configs
   "~/.ssh",
   "~/.gitconfig",
   "~/.zshrc",
+  "~/.zprofile",
   "~/.bashrc",
   "~/.bash_profile",
+  "~/.zsh_history",
+  "~/.bash_history",
   "~/.config",
   "~/.gnupg",
-  // Package managers
+  "~/.vimrc",
+  "~/.vim",
+  // Cloud & container tools
+  "~/.docker",
+  "~/.kube",
+  "~/.aws",
+  // Package managers & language runtimes
   "~/.npm",
   "~/.nvm",
   "~/.pyenv",
   "~/.conda",
   "~/.cargo",
-  // App settings
+  "~/.gemrc",
+  "~/.rbenv",
+  // macOS system settings
+  "~/Library/LaunchAgents",
   "~/Library/Preferences",
-  "~/Library/Application Support/Code/User",
-  "~/Library/Application Support/JetBrains",
   "~/Library/Keychains",
   "~/Library/Services",
   "~/Library/Fonts",
   "~/Library/ColorSync/Profiles",
   "~/Library/Keyboard Layouts",
+  "~/Library/Input Methods",
+  "~/Library/Spelling",
+  "~/Library/QuickLook",
+  "~/Library/Scripts",
+  // App-specific configs
+  "~/Library/Application Support/Code/User",
+  "~/Library/Application Support/JetBrains",
+  "~/Library/Application Support/iTerm2",
+  "~/Library/Application Support/Firefox/Profiles",
 ];
-
-// System configuration directories for quick restore after OS reinstall
-
 
 // Helpers
 function formatBytes(gb: number): string {
@@ -513,8 +657,10 @@ function updateUITranslations(): void {
   }
   resetDirectoriesBtn.innerHTML = `↻ ${t("reset")}`;
   showFilesBtn.innerHTML = `📋 ${t("showFiles")}`;
+  showManualAppsBtn.innerHTML = `📦 ${t("showManualApps")}`;
+  showLicenseDataBtn.innerHTML = t("licenseBtn");
+  btnHelp.title = t("help");
   btnRestoreTest.innerHTML = `✓ ${t("verify")}`;
-  btnDeleteBackup.innerHTML = `🗑️ ${t("deleteBackup")}`;
   btnDeleteBackup.innerHTML = `🗑️ ${t("deleteBackup")}`;
   copyLogBtn.innerHTML = `📋 ${t("copy")}`;
   saveLogBtn.innerHTML = `💾 ${t("save")}`;
@@ -702,21 +848,20 @@ function updateDirectoriesList(): void {
   directoriesList.innerHTML = "";
   for (const dir of config.directories) {
     const li = document.createElement("li");
-    li.innerHTML = `
-      <span>${dir}</span>
-      <button class="remove-dir" data-path="${dir}">✕</button>
-    `;
-    directoriesList.appendChild(li);
-  }
-  
-  document.querySelectorAll(".remove-dir").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      const path = (e.target as HTMLButtonElement).dataset.path!;
-      config.directories = config.directories.filter((d) => d !== path);
+    const span = document.createElement("span");
+    span.textContent = dir;
+    const btn = document.createElement("button");
+    btn.className = "remove-dir";
+    btn.textContent = "✕";
+    btn.addEventListener("click", () => {
+      config.directories = config.directories.filter((d) => d !== dir);
       updateDirectoriesList();
       saveConfig();
     });
-  });
+    li.appendChild(span);
+    li.appendChild(btn);
+    directoriesList.appendChild(li);
+  }
 }
 
 // Update default directories list in settings
@@ -965,10 +1110,15 @@ async function startBackup(): Promise<void> {
     return;
   }
   
+  // Reset operation state in backend
+  await invoke("reset_operation_state");
+  
   backupInProgress = true;
+  operationInProgress = true;
   btnBackup.disabled = true;
   btnBackup.style.display = "none";
   btnCancel.style.display = "block";
+  btnCancel.disabled = false;
   statusEl.textContent = t("backupRunning");
   progressMessage.textContent = t("startingBackup");
   progressFill.style.width = "0%";
@@ -997,28 +1147,52 @@ async function startBackup(): Promise<void> {
     }
   } finally {
     backupInProgress = false;
+    operationInProgress = false;
     btnBackup.disabled = false;
     btnBackup.style.display = "block";
     btnCancel.style.display = "none";
   }
 }
 
-// Cancel backup
-async function cancelBackup(): Promise<void> {
-  if (!backupInProgress) return;
+// Cancel any running operation (backup or verify)
+async function cancelOperation(): Promise<void> {
+  if (!operationInProgress) return;
   
-  backupInProgress = false;
   try {
-    await invoke("cancel_backup");
-    log(t("backupCancelled"));
+    await invoke("cancel_operation");
+    
+    if (backupInProgress) {
+      log(t("backupCancelled"));
+      statusEl.textContent = t("backupCancelled");
+    } else if (verifyInProgress) {
+      log(t("verifyCancelled"));
+      statusEl.textContent = t("verifyCancelled");
+    } else {
+      log(t("operationCancelled"));
+      statusEl.textContent = t("operationCancelled");
+    }
+    
     // Reset UI state
     progressFill.style.width = "0%";
-    progressMessage.textContent = t("backupCancelled");
-    btnBackup.disabled = false;
-    btnCancel.disabled = true;
+    progressMessage.textContent = operationInProgress && backupInProgress ? t("backupCancelled") : t("verifyCancelled");
+    
   } catch (e) {
     log(`${t("backupFailed")} ${e}`);
+  } finally {
+    backupInProgress = false;
+    verifyInProgress = false;
+    operationInProgress = false;
+    btnBackup.disabled = false;
+    btnBackup.style.display = "block";
+    btnCancel.style.display = "none";
+    btnRestoreTest.disabled = false;
+    statusEl.textContent = t("ready");
   }
+}
+
+// Legacy function - kept for compatibility
+async function cancelBackup(): Promise<void> {
+  await cancelOperation();
 }
 
 // Event listeners for progress updates from backend
@@ -1178,7 +1352,7 @@ btnRestore.addEventListener("click", async () => {
     });
     showRestoreModal(details);
   } catch (e) {
-    log(`❌ Fehler beim Laden der Backup-Details: ${e}`);
+    log(`❌ ${t("loadBackupDetailsError")} ${e}`);
   }
 });
 
@@ -1254,7 +1428,7 @@ if (restoreQuickBtn) {
     const targetPath = getFullTargetPath();
     
     if (!timestamp || !targetPath) {
-      log("❌ Kein Backup oder Ziel ausgewählt");
+      log(`❌ ${t("noBackupOrTargetSelected")}`);
       return;
     }
     
@@ -1262,10 +1436,10 @@ if (restoreQuickBtn) {
     
     progressFill.style.width = "0%";
     progressFill.classList.add("animating");
-    progressMessage.textContent = "⚡ Quick-Restore: Installiere essentielle Pakete...";
+    progressMessage.textContent = `⚡ ${t("quickRestoreProgress")}`;
     
-    log("⚡ Quick-Restore gestartet...");
-    log("   Installiert: git, vim, python, node, curl, wget, VS Code, iTerm2, etc.");
+    log(`⚡ ${t("quickRestoreStarted")}`);
+    log(`   ${t("quickRestoreInstalling")}`);
     
     try {
       const result = await invoke<RestoreResult>("quick_restore_essentials", {
@@ -1273,22 +1447,22 @@ if (restoreQuickBtn) {
         timestamp: timestamp,
       });
       
-      log(`✅ Quick-Restore abgeschlossen:`);
-      log(`   Installiert: ${result.restored_count}`);
+      log(`✅ ${t("quickRestoreComplete")}`);
+      log(`   ${t("installed")}: ${result.restored_count}`);
       if (result.skipped_count > 0) {
-        log(`   Übersprungen: ${result.skipped_count}`);
+        log(`   ${t("skipped")}: ${result.skipped_count}`);
       }
       if (result.error_count > 0) {
-        log(`   Fehler: ${result.error_count}`);
+        log(`   ${t("errors")}: ${result.error_count}`);
       }
       
       progressFill.classList.remove("animating");
       progressFill.style.width = "100%";
-      progressMessage.textContent = "⚡ Quick-Restore abgeschlossen - System arbeitsfähig!";
+      progressMessage.textContent = `⚡ ${t("quickRestoreDone")}`;
     } catch (e) {
-      log(`❌ Quick-Restore-Fehler: ${e}`);
+      log(`❌ ${t("quickRestoreError")} ${e}`);
       progressFill.classList.remove("animating");
-      progressMessage.textContent = "Fehler bei Quick-Restore";
+      progressMessage.textContent = t("quickRestoreErrorProgress");
     }
   });
 }
@@ -1313,9 +1487,9 @@ restoreStart.addEventListener("click", async () => {
   // Reset progress bar and start animation
   progressFill.style.width = "0%";
   progressFill.classList.add("animating");
-  progressMessage.textContent = "Bereite Wiederherstellung vor...";
+  progressMessage.textContent = t("preparingRestore");
   
-  log(`🔄 ${t("restoring")} ${selectedItems.length} Elemente...`);
+  log(`🔄 ${t("restoring")} ${selectedItems.length} ${t("items")}...`);
   
   try {
     const result = await invoke<RestoreResult>("restore_items", {
@@ -1340,9 +1514,9 @@ restoreStart.addEventListener("click", async () => {
     progressFill.style.width = "100%";
     progressMessage.textContent = t("restoreComplete");
   } catch (e) {
-    log(`❌ Restore-Fehler: ${e}`);
+    log(`❌ ${t("restoreError")} ${e}`);
     progressFill.classList.remove("animating");
-    progressMessage.textContent = "Fehler bei Wiederherstellung";
+    progressMessage.textContent = t("restoreErrorProgress");
   }
 });
 
@@ -1368,6 +1542,21 @@ btnRestoreTest.addEventListener("click", async () => {
     return;
   }
   
+  // Reset operation state in backend
+  await invoke("reset_operation_state");
+  
+  // Set up UI for verification
+  verifyInProgress = true;
+  operationInProgress = true;
+  btnRestoreTest.disabled = true;
+  btnBackup.disabled = true;
+  btnBackup.style.display = "none";
+  btnCancel.style.display = "block";
+  btnCancel.disabled = false;
+  statusEl.textContent = t("verifyRunning");
+  progressMessage.textContent = t("verifyStarted");
+  progressFill.style.width = "0%";
+  
   log(`${t("verifyStarted")} ${timestamp}...`);
   
   try {
@@ -1382,16 +1571,34 @@ btnRestoreTest.addEventListener("click", async () => {
       timestamp: timestamp
     });
     
-    if (result.success) {
-      log(`✅ ${result.message}`);
-    } else {
-      log(`❌ ${result.message}`);
-      for (const failure of result.failed_files) {
-        log(`  - ${failure}`);
+    if (verifyInProgress) {
+      if (result.success) {
+        log(`✅ ${result.message}`);
+        statusEl.textContent = result.message;
+      } else {
+        log(`❌ ${result.message}`);
+        for (const failure of result.failed_files) {
+          log(`  - ${failure}`);
+        }
+        statusEl.textContent = result.message;
       }
     }
   } catch (e) {
-    log(`${t("backupFailed")} ${e}`);
+    if (verifyInProgress) {
+      log(`${t("backupFailed")} ${e}`);
+      statusEl.textContent = t("backupFailed");
+    } else {
+      // Cancelled
+      statusEl.textContent = t("verifyCancelled");
+    }
+  } finally {
+    verifyInProgress = false;
+    operationInProgress = false;
+    btnRestoreTest.disabled = false;
+    btnBackup.disabled = false;
+    btnBackup.style.display = "block";
+    btnCancel.style.display = "none";
+    progressMessage.textContent = t("ready");
   }
 });
 
@@ -1507,12 +1714,230 @@ showManualAppsBtn.addEventListener("click", async () => {
       }
       
       log("");
-      log(`📊 ${manualApps.length} ${manualApps.length === 1 ? "App" : "Apps"} gefunden`);
+      log(`📊 ${manualApps.length} ${t("appsFound")}`);
     }
     
     log("");
   } catch (error) {
     log(`❌ ${t("manualAppsError")} ${error}`);
+  }
+});
+
+// License data modal state
+let currentLicenseData: AppLicenseEntry[] = [];
+let currentLicenseTimestamp = "";
+let currentLicenseReadonly = false;
+
+function openLicenseModal(apps: string[], existingData: AppLicenseEntry[], timestamp: string, readonly: boolean) {
+  currentLicenseTimestamp = timestamp;
+  currentLicenseReadonly = readonly;
+  
+  // Merge: keep existing data, add new apps
+  const dataMap = new Map<string, AppLicenseEntry>();
+  for (const entry of existingData) {
+    dataMap.set(entry.app_name, entry);
+  }
+  for (const app of apps) {
+    if (!dataMap.has(app)) {
+      dataMap.set(app, { app_name: app, registered_name: "", license_key: "", notes: "" });
+    }
+  }
+  
+  currentLicenseData = Array.from(dataMap.values());
+  currentLicenseData.sort((a, b) => a.app_name.toLowerCase().localeCompare(b.app_name.toLowerCase()));
+  
+  // Update modal title & description
+  const titleEl = document.getElementById("license-modal-title");
+  const descEl = document.getElementById("license-modal-description");
+  if (titleEl) titleEl.textContent = t("licenseDataTitle");
+  if (descEl) descEl.textContent = t("licenseDataDescription");
+  
+  // Show/hide save button
+  licenseSaveBtn.style.display = readonly ? "none" : "";
+  licenseSaveBtn.textContent = `💾 ${t("licenseSave")}`;
+  licenseCancelBtn.textContent = readonly ? t("close") : t("licenseCancel");
+  
+  renderLicenseList("");
+  licenseDialog.showModal();
+}
+
+function renderLicenseList(filter: string) {
+  const filterLower = filter.toLowerCase();
+  const filtered = filter 
+    ? currentLicenseData.filter(e => e.app_name.toLowerCase().includes(filterLower))
+    : currentLicenseData;
+  
+  const filledCount = currentLicenseData.filter(e => e.registered_name || e.license_key).length;
+  const statsText = t("licenseStats")
+    .replace("{filled}", String(filledCount))
+    .replace("{total}", String(currentLicenseData.length));
+  
+  let html = `<div class="license-filter">
+    <input type="text" id="license-filter-input" placeholder="${t("licenseFilter")}" value="${filter}" />
+  </div>
+  <div class="license-stats">${statsText}</div>`;
+  
+  if (filtered.length === 0) {
+    html += `<p style="text-align:center;color:var(--text-secondary)">${t("licenseNoApps")}</p>`;
+  } else {
+    for (const entry of filtered) {
+      const hasData = entry.registered_name || entry.license_key;
+      const readonlyAttr = currentLicenseReadonly ? "readonly" : "";
+      const readonlyClass = currentLicenseReadonly ? "license-readonly" : "";
+      html += `<div class="license-app-entry ${hasData ? "has-data" : ""} ${readonlyClass}">
+        <div class="license-app-name"><span class="app-icon">📦</span> ${entry.app_name}</div>
+        <div class="license-fields three-cols">
+          <div class="license-field">
+            <label>${t("licenseRegisteredName")}</label>
+            <input type="text" data-app="${entry.app_name}" data-field="registered_name" 
+              value="${escapeHtml(entry.registered_name)}" placeholder="${t("licenseRegisteredName")}" ${readonlyAttr} />
+          </div>
+          <div class="license-field">
+            <label>${t("licenseLicenseKey")}</label>
+            <input type="text" data-app="${entry.app_name}" data-field="license_key" 
+              value="${escapeHtml(entry.license_key)}" placeholder="${t("licenseLicenseKey")}" ${readonlyAttr} />
+          </div>
+          <div class="license-field">
+            <label>${t("licenseNotes")}</label>
+            <input type="text" data-app="${entry.app_name}" data-field="notes" 
+              value="${escapeHtml(entry.notes)}" placeholder="${t("licenseNotes")}" ${readonlyAttr} />
+          </div>
+        </div>
+      </div>`;
+    }
+  }
+  
+  licenseAppsList.innerHTML = html;
+  
+  // Attach filter handler
+  const filterInput = document.getElementById("license-filter-input") as HTMLInputElement;
+  if (filterInput) {
+    filterInput.addEventListener("input", () => {
+      collectLicenseInputs(); // save current inputs before re-render
+      renderLicenseList(filterInput.value);
+    });
+    filterInput.focus();
+  }
+  
+  // Attach input change handlers if not readonly
+  if (!currentLicenseReadonly) {
+    const inputs = licenseAppsList.querySelectorAll("input[data-app]") as NodeListOf<HTMLInputElement>;
+    inputs.forEach(input => {
+      input.addEventListener("change", () => {
+        collectLicenseInputs();
+      });
+    });
+  }
+}
+
+function escapeHtml(str: string): string {
+  return str.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function collectLicenseInputs() {
+  const inputs = licenseAppsList.querySelectorAll("input[data-app]") as NodeListOf<HTMLInputElement>;
+  inputs.forEach(input => {
+    const appName = input.dataset.app!;
+    const field = input.dataset.field as "registered_name" | "license_key" | "notes";
+    const entry = currentLicenseData.find(e => e.app_name === appName);
+    if (entry) {
+      entry[field] = input.value;
+    }
+  });
+}
+
+// License cancel button
+licenseCancelBtn.addEventListener("click", () => {
+  licenseDialog.close();
+});
+
+// License save button
+licenseSaveBtn.addEventListener("click", async () => {
+  collectLicenseInputs();
+  
+  const fullPath = getFullTargetPath();
+  if (!fullPath) {
+    log(t("selectTargetFirst"));
+    licenseDialog.close();
+    return;
+  }
+  
+  // Filter out entries with no data
+  const dataToSave = currentLicenseData.filter(e => e.registered_name || e.license_key || e.notes);
+  
+  try {
+    await invoke("save_license_data", {
+      targetPath: fullPath,
+      timestamp: currentLicenseTimestamp,
+      data: dataToSave
+    });
+    log(`✅ ${t("licenseSaved")} (${dataToSave.length} Apps)`);
+    licenseDialog.close();
+  } catch (error) {
+    log(`❌ ${t("licenseSaveError")} ${error}`);
+  }
+});
+
+// Help modal
+function openHelpModal() {
+  // Populate translated content
+  const titleEl = document.getElementById("help-modal-title");
+  if (titleEl) titleEl.textContent = t("helpTitle");
+  
+  const backupTitle = document.getElementById("help-backup-title");
+  if (backupTitle) backupTitle.textContent = "📤 " + t("helpBackupTitle");
+  
+  const restoreTitle = document.getElementById("help-restore-title");
+  if (restoreTitle) restoreTitle.textContent = "📥 " + t("helpRestoreTitle");
+  
+  const tipsTitle = document.getElementById("help-tips-title");
+  if (tipsTitle) tipsTitle.textContent = "💡 " + t("helpTipsTitle");
+  
+  const backupSteps = document.getElementById("help-backup-steps");
+  if (backupSteps) {
+    backupSteps.innerHTML = [1,2,3,4,5].map(i => `<li>${t("helpBackupStep" + i)}</li>`).join("");
+  }
+  
+  const restoreSteps = document.getElementById("help-restore-steps");
+  if (restoreSteps) {
+    restoreSteps.innerHTML = [1,2,3,4,5].map(i => `<li>${t("helpRestoreStep" + i)}</li>`).join("");
+  }
+  
+  const tipsList = document.getElementById("help-tips-list");
+  if (tipsList) {
+    tipsList.innerHTML = [1,2,3].map(i => `<li>${t("helpTip" + i)}</li>`).join("");
+  }
+  
+  helpDialog.showModal();
+}
+
+btnHelp.addEventListener("click", () => openHelpModal());
+helpCloseBtn.addEventListener("click", () => helpDialog.close());
+
+// Show license data button handler
+showLicenseDataBtn.addEventListener("click", async () => {
+  const timestamp = backupSelect.value;
+  if (!timestamp) {
+    log(t("selectBackupForLicense"));
+    return;
+  }
+  
+  const fullPath = getFullTargetPath();
+  if (!fullPath) {
+    log(t("selectTargetFirst"));
+    return;
+  }
+  
+  try {
+    // Load manual apps list and existing license data in parallel
+    const [manualApps, licenseData] = await Promise.all([
+      invoke("get_manual_apps_from_backup", { targetPath: fullPath, timestamp }) as Promise<string[]>,
+      invoke("load_license_data", { targetPath: fullPath, timestamp }) as Promise<AppLicenseEntry[]>
+    ]);
+    
+    openLicenseModal(manualApps, licenseData, timestamp, false);
+  } catch (error) {
+    log(`❌ ${t("licenseLoadError")} ${error}`);
   }
 });
 
@@ -1541,7 +1966,7 @@ btnDeleteBackup.addEventListener("click", async () => {
   }
   
   try {
-    log(`Lösche Backup ${formatTimestamp(selectedBackup)}...`);
+    log(`${t("deletingBackup")} ${formatTimestamp(selectedBackup)}...`);
     await invoke("delete_backup", {
       targetPath: targetPath,
       timestamp: selectedBackup,
@@ -1660,6 +2085,42 @@ async function init(): Promise<void> {
   await loadVolumes();
   await loadBackups();
   await checkFullDiskAccess();
+
+  // Auto-detect if running from or next to a backup volume
+  try {
+    const detected = await invoke<DetectedBackupVolume | null>("detect_backup_volume");
+    if (detected && detected.backup_count > 0) {
+      const msg = t("backupVolumeDetectedMsg")
+        .replace("{name}", detected.volume_name)
+        .replace("{count}", String(detected.backup_count));
+      const confirmed = await ask(msg, {
+        title: t("backupVolumeDetected"),
+        kind: "info",
+      });
+      if (confirmed) {
+        // Auto-select the detected volume and load its backups
+        config.target_volume = detected.volume_path;
+        config.target_directory = "";
+        volumeSelect.value = detected.volume_path;
+        updateTargetPathDisplay();
+        await saveConfig();
+        await loadBackups();
+        log(t("restoreModeActivated"));
+
+        // If there's a latest backup, pre-select it
+        if (detected.latest_timestamp && backupSelect.options.length > 1) {
+          for (let i = 0; i < backupSelect.options.length; i++) {
+            if (backupSelect.options[i].value === detected.latest_timestamp) {
+              backupSelect.selectedIndex = i;
+              break;
+            }
+          }
+        }
+      }
+    }
+  } catch (e) {
+    // Detection failed silently – not critical
+  }
   
   try {
     const hasHomebrew = await invoke<boolean>("check_homebrew");
@@ -1757,10 +2218,6 @@ interface WindowState {
 })();
 
 // Global function for help menu
-(window as unknown as { showHelp: () => void }).showHelp = async function() {
-  try {
-    await invoke("show_help_window");
-  } catch (error) {
-    console.error("Error showing help:", error);
-  }
+(window as unknown as { showHelp: () => void }).showHelp = function() {
+  openHelpModal();
 };

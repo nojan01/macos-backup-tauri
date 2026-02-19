@@ -12,9 +12,78 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use walkdir::WalkDir;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::OnceLock;
 
 static BACKUP_CANCELLED: AtomicBool = AtomicBool::new(false);
+static VERIFY_CANCELLED: AtomicBool = AtomicBool::new(false);
+static OPERATION_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static TAR_PID: AtomicU32 = AtomicU32::new(0);
+
+/// Cached zstd path - computed once at first use
+static ZSTD_PATH: OnceLock<Option<String>> = OnceLock::new();
+
+/// Find and cache the zstd binary path
+fn get_zstd_path() -> Option<&'static str> {
+    ZSTD_PATH.get_or_init(|| {
+        let candidates = [
+            "/opt/homebrew/bin/zstd",  // Apple Silicon
+            "/usr/local/bin/zstd",      // Intel Mac
+        ];
+        for candidate in candidates {
+            if Path::new(candidate).exists() {
+                return Some(candidate.to_string());
+            }
+        }
+        // Fallback: which zstd
+        if let Ok(output) = Command::new("/usr/bin/which").arg("zstd").output() {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Some(path);
+                }
+            }
+        }
+        None
+    }).as_deref()
+}
+
+/// Check if zstd is available (cached)
+fn is_zstd_available() -> bool {
+    get_zstd_path().is_some()
+}
+
+/// Extract a tar archive (zstd or gzip) to a target directory.
+/// Tries zstd first if available, falls back to gzip for older backups.
+fn extract_archive_to(archive: &Path, target_dir: &Path) -> Result<(), String> {
+    fs::create_dir_all(target_dir).map_err(|e| format!("Failed to create dir: {}", e))?;
+
+    if let Some(zstd_path) = get_zstd_path() {
+        let compress_prog = format!("{} -d", zstd_path);
+        let zstd_result = Command::new("tar")
+            .current_dir(target_dir)
+            .args(["--use-compress-program", &compress_prog, "-xf", &archive.to_string_lossy()])
+            .output();
+
+        match zstd_result {
+            Ok(o) if o.status.success() => return Ok(()),
+            _ => {} // Fall through to gzip
+        }
+    }
+
+    // Fallback to gzip
+    let output = Command::new("tar")
+        .current_dir(target_dir)
+        .args(["-xzf", &archive.to_string_lossy()])
+        .output()
+        .map_err(|e| format!("tar failed: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Extraction failed: {}", stderr));
+    }
+
+    Ok(())
+}
 
 fn default_language() -> String {
     "de".to_string()
@@ -106,6 +175,14 @@ pub struct BackupListItem {
     pub hash_verified: bool,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DetectedBackupVolume {
+    pub volume_path: String,
+    pub volume_name: String,
+    pub backup_count: usize,
+    pub latest_timestamp: Option<String>,
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub struct VerifyResult {
     pub success: bool,
@@ -164,6 +241,17 @@ pub struct RestoreResult {
     pub restored: Vec<String>,
     pub skipped: Vec<String>,
     pub errors: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AppLicenseEntry {
+    pub app_name: String,
+    #[serde(default)]
+    pub registered_name: String,
+    #[serde(default)]
+    pub license_key: String,
+    #[serde(default)]
+    pub notes: String,
 }
 
 fn get_config_path() -> PathBuf {
@@ -296,6 +384,80 @@ fn get_external_volumes() -> Result<Vec<Volume>, String> {
     Ok(volumes)
 }
 
+/// Detect if the app is running from (or next to) a backup volume.
+/// Checks:
+///  1. The volume the executable is on
+///  2. All mounted /Volumes for a macos-backup-suite directory
+/// Returns the first volume found that contains backups.
+#[tauri::command]
+fn detect_backup_volume() -> Result<Option<DetectedBackupVolume>, String> {
+    // 1. Check the volume this executable is running from
+    if let Ok(exe) = std::env::current_exe() {
+        let exe_str = exe.to_string_lossy().to_string();
+        // If running from /Volumes/XXX/..., extract the volume path
+        if exe_str.starts_with("/Volumes/") {
+            let parts: Vec<&str> = exe_str.splitn(4, '/').collect();
+            // parts: ["", "Volumes", "VolumeName", "rest..."]
+            if parts.len() >= 3 {
+                let volume_path = format!("/Volumes/{}", parts[2]);
+                let suite_root = PathBuf::from(&volume_path).join("macos-backup-suite");
+                if suite_root.exists() && suite_root.is_dir() {
+                    let data_dir = suite_root.join("data");
+                    let mut backup_count = 0;
+                    if let Ok(entries) = fs::read_dir(&data_dir) {
+                        backup_count = entries.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()).count();
+                    }
+                    let latest = fs::read_to_string(suite_root.join("latest.json")).ok()
+                        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+                        .and_then(|v| v["latest"].as_str().map(|s| s.to_string()));
+                    return Ok(Some(DetectedBackupVolume {
+                        volume_path: volume_path.clone(),
+                        volume_name: parts[2].to_string(),
+                        backup_count,
+                        latest_timestamp: latest,
+                    }));
+                }
+            }
+        }
+    }
+
+    // 2. Scan all mounted volumes for a macos-backup-suite directory
+    let volumes_path = Path::new("/Volumes");
+    if let Ok(entries) = fs::read_dir(volumes_path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() { continue; }
+            let name = path.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            // Skip system volumes
+            if name == "Macintosh HD" || name == "Macintosh HD - Data" { continue; }
+            if is_time_machine_volume(&path) { continue; }
+
+            let suite_root = path.join("macos-backup-suite");
+            if suite_root.exists() && suite_root.is_dir() {
+                let data_dir = suite_root.join("data");
+                let mut backup_count = 0;
+                if let Ok(entries) = fs::read_dir(&data_dir) {
+                    backup_count = entries.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()).count();
+                }
+                if backup_count == 0 { continue; }
+                let latest = fs::read_to_string(suite_root.join("latest.json")).ok()
+                    .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+                    .and_then(|v| v["latest"].as_str().map(|s| s.to_string()));
+                return Ok(Some(DetectedBackupVolume {
+                    volume_path: path.to_string_lossy().to_string(),
+                    volume_name: name,
+                    backup_count,
+                    latest_timestamp: latest,
+                }));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
 /// List all user folders under /Users/
 #[tauri::command]
 fn list_user_folders() -> Result<Vec<UserFolder>, String> {
@@ -366,7 +528,7 @@ fn check_read_permission(path: String) -> Result<PermissionCheckResult, String> 
         return Ok(PermissionCheckResult {
             path,
             readable: false,
-            error_message: Some("Pfad existiert nicht".to_string()),
+            error_message: Some("Path does not exist".to_string()),
         });
     }
     
@@ -377,7 +539,7 @@ fn check_read_permission(path: String) -> Result<PermissionCheckResult, String> 
                 return Ok(PermissionCheckResult {
                     path,
                     readable: false,
-                    error_message: Some(format!("Keine Leseberechtigung: {}", e)),
+                    error_message: Some(format!("No read permission: {}", e)),
                 });
             }
         }
@@ -388,7 +550,7 @@ fn check_read_permission(path: String) -> Result<PermissionCheckResult, String> 
                 return Ok(PermissionCheckResult {
                     path,
                     readable: false,
-                    error_message: Some(format!("Kein Zugriff auf Verzeichnis: {}", e)),
+                    error_message: Some(format!("Cannot access directory: {}", e)),
                 });
             }
         }
@@ -419,7 +581,6 @@ fn check_full_disk_access() -> Result<FullDiskAccessStatus, String> {
         // We must try to read, not just open - macOS allows open but blocks read without FDA
         match fs::File::open(tcc_path) {
             Ok(mut file) => {
-                use std::io::Read;
                 let mut buffer = [0u8; 16];
                 let read_result = file.read(&mut buffer);
                 read_result.is_ok()
@@ -611,7 +772,7 @@ fn check_mas() -> Result<bool, String> {
 #[tauri::command]
 fn get_brew_packages() -> Result<String, String> {
     let brew_path = find_brew_path()
-        .ok_or_else(|| "Homebrew nicht gefunden. Bitte installiere Homebrew: https://brew.sh".to_string())?;
+        .ok_or_else(|| "Homebrew not found. Please install Homebrew: https://brew.sh".to_string())?;
     
     let output = Command::new(&brew_path)
         .args(["bundle", "dump", "--file=-"])
@@ -628,7 +789,7 @@ fn get_brew_packages() -> Result<String, String> {
 #[tauri::command]
 fn get_mas_apps() -> Result<String, String> {
     let mas_path = find_homebrew_command("mas")
-        .ok_or_else(|| "mas nicht gefunden. Installiere mit: brew install mas".to_string())?;
+        .ok_or_else(|| "mas not found. Install with: brew install mas".to_string())?;
     
     let output = Command::new(&mas_path)
         .arg("list")
@@ -638,7 +799,7 @@ fn get_mas_apps() -> Result<String, String> {
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
-        Err("mas nicht verfügbar".to_string())
+        Err("mas not available".to_string())
     }
 }
 
@@ -742,16 +903,16 @@ fn get_vscode_extensions() -> Result<Vec<String>, String> {
     
     let code_cmd = match code_cmd {
         Some(c) => c,
-        None => return Err("VS Code nicht installiert".to_string()),
+        None => return Err("VS Code not installed".to_string()),
     };
     
     let output = Command::new(&code_cmd)
         .arg("--list-extensions")
         .output()
-        .map_err(|e| format!("Fehler beim Abrufen der Extensions: {}", e))?;
+        .map_err(|e| format!("Error fetching extensions: {}", e))?;
     
     if !output.status.success() {
-        return Err("VS Code Extensions konnten nicht abgerufen werden".to_string());
+        return Err("Could not retrieve VS Code extensions".to_string());
     }
     
     let extensions: Vec<String> = String::from_utf8_lossy(&output.stdout)
@@ -799,19 +960,15 @@ fn create_tar_gz(source: &Path, target: &Path) -> Result<(), String> {
         .unwrap_or_else(|| "backup".to_string());
     
     // Check if zstd is available, fallback to gzip
-    let zstd_available = Command::new("which")
-        .arg("zstd")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let zstd_path = get_zstd_path();
     
     // Spawn the process so we can track and kill it
-    let mut child = if zstd_available {
+    let mut child = if let Some(zstd_bin) = zstd_path {
         // Use zstd compression (much faster, better compression)
         let mut cmd = Command::new("tar");
         cmd.current_dir(source_parent)
             .args([
-                "--use-compress-program=/opt/homebrew/bin/zstd -T0",  // -T0 uses all CPU cores
+                &format!("--use-compress-program={} -T0", zstd_bin),  // -T0 uses all CPU cores
                 "-cf",
                 &target.to_string_lossy(),
                 "--exclude", "*.sock",
@@ -900,25 +1057,25 @@ async fn create_backup(
     fs::create_dir_all(&backup_root).map_err(|e| e.to_string())?;
     fs::create_dir_all(&inventory_root).map_err(|e| e.to_string())?;
     
-    let _ = window.emit("backup-log", format!("=== Backup gestartet: {} ===", start_time_str));
+    let _ = window.emit("backup-log", format!("=== Backup started: {} ===", start_time_str));
     let _ = window.emit("backup-progress", serde_json::json!({
         "progress": 1,
         "message": "Initialisiere Backup..."
     }));
     
-    let _ = window.emit("backup-log", "Sammle Software-Inventar...");
+    let _ = window.emit("backup-log", "Collecting software inventory...");
     
     if let Ok(brewfile) = get_brew_packages() {
         let brewfile_path = inventory_root.join("Brewfile");
         let _ = fs::write(&brewfile_path, &brewfile);
-        let _ = window.emit("backup-log", format!("Brewfile gespeichert: {} Einträge", brewfile.lines().count()));
+        let _ = window.emit("backup-log", format!("Brewfile saved: {} entries", brewfile.lines().count()));
     }
     
     if let Ok(manual_apps) = get_manual_apps() {
         let manual_path = inventory_root.join("manual_apps.txt");
         let manual_content = manual_apps.join("\n");
         let _ = fs::write(&manual_path, &manual_content);
-        let _ = window.emit("backup-log", format!("Manuell installierte Apps: {} Apps", manual_apps.len()));
+        let _ = window.emit("backup-log", format!("Manually installed apps: {} apps", manual_apps.len()));
     }
     
     match get_vscode_extensions() {
@@ -929,13 +1086,13 @@ async fn create_backup(
             let _ = window.emit("backup-log", format!("VS Code Extensions: {} Extensions", extensions.len()));
         }
         Err(_) => {
-            let _ = window.emit("backup-log", "VS Code nicht installiert - Extensions übersprungen");
+            let _ = window.emit("backup-log", "VS Code not installed - extensions skipped");
         }
     }
     
     let _ = window.emit("backup-progress", serde_json::json!({
         "progress": 15,
-        "message": "Inventur abgeschlossen."
+        "message": "Inventory completed."
     }));
     
     let home = dirs::home_dir().unwrap_or_default();
@@ -945,13 +1102,13 @@ async fn create_backup(
     for (i, dir) in directories.iter().enumerate() {
         // Check for cancellation before each directory
         if BACKUP_CANCELLED.load(Ordering::SeqCst) {
-            let _ = window.emit("backup-log", "⚠️ Backup abgebrochen!");
+            let _ = window.emit("backup-log", "⚠️ Backup cancelled!");
             let _ = window.emit("backup-progress", serde_json::json!({
                 "progress": 0,
-                "message": "Backup abgebrochen"
+                "message": "Backup cancelled"
             }));
             BACKUP_CANCELLED.store(false, Ordering::SeqCst);
-            return Err("Backup wurde abgebrochen".to_string());
+            return Err("Backup was cancelled".to_string());
         }
         
         let expanded = if dir.starts_with("~/") {
@@ -963,7 +1120,7 @@ async fn create_backup(
         };
         
         if !expanded.exists() {
-            let _ = window.emit("backup-log", format!("Überspringe {} (nicht gefunden)", dir));
+            let _ = window.emit("backup-log", format!("Skipping {} (not found)", dir));
             continue;
         }
         
@@ -973,15 +1130,15 @@ async fn create_backup(
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "backup".to_string());
         
-        let archive_ext = if Path::new("/opt/homebrew/bin/zstd").exists() || Path::new("/usr/local/bin/zstd").exists() { "tar.zst" } else { "tar.gz" };
+        let archive_ext = if is_zstd_available() { "tar.zst" } else { "tar.gz" };
         let archive_name = format!("{}.{}", name.to_lowercase().replace(' ', "-").replace('.', "_"), archive_ext);
         let archive_path = backup_root.join(&archive_name);
         
-        let _ = window.emit("backup-log", format!("Archiviere {} ...", dir));
+        let _ = window.emit("backup-log", format!("Archiving {} ...", dir));
         let progress = 15 + (60 * (i + 1) / total);
         let _ = window.emit("backup-progress", serde_json::json!({
             "progress": progress,
-            "message": format!("Archiviere {}...", name)
+            "message": format!("Archiving {}...", name)
         }));
         
         let source_size = if is_file {
@@ -1006,13 +1163,13 @@ async fn create_backup(
         if BACKUP_CANCELLED.load(Ordering::SeqCst) {
             // Clean up partial archive
             let _ = fs::remove_file(&archive_path);
-            let _ = window.emit("backup-log", "⚠️ Backup abgebrochen!");
+            let _ = window.emit("backup-log", "⚠️ Backup cancelled!");
             let _ = window.emit("backup-progress", serde_json::json!({
                 "progress": 0,
-                "message": "Backup abgebrochen"
+                "message": "Backup cancelled"
             }));
             BACKUP_CANCELLED.store(false, Ordering::SeqCst);
-            return Err("Backup wurde abgebrochen".to_string());
+            return Err("Backup was cancelled".to_string());
         }
         
         let archive_size = fs::metadata(&archive_path)
@@ -1032,7 +1189,7 @@ async fn create_backup(
 
     // Archive Homebrew packages as a restorable item
     if let Ok(brewfile) = get_brew_packages() {
-        let brew_archive_name = if Path::new("/opt/homebrew/bin/zstd").exists() || Path::new("/usr/local/bin/zstd").exists() { "homebrew-packages.tar.zst" } else { "homebrew-packages.tar.gz" };
+        let brew_archive_name = if is_zstd_available() { "homebrew-packages.tar.zst" } else { "homebrew-packages.tar.gz" };
         let brew_archive_path = backup_root.join(brew_archive_name);
         let brew_temp = std::env::temp_dir().join("homebrew_packages.txt");
         let _ = fs::write(&brew_temp, &brewfile);
@@ -1057,7 +1214,7 @@ async fn create_backup(
                 archive_size_bytes: archive_size,
                 source_size_bytes: source_size,
             });
-            let _ = window.emit("backup-log", format!("Homebrew-Pakete archiviert: {} Bytes", source_size));
+            let _ = window.emit("backup-log", format!("Homebrew packages archived: {} bytes", source_size));
         }
         let _ = fs::remove_file(&brew_temp);
     }
@@ -1077,7 +1234,7 @@ async fn create_backup(
         }
         
         if mas_temp.exists() {
-            let mas_archive_name = if Path::new("/opt/homebrew/bin/zstd").exists() || Path::new("/usr/local/bin/zstd").exists() { "mas-apps.tar.zst" } else { "mas-apps.tar.gz" };
+            let mas_archive_name = if is_zstd_available() { "mas-apps.tar.zst" } else { "mas-apps.tar.gz" };
             let mas_archive_path = backup_root.join(mas_archive_name);
             let source_size = fs::metadata(&mas_temp).map(|m| m.len()).unwrap_or(0);
             
@@ -1099,14 +1256,14 @@ async fn create_backup(
                 archive_size_bytes: archive_size,
                 source_size_bytes: source_size,
             });
-            let _ = window.emit("backup-log", format!("MAS Apps archiviert: {} Bytes", source_size));
+            let _ = window.emit("backup-log", format!("MAS apps archived: {} bytes", source_size));
             let _ = fs::remove_file(&mas_temp);
         }
     }
     
     // Archive VS Code extensions as a restorable item
     if let Ok(extensions) = get_vscode_extensions() {
-        let vscode_archive_name = if Path::new("/opt/homebrew/bin/zstd").exists() || Path::new("/usr/local/bin/zstd").exists() { "vscode-extensions.tar.zst" } else { "vscode-extensions.tar.gz" };
+        let vscode_archive_name = if is_zstd_available() { "vscode-extensions.tar.zst" } else { "vscode-extensions.tar.gz" };
         let vscode_archive_path = backup_root.join(vscode_archive_name);
         let vscode_temp = std::env::temp_dir().join("vscode_extensions.txt");
         let vscode_content = extensions.join("
@@ -1133,7 +1290,7 @@ async fn create_backup(
                 archive_size_bytes: archive_size,
                 source_size_bytes: source_size,
             });
-            let _ = window.emit("backup-log", format!("VS Code Extensions archiviert: {} Extensions", extensions.len()));
+            let _ = window.emit("backup-log", format!("VS Code extensions archived: {} extensions", extensions.len()));
         }
         let _ = fs::remove_file(&vscode_temp);
     }
@@ -1141,7 +1298,7 @@ async fn create_backup(
     // Optional: Backup Homebrew Download Cache for offline installations (max 2GB)
     let config = load_config().unwrap_or_default();
     if config.backup_homebrew_cache {
-        let _ = window.emit("backup-log", "Prüfe Homebrew-Cache...");
+        let _ = window.emit("backup-log", "Checking Homebrew cache...");
         
         // Homebrew cache locations
         let cache_paths = [
@@ -1164,10 +1321,10 @@ async fn create_backup(
             const MAX_CACHE_SIZE: u64 = 2 * 1024 * 1024 * 1024; // 2GB
             
             if cache_size > 0 && cache_size <= MAX_CACHE_SIZE {
-                let cache_archive_name = if Path::new("/opt/homebrew/bin/zstd").exists() || Path::new("/usr/local/bin/zstd").exists() { "homebrew-cache.tar.zst" } else { "homebrew-cache.tar.gz" };
+                let cache_archive_name = if is_zstd_available() { "homebrew-cache.tar.zst" } else { "homebrew-cache.tar.gz" };
                 let cache_archive_path = backup_root.join(cache_archive_name);
                 
-                let _ = window.emit("backup-log", format!("Archiviere Homebrew-Cache ({:.1} MB)...", cache_size as f64 / (1024.0 * 1024.0)));
+                let _ = window.emit("backup-log", format!("Archiving Homebrew cache ({:.1} MB)...", cache_size as f64 / (1024.0 * 1024.0)));
                 
                 if create_tar_gz(&cache_dir, &cache_archive_path).is_ok() {
                     let archive_size = fs::metadata(&cache_archive_path).map(|m| m.len()).unwrap_or(0);
@@ -1179,18 +1336,18 @@ async fn create_backup(
                             archive_size_bytes: archive_size,
                             source_size_bytes: cache_size,
                         });
-                        let _ = window.emit("backup-log", format!("✅ Homebrew-Cache archiviert: {:.1} MB", archive_size as f64 / (1024.0 * 1024.0)));
+                        let _ = window.emit("backup-log", format!("✅ Homebrew cache archived: {:.1} MB", archive_size as f64 / (1024.0 * 1024.0)));
                     }
                 }
             } else if cache_size > MAX_CACHE_SIZE {
-                let _ = window.emit("backup-log", format!("⚠️ Homebrew-Cache zu groß ({:.1} GB > 2 GB max), übersprungen", cache_size as f64 / (1024.0 * 1024.0 * 1024.0)));
+                let _ = window.emit("backup-log", format!("⚠️ Homebrew cache too large ({:.1} GB > 2 GB max), skipped", cache_size as f64 / (1024.0 * 1024.0 * 1024.0)));
             }
         }
     }
 
     // Optional: Backup Safari Settings including Bookmarks
     if config.backup_safari_settings {
-        let _ = window.emit("backup-log", "Sichere Safari-Einstellungen...");
+        let _ = window.emit("backup-log", "Backing up Safari settings...");
         
         let home = dirs::home_dir().unwrap_or_default();
         let safari_paths = vec![
@@ -1241,7 +1398,7 @@ async fn create_backup(
         }
         
         if copied_count > 0 {
-            let safari_archive_name = if Path::new("/opt/homebrew/bin/zstd").exists() || Path::new("/usr/local/bin/zstd").exists() { "safari-settings.tar.zst" } else { "safari-settings.tar.gz" };
+            let safari_archive_name = if is_zstd_available() { "safari-settings.tar.zst" } else { "safari-settings.tar.gz" };
             let safari_archive_path = backup_root.join(safari_archive_name);
             
             if create_tar_gz(&temp_safari_dir, &safari_archive_path).is_ok() {
@@ -1256,11 +1413,11 @@ async fn create_backup(
                         archive_size_bytes: archive_size,
                         source_size_bytes: source_size,
                     });
-                    let _ = window.emit("backup-log", format!("✅ Safari-Einstellungen archiviert: {} Dateien/Ordner", copied_count));
+                    let _ = window.emit("backup-log", format!("✅ Safari settings archived: {} files/folders", copied_count));
                 }
             }
         } else {
-            let _ = window.emit("backup-log", "⚠️ Keine Safari-Einstellungen gefunden");
+            let _ = window.emit("backup-log", "⚠️ No Safari settings found");
         }
         
         let _ = fs::remove_dir_all(&temp_safari_dir);
@@ -1301,7 +1458,7 @@ async fn create_backup(
             if let Some(ref src) = resources_dmg {
                 if src.exists() {
                     if fs::copy(src, &dmg_dest).is_ok() {
-                        let _ = window.emit("backup-log", format!("✅ App-Installer kopiert: {}", dmg_filename));
+                        let _ = window.emit("backup-log", format!("✅ App installer copied: {}", dmg_filename));
                         dmg_copied = true;
                     }
                 }
@@ -1326,7 +1483,7 @@ async fn create_backup(
         for dev_path in &dev_paths {
             if dev_path.exists() {
                 if fs::copy(dev_path, &dmg_dest).is_ok() {
-                    let _ = window.emit("backup-log", format!("✅ App-Installer kopiert: {}", dmg_filename));
+                    let _ = window.emit("backup-log", format!("✅ App installer copied: {}", dmg_filename));
                     dmg_copied = true;
                     break;
                 }
@@ -1335,7 +1492,7 @@ async fn create_backup(
     }
     
     if !dmg_copied {
-        let _ = window.emit("backup-log", "ℹ️ App-Installer (DMG) nicht gefunden - führen Sie 'npm run tauri build' aus");
+        let _ = window.emit("backup-log", "ℹ️ App installer (DMG) not found - run 'npm run tauri build'");
     }
     
     let latest = serde_json::json!({
@@ -1352,10 +1509,10 @@ async fn create_backup(
         format!("{}s", duration)
     };
     
-    let _ = window.emit("backup-log", format!("=== Backup beendet: {} (Dauer: {}) ===", end_time_str, duration_str));
+    let _ = window.emit("backup-log", format!("=== Backup finished: {} (Duration: {}) ===", end_time_str, duration_str));
     let _ = window.emit("backup-progress", serde_json::json!({
         "progress": 100,
-        "message": "Backup abgeschlossen."
+        "message": "Backup completed."
     }));
     
     Ok(metadata)
@@ -1374,26 +1531,32 @@ async fn verify_backup(
     
     let metadata_path = backup_path.join("metadata.json");
     if !metadata_path.exists() {
-        return Err(format!("Backup nicht gefunden: {}", timestamp));
+        return Err(format!("Backup not found: {}", timestamp));
     }
     
     let metadata_content = fs::read_to_string(&metadata_path)
-        .map_err(|e| format!("Fehler beim Lesen der Metadaten: {}", e))?;
+        .map_err(|e| format!("Error reading metadata: {}", e))?;
     let metadata: BackupMetadata = serde_json::from_str(&metadata_content)
-        .map_err(|e| format!("Fehler beim Parsen der Metadaten: {}", e))?;
+        .map_err(|e| format!("Error parsing metadata: {}", e))?;
     
     let total_files = metadata.items.len();
     let mut verified_files = 0;
     let mut failed_files = Vec::new();
     
     for (i, item) in metadata.items.iter().enumerate() {
+        // Check for cancellation
+        if VERIFY_CANCELLED.load(Ordering::SeqCst) {
+            VERIFY_CANCELLED.store(false, Ordering::SeqCst);
+            return Err("Verification cancelled".to_string());
+        }
+        
         let archive_path = backup_path.join(&item.archive);
         
         let progress_msg = format!("Verifiziere {}/{}: {}", i + 1, total_files, item.archive);
         let _ = window.emit("backup-log", progress_msg);
         
         if !archive_path.exists() {
-            failed_files.push(format!("{}: Datei nicht gefunden", item.archive));
+            failed_files.push(format!("{}: File not found", item.archive));
             continue;
         }
         
@@ -1402,28 +1565,28 @@ async fn verify_backup(
                 if computed_hash == item.hash {
                     verified_files += 1;
                 } else {
-                    failed_files.push(format!("{}: Hash stimmt nicht überein (erwartet: {}, berechnet: {})", 
+                    failed_files.push(format!("{}: Hash mismatch (expected: {}, computed: {})", 
                         item.archive, &item.hash[..16], &computed_hash[..16]));
                 }
             }
             Err(e) => {
-                failed_files.push(format!("{}: Fehler beim Lesen: {}", item.archive, e));
+                failed_files.push(format!("{}: Read error: {}", item.archive, e));
             }
         }
         
         // Emit progress
         let fraction = (i + 1) as f64 / total_files as f64;
         let _ = window.emit("backup-progress", ProgressUpdate {
-            message: format!("{}/{} Dateien verifiziert", i + 1, total_files),
+            message: format!("{}/{} files verified", i + 1, total_files),
             fraction,
         });
     }
     
     let success = failed_files.is_empty();
     let message = if success {
-        format!("Alle {} Dateien erfolgreich verifiziert!", total_files)
+        format!("All {} files verified successfully!", total_files)
     } else {
-        format!("{} von {} Dateien fehlgeschlagen", failed_files.len(), total_files)
+        format!("{} of {} files failed", failed_files.len(), total_files)
     };
     
     let _ = window.emit("backup-log", &message);
@@ -1456,19 +1619,19 @@ async fn verify_backup_parallel(
     
     let metadata_path = backup_path.join("metadata.json");
     if !metadata_path.exists() {
-        return Err(format!("Backup nicht gefunden: {}", timestamp));
+        return Err(format!("Backup not found: {}", timestamp));
     }
     
     let metadata_content = fs::read_to_string(&metadata_path)
-        .map_err(|e| format!("Fehler beim Lesen der Metadaten: {}", e))?;
+        .map_err(|e| format!("Error reading metadata: {}", e))?;
     let metadata: BackupMetadata = serde_json::from_str(&metadata_content)
-        .map_err(|e| format!("Fehler beim Parsen der Metadaten: {}", e))?;
+        .map_err(|e| format!("Error parsing metadata: {}", e))?;
     
     let total_files = metadata.items.len();
     let verified_counter = Arc::new(AtomicUsize::new(0));
     let failed_files = Arc::new(Mutex::new(Vec::<String>::new()));
     
-    let _ = window.emit("backup-log", format!("🔍 Parallele Verifizierung von {} Dateien...", total_files));
+    let _ = window.emit("backup-log", format!("🔍 Parallel verification of {} files...", total_files));
     
     // Process files in parallel batches (4 at a time to balance CPU and I/O)
     const PARALLEL_VERIFY: usize = 4;
@@ -1494,7 +1657,7 @@ async fn verify_backup_parallel(
                 
                 if !archive_path.exists() {
                     let mut failed_lock = failed.lock().unwrap();
-                    failed_lock.push(format!("{}: Datei nicht gefunden", item.archive));
+                    failed_lock.push(format!("{}: File not found", item.archive));
                     return;
                 }
                 
@@ -1504,13 +1667,13 @@ async fn verify_backup_parallel(
                             verified.fetch_add(1, AtomicOrdering::SeqCst);
                         } else {
                             let mut failed_lock = failed.lock().unwrap();
-                            failed_lock.push(format!("{}: Hash stimmt nicht überein (erwartet: {}, berechnet: {})", 
+                            failed_lock.push(format!("{}: Hash mismatch (expected: {}, computed: {})", 
                                 item.archive, &item.hash[..16], &computed_hash[..16]));
                         }
                     }
                     Err(e) => {
                         let mut failed_lock = failed.lock().unwrap();
-                        failed_lock.push(format!("{}: Fehler beim Lesen: {}", item.archive, e));
+                        failed_lock.push(format!("{}: Read error: {}", item.archive, e));
                     }
                 }
             });
@@ -1526,7 +1689,7 @@ async fn verify_backup_parallel(
         processed += PARALLEL_VERIFY.min(total_files - processed);
         let fraction = processed as f64 / total_files as f64;
         let _ = window.emit("backup-progress", ProgressUpdate {
-            message: format!("{}/{} Dateien verifiziert", processed, total_files),
+            message: format!("{}/{} files verified", processed, total_files),
             fraction,
         });
     }
@@ -1539,9 +1702,9 @@ async fn verify_backup_parallel(
     
     let success = failed_files_result.is_empty();
     let message = if success {
-        format!("✅ Alle {} Dateien erfolgreich verifiziert (parallel)!", total_files)
+        format!("✅ All {} files verified successfully (parallel)!", total_files)
     } else {
-        format!("❌ {} von {} Dateien fehlgeschlagen", failed_files_result.len(), total_files)
+        format!("❌ {} of {} files failed", failed_files_result.len(), total_files)
     };
     
     let _ = window.emit("backup-log", &message);
@@ -1565,13 +1728,13 @@ fn list_backup_files(target_path: String, timestamp: String) -> Result<BackupDet
     
     let metadata_path = backup_path.join("metadata.json");
     if !metadata_path.exists() {
-        return Err(format!("Backup nicht gefunden: {}", timestamp));
+        return Err(format!("Backup not found: {}", timestamp));
     }
     
     let metadata_content = fs::read_to_string(&metadata_path)
-        .map_err(|e| format!("Fehler beim Lesen der Metadaten: {}", e))?;
+        .map_err(|e| format!("Error reading metadata: {}", e))?;
     let metadata: BackupMetadata = serde_json::from_str(&metadata_content)
-        .map_err(|e| format!("Fehler beim Parsen der Metadaten: {}", e))?;
+        .map_err(|e| format!("Error parsing metadata: {}", e))?;
     
     let items: Vec<BackupFileInfo> = metadata.items.iter().map(|item| {
         BackupFileInfo {
@@ -1635,11 +1798,11 @@ fn get_manual_apps_from_backup(target_path: String, timestamp: String) -> Result
         .join("manual_apps.txt");
     
     if !inventory_path.exists() {
-        return Err("Datei manual_apps.txt nicht gefunden".to_string());
+        return Err("File manual_apps.txt not found".to_string());
     }
     
     let content = fs::read_to_string(&inventory_path)
-        .map_err(|e| format!("Fehler beim Lesen: {}", e))?;
+        .map_err(|e| format!("Error reading file: {}", e))?;
     
     let apps: Vec<String> = content
         .lines()
@@ -1648,6 +1811,48 @@ fn get_manual_apps_from_backup(target_path: String, timestamp: String) -> Result
         .collect();
     
     Ok(apps)
+}
+
+#[tauri::command]
+fn save_license_data(target_path: String, timestamp: String, data: Vec<AppLicenseEntry>) -> Result<(), String> {
+    let inventory_dir = PathBuf::from(&target_path)
+        .join("macos-backup-suite")
+        .join("inventories")
+        .join(&timestamp);
+    
+    if !inventory_dir.exists() {
+        return Err("Inventory directory not found".to_string());
+    }
+    
+    let license_path = inventory_dir.join("license_data.json");
+    let json = serde_json::to_string_pretty(&data)
+        .map_err(|e| format!("JSON serialization error: {}", e))?;
+    
+    fs::write(&license_path, &json)
+        .map_err(|e| format!("Error writing license data: {}", e))?;
+    
+    Ok(())
+}
+
+#[tauri::command]
+fn load_license_data(target_path: String, timestamp: String) -> Result<Vec<AppLicenseEntry>, String> {
+    let license_path = PathBuf::from(&target_path)
+        .join("macos-backup-suite")
+        .join("inventories")
+        .join(&timestamp)
+        .join("license_data.json");
+    
+    if !license_path.exists() {
+        return Ok(Vec::new());
+    }
+    
+    let content = fs::read_to_string(&license_path)
+        .map_err(|e| format!("Error reading license data: {}", e))?;
+    
+    let data: Vec<AppLicenseEntry> = serde_json::from_str(&content)
+        .map_err(|e| format!("JSON parse error: {}", e))?;
+    
+    Ok(data)
 }
 
 #[tauri::command]
@@ -1692,15 +1897,15 @@ async fn restore_items(
     
     let metadata_path = backup_path.join("metadata.json");
     if !metadata_path.exists() {
-        return Err(format!("Backup nicht gefunden: {}", timestamp));
+        return Err(format!("Backup not found: {}", timestamp));
     }
     
     let metadata_content = fs::read_to_string(&metadata_path)
-        .map_err(|e| format!("Fehler beim Lesen der Metadaten: {}", e))?;
+        .map_err(|e| format!("Error reading metadata: {}", e))?;
     let metadata: BackupMetadata = serde_json::from_str(&metadata_content)
-        .map_err(|e| format!("Fehler beim Parsen: {}", e))?;
+        .map_err(|e| format!("Error parsing: {}", e))?;
     
-    let home = dirs::home_dir().ok_or("Home-Verzeichnis nicht gefunden")?;
+    let home = dirs::home_dir().ok_or("Home directory not found")?;
     let mut restored: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
@@ -1714,119 +1919,119 @@ async fn restore_items(
         
         let _ = window.emit("restore-progress", serde_json::json!({
             "progress": start_progress,
-            "message": format!("Stelle wieder her: {}", item_path)
+            "message": format!("Restoring: {}", item_path)
         }));
         
         // Find the backup item
         let backup_item = metadata.items.iter().find(|it| &it.path == item_path);
         if backup_item.is_none() {
-            errors.push(format!("{}: Nicht im Backup gefunden", item_path));
+            errors.push(format!("{}: Not found in backup", item_path));
             continue;
         }
         let backup_item = backup_item.unwrap();
         
         // Special handling for different item types
         if item_path == "homebrew-packages" {
-            let action = if overwrite { "Reinstalliere" } else { "Installiere fehlende" };
-            let _ = window.emit("restore-log", format!("{} Homebrew-Pakete...", action));
+            let action = if overwrite { "Reinstalling" } else { "Installing missing" };
+            let _ = window.emit("restore-log", format!("{} Homebrew packages...", action));
             match restore_homebrew_packages(&backup_path, &backup_item.archive, overwrite) {
                 Ok(count) => {
                     if count > 0 {
-                        restored.push(format!("{} ({} neu installiert)", item_path, count));
-                        let _ = window.emit("restore-log", format!("✅ {} Homebrew-Pakete neu installiert/aktualisiert", count));
+                        restored.push(format!("{} ({} newly installed)", item_path, count));
+                        let _ = window.emit("restore-log", format!("✅ {} Homebrew packages newly installed/updated", count));
                     } else {
-                        restored.push(format!("{} (alle bereits vorhanden)", item_path));
-                        let _ = window.emit("restore-log", format!("✅ Alle Homebrew-Pakete waren bereits installiert"));
+                        restored.push(format!("{} (all already present)", item_path));
+                        let _ = window.emit("restore-log", format!("✅ All Homebrew packages were already installed"));
                     }
                 }
                 Err(e) => {
                     errors.push(format!("{}: {}", item_path, e));
-                    let _ = window.emit("restore-log", format!("❌ Homebrew-Fehler: {}", e));
+                    let _ = window.emit("restore-log", format!("❌ Homebrew error: {}", e));
                 }
             }
             let _ = window.emit("restore-progress", serde_json::json!({
                 "progress": end_progress,
-                "message": "Homebrew abgeschlossen"
+                "message": "Homebrew completed"
             }));
             continue;
         }
         
         if item_path == "mas-apps" {
-            let action = if overwrite { "Reinstalliere" } else { "Installiere fehlende" };
+            let action = if overwrite { "Reinstalling" } else { "Installing missing" };
             let _ = window.emit("restore-log", format!("{} Mac App Store Apps...", action));
             match restore_mas_apps(&backup_path, &backup_item.archive, overwrite) {
                 Ok(count) => {
                     restored.push(format!("{} ({} Apps)", item_path, count));
-                    let _ = window.emit("restore-log", format!("✅ {} MAS Apps installiert", count));
+                    let _ = window.emit("restore-log", format!("✅ {} MAS apps installed", count));
                 }
                 Err(e) => {
                     errors.push(format!("{}: {}", item_path, e));
-                    let _ = window.emit("restore-log", format!("❌ MAS-Fehler: {}", e));
+                    let _ = window.emit("restore-log", format!("❌ MAS error: {}", e));
                 }
             }
             let _ = window.emit("restore-progress", serde_json::json!({
                 "progress": end_progress,
-                "message": "MAS Apps abgeschlossen"
+                "message": "MAS apps completed"
             }));
             continue;
         }
         
         if item_path == "vscode-extensions" {
-            let action = if overwrite { "Reinstalliere" } else { "Installiere fehlende" };
+            let action = if overwrite { "Reinstalling" } else { "Installing missing" };
             let _ = window.emit("restore-log", format!("{} VS Code Extensions...", action));
             match restore_vscode_extensions(&backup_path, &backup_item.archive, overwrite) {
                 Ok(count) => {
                     restored.push(format!("{} ({} Extensions)", item_path, count));
-                    let _ = window.emit("restore-log", format!("✅ {} VS Code Extensions installiert", count));
+                    let _ = window.emit("restore-log", format!("✅ {} VS Code extensions installed", count));
                 }
                 Err(e) => {
                     errors.push(format!("{}: {}", item_path, e));
-                    let _ = window.emit("restore-log", format!("❌ VS Code-Fehler: {}", e));
+                    let _ = window.emit("restore-log", format!("❌ VS Code error: {}", e));
                 }
             }
             let _ = window.emit("restore-progress", serde_json::json!({
                 "progress": end_progress,
-                "message": "VS Code abgeschlossen"
+                "message": "VS Code completed"
             }));
             continue;
         }
         
         // Safari settings restore
         if item_path == "safari-settings" {
-            let _ = window.emit("restore-log", "Stelle Safari-Einstellungen wieder her...".to_string());
+            let _ = window.emit("restore-log", "Restoring Safari settings...".to_string());
             match restore_safari_settings(&backup_path, &backup_item.archive) {
                 Ok(count) => {
-                    restored.push(format!("{} ({} Dateien)", item_path, count));
-                    let _ = window.emit("restore-log", format!("✅ {} Safari-Einstellungen wiederhergestellt", count));
+                    restored.push(format!("{} ({} files)", item_path, count));
+                    let _ = window.emit("restore-log", format!("✅ {} Safari settings restored", count));
                 }
                 Err(e) => {
                     errors.push(format!("{}: {}", item_path, e));
-                    let _ = window.emit("restore-log", format!("❌ Safari-Fehler: {}", e));
+                    let _ = window.emit("restore-log", format!("❌ Safari error: {}", e));
                 }
             }
             let _ = window.emit("restore-progress", serde_json::json!({
                 "progress": end_progress,
-                "message": "Safari abgeschlossen"
+                "message": "Safari completed"
             }));
             continue;
         }
         
         // Homebrew cache restore
         if item_path == "homebrew-cache" {
-            let _ = window.emit("restore-log", "Stelle Homebrew-Cache wieder her...".to_string());
+            let _ = window.emit("restore-log", "Restoring Homebrew cache...".to_string());
             match restore_homebrew_cache(&backup_path, &backup_item.archive) {
                 Ok(size_mb) => {
                     restored.push(format!("{} ({} MB)", item_path, size_mb));
-                    let _ = window.emit("restore-log", format!("✅ Homebrew-Cache wiederhergestellt ({} MB)", size_mb));
+                    let _ = window.emit("restore-log", format!("✅ Homebrew cache restored ({} MB)", size_mb));
                 }
                 Err(e) => {
                     errors.push(format!("{}: {}", item_path, e));
-                    let _ = window.emit("restore-log", format!("❌ Homebrew-Cache-Fehler: {}", e));
+                    let _ = window.emit("restore-log", format!("❌ Homebrew cache error: {}", e));
                 }
             }
             let _ = window.emit("restore-progress", serde_json::json!({
                 "progress": end_progress,
-                "message": "Homebrew-Cache abgeschlossen"
+                "message": "Homebrew cache completed"
             }));
             continue;
         }
@@ -1834,7 +2039,7 @@ async fn restore_items(
         // Regular directory/file restore
         let archive_path = backup_path.join(&backup_item.archive);
         if !archive_path.exists() {
-            errors.push(format!("{}: Archiv nicht gefunden", item_path));
+            errors.push(format!("{}: Archive not found", item_path));
             continue;
         }
         
@@ -1849,21 +2054,21 @@ async fn restore_items(
         
         // Check if target exists
         if target.exists() && !overwrite {
-            skipped.push(format!("{}: Existiert bereits", item_path));
-            let _ = window.emit("restore-log", format!("⏭️ Übersprungen: {} (existiert)", item_path));
+            skipped.push(format!("{}: Already exists", item_path));
+            let _ = window.emit("restore-log", format!("⏭️ Skipped: {} (exists)", item_path));
             continue;
         }
         
         // Extract archive
-        let _ = window.emit("restore-log", format!("📦 Extrahiere: {}", item_path));
+        let _ = window.emit("restore-log", format!("📦 Extracting: {}", item_path));
         match extract_tar_gz(&archive_path, &target, overwrite) {
             Ok(_) => {
                 restored.push(item_path.clone());
-                let _ = window.emit("restore-log", format!("✅ Wiederhergestellt: {}", item_path));
+                let _ = window.emit("restore-log", format!("✅ Restored: {}", item_path));
             }
             Err(e) => {
                 errors.push(format!("{}: {}", item_path, e));
-                let _ = window.emit("restore-log", format!("❌ Fehler: {} - {}", item_path, e));
+                let _ = window.emit("restore-log", format!("❌ Error: {} - {}", item_path, e));
             }
         }
     }
@@ -1881,84 +2086,66 @@ async fn restore_items(
 fn extract_tar_gz(archive: &Path, target: &Path, overwrite: bool) -> Result<(), String> {
     // Create parent directory if needed
     if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("Fehler beim Erstellen des Verzeichnisses: {}", e))?;
+        fs::create_dir_all(parent).map_err(|e| format!("Error creating directory: {}", e))?;
     }
     
     // Check if target exists and we're not overwriting
     if !overwrite && target.exists() {
-        return Err("Ziel existiert bereits und Überschreiben ist deaktiviert".to_string());
+        return Err("Target already exists and overwrite is disabled".to_string());
     }
     
-    // Use ditto to extract (better for macOS, preserves attributes, merges into existing dirs)
-    // ditto extracts archives and merges with existing directories
-    let output = Command::new("ditto")
-        .args(["-x", "-k", &archive.to_string_lossy(), &target.parent().unwrap_or(Path::new("/")).to_string_lossy()])
-        .output()
-        .map_err(|e| format!("ditto Fehler: {}", e))?;
+    let archive_str = archive.to_string_lossy().to_string();
+    let extract_dir = target.parent().unwrap_or(Path::new("/"));
     
-    if !output.status.success() {
-        // Fallback to tar if ditto fails (for .tar.gz or .tar.zst files)
-        let archive_str = archive.to_string_lossy().to_string();
-        
-        // Check if zstd is available for decompression
-        let zstd_available = Command::new("which")
-            .arg("zstd")
+    // Determine decompression method based on file extension and available tools
+    let is_zst = archive_str.ends_with(".zst") || archive_str.ends_with(".tar.zst");
+    let zstd_path = get_zstd_path();
+    
+    let tar_output = if is_zst && zstd_path.is_some() {
+        // Use zstd decompression for .zst archives
+        let compress_arg = format!("--use-compress-program={} -d", zstd_path.unwrap());
+        let mut args = vec![];
+        if !overwrite { args.push("-k"); }
+        args.extend_from_slice(&[compress_arg.as_str(), "-xf", &archive_str]);
+        Command::new("tar")
+            .current_dir(extract_dir)
+            .args(&args)
             .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+            .map_err(|e| format!("tar (zstd) error: {}", e))?
+    } else if is_zst && zstd_path.is_none() {
+        return Err("Archive is zstd-compressed but zstd is not installed. Install with: brew install zstd".to_string());
+    } else {
+        // gzip (.tar.gz) - try first, then fallback to auto-detect
+        let mut args = vec![];
+        if !overwrite { args.push("-k"); }
+        args.extend_from_slice(&["-xzf", &archive_str]);
+        let result = Command::new("tar")
+            .current_dir(extract_dir)
+            .args(&args)
+            .output()
+            .map_err(|e| format!("tar error: {}", e))?;
         
-        let tar_output = if zstd_available {
-            // Try zstd first (handles both .zst and auto-detects format)
-            let result = if overwrite {
-                Command::new("tar")
-                    .current_dir(target.parent().unwrap_or(Path::new("/")))
-                    .args(["--use-compress-program=zstd -d", "-xf", &archive_str])
-                    .output()
-            } else {
-                Command::new("tar")
-                    .current_dir(target.parent().unwrap_or(Path::new("/")))
-                    .args(["-k", "--use-compress-program=zstd -d", "-xf", &archive_str])
-                    .output()
-            };
-            
-            // If zstd fails, try gzip (for older backups)
-            match result {
-                Ok(o) if !o.status.success() => {
-                    if overwrite {
-                        Command::new("tar")
-                            .current_dir(target.parent().unwrap_or(Path::new("/")))
-                            .args(["-xzf", &archive_str])
-                            .output()
-                    } else {
-                        Command::new("tar")
-                            .current_dir(target.parent().unwrap_or(Path::new("/")))
-                            .args(["-k", "-xzf", &archive_str])
-                            .output()
-                    }
-                }
-                other => other
-            }
+        // If gzip fails and zstd is available, try zstd (could be a .tar.zst with wrong extension)
+        if !result.status.success() && zstd_path.is_some() {
+            let compress_arg = format!("--use-compress-program={} -d", zstd_path.unwrap());
+            let mut args2 = vec![];
+            if !overwrite { args2.push("-k"); }
+            args2.extend_from_slice(&[compress_arg.as_str(), "-xf", &archive_str]);
+            Command::new("tar")
+                .current_dir(extract_dir)
+                .args(&args2)
+                .output()
+                .map_err(|e| format!("tar (zstd fallback) error: {}", e))?
         } else {
-            // No zstd, use gzip
-            if overwrite {
-                Command::new("tar")
-                    .current_dir(target.parent().unwrap_or(Path::new("/")))
-                    .args(["-xzf", &archive_str])
-                    .output()
-            } else {
-                Command::new("tar")
-                    .current_dir(target.parent().unwrap_or(Path::new("/")))
-                    .args(["-k", "-xzf", &archive_str])
-                    .output()
-            }
-        }.map_err(|e| format!("tar Fehler: {}", e))?;
-        
-        if !tar_output.status.success() {
-            let tar_stderr = String::from_utf8_lossy(&tar_output.stderr);
-            // -k causes error if files exist but that's expected when not overwriting
-            if !(overwrite == false && tar_stderr.contains("exist")) {
-                return Err(format!("Extraktion fehlgeschlagen: {}", tar_stderr));
-            }
+            result
+        }
+    };
+    
+    if !tar_output.status.success() {
+        let tar_stderr = String::from_utf8_lossy(&tar_output.stderr);
+        // -k causes error if files exist but that's expected when not overwriting
+        if !(overwrite == false && tar_stderr.contains("exist")) {
+            return Err(format!("Extraction failed: {}", tar_stderr));
         }
     }
     
@@ -1970,50 +2157,13 @@ fn restore_homebrew_packages(backup_path: &Path, archive_name: &str, reinstall: 
     
     // Extract to temp dir
     let temp_dir = std::env::temp_dir().join("macos-backup-restore");
-    fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
-    
-    // Try zstd first, fallback to gzip for older backups
-    let zstd_available = Command::new("which")
-        .arg("zstd")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    
-    let output = if zstd_available {
-        let zstd_result = Command::new("tar")
-            .current_dir(&temp_dir)
-            .args(["--use-compress-program=zstd -d", "-xf", &archive.to_string_lossy()])
-            .output();
-        
-        match zstd_result {
-            Ok(o) if !o.status.success() => {
-                // Fallback to gzip for older backups
-                Command::new("tar")
-                    .current_dir(&temp_dir)
-                    .args(["-xzf", &archive.to_string_lossy()])
-                    .output()
-                    .map_err(|e| e.to_string())?
-            }
-            Ok(o) => o,
-            Err(e) => return Err(e.to_string())
-        }
-    } else {
-        Command::new("tar")
-            .current_dir(&temp_dir)
-            .args(["-xzf", &archive.to_string_lossy()])
-            .output()
-            .map_err(|e| e.to_string())?
-    };
-    
-    if !output.status.success() {
-        return Err("Entpacken fehlgeschlagen".to_string());
-    }
+    extract_archive_to(&archive, &temp_dir)?;
     
     // The file is a Brewfile, rename it for brew bundle
     let packages_file = temp_dir.join("homebrew_packages.txt");
     let brewfile = temp_dir.join("Brewfile");
     if !packages_file.exists() {
-        return Err("Paketliste nicht gefunden".to_string());
+        return Err("Package list not found".to_string());
     }
     
     // Rename to Brewfile for brew bundle
@@ -2036,7 +2186,7 @@ fn restore_homebrew_packages(backup_path: &Path, archive_name: &str, reinstall: 
     let output = Command::new("/bin/zsh")
         .args(["-l", "-c", &format!("cd {:?} && brew bundle{}", temp_dir, force_flag)])
         .output()
-        .map_err(|e| format!("brew bundle Fehler: {}", e))?;
+        .map_err(|e| format!("brew bundle error: {}", e))?;
     
     // Cleanup
     let _ = fs::remove_dir_all(&temp_dir);
@@ -2055,7 +2205,7 @@ fn restore_homebrew_packages(backup_path: &Path, archive_name: &str, reinstall: 
         let stderr = String::from_utf8_lossy(&output.stderr);
         // Only error if completely failed
         if stderr.contains("error") && installed == 0 {
-            return Err(format!("brew bundle fehlgeschlagen: {}", stderr));
+            return Err(format!("brew bundle failed: {}", stderr));
         }
     }
     
@@ -2077,166 +2227,318 @@ async fn quick_restore_essentials(
     timestamp: String,
     window: tauri::Window,
 ) -> Result<RestoreResult, String> {
-    // Essential packages that make a system immediately usable
-    let essential_brews = vec![
-        "git", "vim", "python", "node", "curl", "wget", "htop", "tree", "jq", "ripgrep", "fd", "bat", "fzf"
-    ];
-    let essential_casks = vec![
-        "visual-studio-code", "iterm2", "google-chrome", "firefox", "1password", "rectangle", "alfred"
-    ];
-    
-    let brew_path = find_brew_path()
-        .ok_or_else(|| "Homebrew nicht gefunden".to_string())?;
-    
     let mut restored: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
-    
-    // First, get the Brewfile from backup to check what was actually installed
+
+    let home = dirs::home_dir().ok_or_else(|| "Home directory not found".to_string())?;
     let backup_path = PathBuf::from(&target_path)
         .join("macos-backup-suite")
         .join("data")
         .join(&timestamp);
-    
+
     let metadata_path = backup_path.join("metadata.json");
     if !metadata_path.exists() {
-        return Err(format!("Backup nicht gefunden: {}", timestamp));
+        return Err(format!("Backup not found: {}", timestamp));
     }
-    
+
     let metadata_content = fs::read_to_string(&metadata_path)
-        .map_err(|e| format!("Fehler beim Lesen der Metadaten: {}", e))?;
+        .map_err(|e| format!("Error reading metadata: {}", e))?;
     let metadata: BackupMetadata = serde_json::from_str(&metadata_content)
-        .map_err(|e| format!("Fehler beim Parsen: {}", e))?;
-    
-    // Find homebrew-packages archive
-    let brew_item = metadata.items.iter().find(|it| it.path == "homebrew-packages");
-    
-    let mut packages_in_backup: Vec<String> = Vec::new();
-    let mut casks_in_backup: Vec<String> = Vec::new();
-    
-    if let Some(item) = brew_item {
-        // Extract and read Brewfile
-        let archive = backup_path.join(&item.archive);
-        let temp_dir = std::env::temp_dir().join("macos-backup-quick-restore");
-        let _ = fs::create_dir_all(&temp_dir);
-        
-        let _ = Command::new("tar")
-            .current_dir(&temp_dir)
-            .args(["-xzf", &archive.to_string_lossy()])
-            .output();
-        
-        let packages_file = temp_dir.join("homebrew_packages.txt");
-        if packages_file.exists() {
-            if let Ok(content) = fs::read_to_string(&packages_file) {
-                for line in content.lines() {
-                    if line.starts_with("brew \"") {
-                        if let Some(pkg) = line.split('"').nth(1) {
-                            packages_in_backup.push(pkg.to_string());
+        .map_err(|e| format!("Error parsing: {}", e))?;
+
+    // ── Phase 1: SSH keys & shell configs (0-15%) ──
+    let _ = window.emit("restore-log", "🔑 Phase 1/4: Restoring SSH keys & shell configs...");
+    let _ = window.emit("restore-progress", serde_json::json!({
+        "progress": 0,
+        "message": "Phase 1: SSH & shell configs..."
+    }));
+
+    let phase1_paths = vec![
+        "~/.ssh",
+        "~/.gnupg",
+        "~/.gitconfig",
+        "~/.zshrc",
+        "~/.zprofile",
+        "~/.zsh_history",
+        "~/.bashrc",
+        "~/.bash_profile",
+        "~/.bash_history",
+        "~/.config/git",
+    ];
+
+    for config_path in &phase1_paths {
+        if let Some(item) = metadata.items.iter().find(|it| &it.path == config_path) {
+            let archive = backup_path.join(&item.archive);
+            if archive.exists() {
+                let target = if config_path.starts_with("~/") {
+                    home.join(&config_path[2..])
+                } else {
+                    PathBuf::from(config_path)
+                };
+
+                if target.exists() {
+                    skipped.push(format!("{} (already exists)", config_path));
+                } else {
+                    match extract_tar_gz(&archive, &target, false) {
+                        Ok(_) => {
+                            restored.push(config_path.to_string());
+                            let _ = window.emit("restore-log", format!("  ✅ Restored: {}", config_path));
                         }
-                    } else if line.starts_with("cask \"") {
-                        if let Some(cask) = line.split('"').nth(1) {
-                            casks_in_backup.push(cask.to_string());
+                        Err(e) => {
+                            errors.push(format!("{}: {}", config_path, e));
+                            let _ = window.emit("restore-log", format!("  ❌ Error: {} - {}", config_path, e));
                         }
                     }
                 }
             }
         }
-        let _ = fs::remove_dir_all(&temp_dir);
     }
-    
-    let _ = window.emit("restore-log", "🚀 Quick-Restore: Installiere essentielle Pakete...");
+
+    // Fix SSH key permissions
+    let ssh_dir = home.join(".ssh");
+    if ssh_dir.exists() {
+        let _ = Command::new("chmod").args(["700", &ssh_dir.to_string_lossy()]).output();
+        if let Ok(entries) = fs::read_dir(&ssh_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                if !name.ends_with(".pub") && !name.starts_with("known_hosts") && name != "config" && name != "authorized_keys" {
+                    let _ = Command::new("chmod").args(["600", &path.to_string_lossy()]).output();
+                }
+            }
+        }
+    }
+
     let _ = window.emit("restore-progress", serde_json::json!({
-        "progress": 5,
-        "message": "Quick-Restore gestartet..."
+        "progress": 15,
+        "message": "Phase 1 completed"
     }));
-    
-    // Install essential brew packages that were in the backup
-    let brews_to_install: Vec<&str> = essential_brews.iter()
-        .filter(|pkg| packages_in_backup.iter().any(|b| b.contains(*pkg)))
-        .cloned()
-        .collect();
-    
-    let total_items = brews_to_install.len() + essential_casks.len();
-    let mut current = 0;
-    
-    for pkg in &brews_to_install {
-        current += 1;
-        let progress = 5 + (current * 45 / total_items.max(1));
-        let _ = window.emit("restore-progress", serde_json::json!({
-            "progress": progress,
-            "message": format!("Installiere {}...", pkg)
-        }));
-        
-        let output = Command::new(&brew_path)
-            .args(["install", pkg])
-            .output();
-        
-        match output {
-            Ok(o) if o.status.success() => {
-                restored.push(format!("brew: {}", pkg));
-                let _ = window.emit("restore-log", format!("✅ {} installiert", pkg));
-            }
-            Ok(o) => {
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                if stderr.contains("already installed") {
-                    skipped.push(format!("brew: {} (bereits installiert)", pkg));
-                } else {
-                    errors.push(format!("brew: {} - {}", pkg, stderr.lines().next().unwrap_or("")));
+
+    // ── Phase 2: Homebrew & core CLI tools (15-50%) ──
+    let _ = window.emit("restore-log", "🍺 Phase 2/4: Installing Homebrew CLI tools...");
+    let _ = window.emit("restore-progress", serde_json::json!({
+        "progress": 15,
+        "message": "Phase 2: Homebrew CLI tools..."
+    }));
+
+    let essential_brews = vec![
+        "git", "vim", "python", "node", "curl", "wget", "htop", "tree",
+        "jq", "ripgrep", "fd", "bat", "fzf", "zsh-autosuggestions",
+        "zsh-syntax-highlighting", "tmux",
+    ];
+
+    if let Some(brew_path) = find_brew_path() {
+        // Parse backup Brewfile to find what was installed
+        let mut packages_in_backup: Vec<String> = Vec::new();
+        if let Some(item) = metadata.items.iter().find(|it| it.path == "homebrew-packages") {
+            let archive = backup_path.join(&item.archive);
+            let temp_dir = std::env::temp_dir().join("macos-backup-quick-restore");
+            let _ = extract_archive_to(&archive, &temp_dir);
+            let packages_file = temp_dir.join("homebrew_packages.txt");
+            if packages_file.exists() {
+                if let Ok(content) = fs::read_to_string(&packages_file) {
+                    for line in content.lines() {
+                        if line.starts_with("brew \"") {
+                            if let Some(pkg) = line.split('"').nth(1) {
+                                packages_in_backup.push(pkg.to_string());
+                            }
+                        }
+                    }
                 }
             }
-            Err(e) => {
-                errors.push(format!("brew: {} - {}", pkg, e));
+            let _ = fs::remove_dir_all(&temp_dir);
+        }
+
+        let brews_to_install: Vec<&str> = essential_brews.iter()
+            .filter(|pkg| packages_in_backup.iter().any(|b| b.contains(*pkg)))
+            .cloned()
+            .collect();
+
+        let brew_count = brews_to_install.len();
+        for (i, pkg) in brews_to_install.iter().enumerate() {
+            let progress = 15 + ((i + 1) * 35 / brew_count.max(1));
+            let _ = window.emit("restore-progress", serde_json::json!({
+                "progress": progress,
+                "message": format!("Installing {}...", pkg)
+            }));
+
+            let output = Command::new(&brew_path)
+                .args(["install", pkg])
+                .output();
+
+            match output {
+                Ok(o) if o.status.success() => {
+                    restored.push(format!("brew: {}", pkg));
+                    let _ = window.emit("restore-log", format!("  ✅ {} installed", pkg));
+                }
+                Ok(o) => {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    if stderr.contains("already installed") {
+                        skipped.push(format!("brew: {} (already installed)", pkg));
+                    } else {
+                        errors.push(format!("brew: {} - {}", pkg, stderr.lines().next().unwrap_or("")));
+                    }
+                }
+                Err(e) => {
+                    errors.push(format!("brew: {} - {}", pkg, e));
+                }
+            }
+        }
+    } else {
+        let _ = window.emit("restore-log", "  ⚠️ Homebrew not found — skipping CLI tools");
+    }
+
+    let _ = window.emit("restore-progress", serde_json::json!({
+        "progress": 50,
+        "message": "Phase 2 completed"
+    }));
+
+    // ── Phase 3: Cask apps & VS Code extensions (50-85%) ──
+    let _ = window.emit("restore-log", "📦 Phase 3/4: Installing apps & VS Code extensions...");
+    let _ = window.emit("restore-progress", serde_json::json!({
+        "progress": 50,
+        "message": "Phase 3: Apps & VS Code..."
+    }));
+
+    let essential_casks = vec![
+        "visual-studio-code", "iterm2", "google-chrome", "firefox",
+        "1password", "rectangle", "alfred",
+    ];
+
+    if let Some(brew_path) = find_brew_path() {
+        // Parse backup Brewfile to find casks
+        let mut casks_in_backup: Vec<String> = Vec::new();
+        if let Some(item) = metadata.items.iter().find(|it| it.path == "homebrew-packages") {
+            let archive = backup_path.join(&item.archive);
+            let temp_dir = std::env::temp_dir().join("macos-backup-quick-restore-casks");
+            let _ = extract_archive_to(&archive, &temp_dir);
+            let packages_file = temp_dir.join("homebrew_packages.txt");
+            if packages_file.exists() {
+                if let Ok(content) = fs::read_to_string(&packages_file) {
+                    for line in content.lines() {
+                        if line.starts_with("cask \"") {
+                            if let Some(cask) = line.split('"').nth(1) {
+                                casks_in_backup.push(cask.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = fs::remove_dir_all(&temp_dir);
+        }
+
+        let casks_to_install: Vec<&str> = essential_casks.iter()
+            .filter(|cask| casks_in_backup.iter().any(|c| c.contains(*cask)))
+            .cloned()
+            .collect();
+
+        let cask_count = casks_to_install.len();
+        for (i, cask) in casks_to_install.iter().enumerate() {
+            let progress = 50 + ((i + 1) * 25 / cask_count.max(1));
+            let _ = window.emit("restore-progress", serde_json::json!({
+                "progress": progress,
+                "message": format!("Installing {}...", cask)
+            }));
+
+            let output = Command::new(&brew_path)
+                .args(["install", "--cask", cask])
+                .output();
+
+            match output {
+                Ok(o) if o.status.success() => {
+                    restored.push(format!("cask: {}", cask));
+                    let _ = window.emit("restore-log", format!("  ✅ {} installed", cask));
+                }
+                Ok(o) => {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    if stderr.contains("already installed") {
+                        skipped.push(format!("cask: {} (already installed)", cask));
+                    } else {
+                        errors.push(format!("cask: {} - {}", cask, stderr.lines().next().unwrap_or("")));
+                    }
+                }
+                Err(e) => {
+                    errors.push(format!("cask: {} - {}", cask, e));
+                }
             }
         }
     }
-    
-    // Install essential casks that were in the backup
-    let casks_to_install: Vec<&str> = essential_casks.iter()
-        .filter(|cask| casks_in_backup.iter().any(|c| c.contains(*cask)))
-        .cloned()
-        .collect();
-    
-    for cask in &casks_to_install {
-        current += 1;
-        let progress = 50 + (current * 45 / total_items.max(1));
-        let _ = window.emit("restore-progress", serde_json::json!({
-            "progress": progress,
-            "message": format!("Installiere {}...", cask)
-        }));
-        
-        let output = Command::new(&brew_path)
-            .args(["install", "--cask", cask])
-            .output();
-        
-        match output {
-            Ok(o) if o.status.success() => {
-                restored.push(format!("cask: {}", cask));
-                let _ = window.emit("restore-log", format!("✅ {} installiert", cask));
-            }
-            Ok(o) => {
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                if stderr.contains("already installed") {
-                    skipped.push(format!("cask: {} (bereits installiert)", cask));
-                } else {
-                    errors.push(format!("cask: {} - {}", cask, stderr.lines().next().unwrap_or("")));
-                }
+
+    // Restore VS Code extensions if available
+    if let Some(vscode_item) = metadata.items.iter().find(|it| it.path == "vscode-extensions") {
+        let _ = window.emit("restore-log", "  🔌 Restoring VS Code extensions...");
+        match restore_vscode_extensions(&backup_path, &vscode_item.archive, false) {
+            Ok(count) => {
+                restored.push(format!("vscode-extensions ({} extensions)", count));
+                let _ = window.emit("restore-log", format!("  ✅ {} VS Code extensions installed", count));
             }
             Err(e) => {
-                errors.push(format!("cask: {} - {}", cask, e));
+                errors.push(format!("vscode-extensions: {}", e));
+                let _ = window.emit("restore-log", format!("  ❌ VS Code error: {}", e));
             }
         }
     }
-    
+
+    let _ = window.emit("restore-progress", serde_json::json!({
+        "progress": 85,
+        "message": "Phase 3 completed"
+    }));
+
+    // ── Phase 4: User data directories (85-100%) ──
+    let _ = window.emit("restore-log", "📁 Phase 4/4: Restoring essential data directories...");
+    let _ = window.emit("restore-progress", serde_json::json!({
+        "progress": 85,
+        "message": "Phase 4: Data directories..."
+    }));
+
+    let phase4_paths = vec![
+        "~/Documents",
+        "~/Desktop",
+        "~/Pictures",
+        "~/.config",
+        "~/Library/LaunchAgents",
+    ];
+
+    for data_path in &phase4_paths {
+        if let Some(item) = metadata.items.iter().find(|it| &it.path == data_path) {
+            let archive = backup_path.join(&item.archive);
+            if archive.exists() {
+                let target = if data_path.starts_with("~/") {
+                    home.join(&data_path[2..])
+                } else {
+                    PathBuf::from(data_path)
+                };
+
+                if target.exists() {
+                    skipped.push(format!("{} (already exists)", data_path));
+                    let _ = window.emit("restore-log", format!("  ⏭️ Skipped: {} (exists)", data_path));
+                } else {
+                    match extract_tar_gz(&archive, &target, false) {
+                        Ok(_) => {
+                            restored.push(data_path.to_string());
+                            let _ = window.emit("restore-log", format!("  ✅ Restored: {}", data_path));
+                        }
+                        Err(e) => {
+                            errors.push(format!("{}: {}", data_path, e));
+                            let _ = window.emit("restore-log", format!("  ❌ Error: {} - {}", data_path, e));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let _ = window.emit("restore-progress", serde_json::json!({
         "progress": 100,
-        "message": "Quick-Restore abgeschlossen"
+        "message": "Quick-Restore completed"
     }));
-    
+
     let _ = window.emit("restore-log", format!(
-        "🎉 Quick-Restore abgeschlossen: {} installiert, {} übersprungen, {} Fehler",
+        "🎉 Quick-Restore completed: {} installed, {} skipped, {} errors",
         restored.len(), skipped.len(), errors.len()
     ));
-    
+
     Ok(RestoreResult {
         restored_count: restored.len(),
         skipped_count: skipped.len(),
@@ -2250,36 +2552,11 @@ async fn quick_restore_essentials(
 /// Restore Safari settings from backup
 fn restore_safari_settings(backup_path: &Path, archive_name: &str) -> Result<usize, String> {
     let archive = backup_path.join(archive_name);
-    let home = dirs::home_dir().ok_or("Home-Verzeichnis nicht gefunden")?;
+    let home = dirs::home_dir().ok_or("Home directory not found")?;
     
     let temp_dir = std::env::temp_dir().join("macos-backup-restore-safari");
     let _ = fs::remove_dir_all(&temp_dir);
-    fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
-    
-    // Extract archive
-    let zstd_available = Command::new("which")
-        .arg("zstd")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    
-    let output = if zstd_available && archive_name.ends_with(".zst") {
-        Command::new("tar")
-            .current_dir(&temp_dir)
-            .args(["--use-compress-program=zstd -d", "-xf", &archive.to_string_lossy()])
-            .output()
-            .map_err(|e| e.to_string())?
-    } else {
-        Command::new("tar")
-            .current_dir(&temp_dir)
-            .args(["-xzf", &archive.to_string_lossy()])
-            .output()
-            .map_err(|e| e.to_string())?
-    };
-    
-    if !output.status.success() {
-        return Err("Entpacken fehlgeschlagen".to_string());
-    }
+    extract_archive_to(&archive, &temp_dir)?;
     
     let mut restored_count = 0;
     
@@ -2323,36 +2600,14 @@ fn restore_safari_settings(backup_path: &Path, archive_name: &str) -> Result<usi
 /// Restore Homebrew cache from backup
 fn restore_homebrew_cache(backup_path: &Path, archive_name: &str) -> Result<usize, String> {
     let archive = backup_path.join(archive_name);
-    let home = dirs::home_dir().ok_or("Home-Verzeichnis nicht gefunden")?;
+    let home = dirs::home_dir().ok_or("Home directory not found")?;
     
     // Homebrew cache location
     let cache_path = home.join("Library/Caches/Homebrew");
     fs::create_dir_all(&cache_path).map_err(|e| e.to_string())?;
     
-    // Extract archive
-    let zstd_available = Command::new("which")
-        .arg("zstd")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    
-    let output = if zstd_available && archive_name.ends_with(".zst") {
-        Command::new("tar")
-            .current_dir(&cache_path)
-            .args(["--use-compress-program=zstd -d", "-xf", &archive.to_string_lossy()])
-            .output()
-            .map_err(|e| e.to_string())?
-    } else {
-        Command::new("tar")
-            .current_dir(&cache_path)
-            .args(["-xzf", &archive.to_string_lossy()])
-            .output()
-            .map_err(|e| e.to_string())?
-    };
-    
-    if !output.status.success() {
-        return Err("Entpacken fehlgeschlagen".to_string());
-    }
+    // Extract archive directly into cache path
+    extract_archive_to(&archive, &cache_path)?;
     
     // Calculate restored size in MB
     let mut total_size: u64 = 0;
@@ -2373,47 +2628,11 @@ fn restore_mas_apps(backup_path: &Path, archive_name: &str, _reinstall: bool) ->
     let archive = backup_path.join(archive_name);
     
     let temp_dir = std::env::temp_dir().join("macos-backup-restore-mas");
-    fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
-    
-    // Try zstd first, fallback to gzip for older backups
-    let zstd_available = Command::new("which")
-        .arg("zstd")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    
-    let output = if zstd_available {
-        let zstd_result = Command::new("tar")
-            .current_dir(&temp_dir)
-            .args(["--use-compress-program=zstd -d", "-xf", &archive.to_string_lossy()])
-            .output();
-        
-        match zstd_result {
-            Ok(o) if !o.status.success() => {
-                Command::new("tar")
-                    .current_dir(&temp_dir)
-                    .args(["-xzf", &archive.to_string_lossy()])
-                    .output()
-                    .map_err(|e| e.to_string())?
-            }
-            Ok(o) => o,
-            Err(e) => return Err(e.to_string())
-        }
-    } else {
-        Command::new("tar")
-            .current_dir(&temp_dir)
-            .args(["-xzf", &archive.to_string_lossy()])
-            .output()
-            .map_err(|e| e.to_string())?
-    };
-    
-    if !output.status.success() {
-        return Err("Entpacken fehlgeschlagen".to_string());
-    }
+    extract_archive_to(&archive, &temp_dir)?;
     
     let apps_file = temp_dir.join("mas_apps.txt");
     if !apps_file.exists() {
-        return Err("App-Liste nicht gefunden".to_string());
+        return Err("App list not found".to_string());
     }
     
     // Get list of currently installed apps
@@ -2480,7 +2699,7 @@ install_app() {{
     echo "📦 Installiere App $app_id..."
     mas install "$app_id" 2>&1
     if [ $? -eq 0 ]; then
-        echo "✅ App $app_id erfolgreich installiert"
+        echo "✅ App $app_id installed successfully"
     else
         echo "⚠️ App $app_id fehlgeschlagen"
     fi
@@ -2493,7 +2712,7 @@ cat "{}" | xargs -P {} -I {{}} /bin/zsh -c 'install_app "{{}}"'
 
 echo "done" > "{}"
 echo ""
-echo "✅ Installation abgeschlossen."
+echo "✅ Installation completed."
 echo "Dieses Fenster kann geschlossen werden."
 read -k1
 "#,
@@ -2506,7 +2725,7 @@ read -k1
     );
     
     if fs::write(&script_path, &script_content).is_err() {
-        return Err("Konnte Installations-Skript nicht erstellen".to_string());
+        return Err("Could not create installation script".to_string());
     }
     
     // Make the script executable
@@ -2520,15 +2739,22 @@ read -k1
         .output();
     
     if result.is_err() {
-        return Err("Konnte Terminal nicht öffnen".to_string());
+        return Err("Could not open Terminal".to_string());
     }
     
-    // Wait for installation to complete
+    // Wait for installation to complete (timeout after 30 minutes)
+    let max_wait = std::time::Duration::from_secs(30 * 60);
+    let start = std::time::Instant::now();
     loop {
         std::thread::sleep(std::time::Duration::from_secs(2));
         
         if marker_path.exists() {
             let _ = fs::remove_file(&marker_path);
+            break;
+        }
+        
+        if start.elapsed() > max_wait {
+            // Timeout - continue with what we have
             break;
         }
     }
@@ -2558,48 +2784,11 @@ fn restore_vscode_extensions(backup_path: &Path, archive_name: &str, _reinstall:
     let archive = backup_path.join(archive_name);
     
     let temp_dir = std::env::temp_dir().join("macos-backup-restore-vscode");
-    fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
-    
-    // Try zstd first, fallback to gzip for older backups
-    let zstd_available = Command::new("which")
-        .arg("zstd")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    
-    let output = if zstd_available {
-        let zstd_result = Command::new("tar")
-            .current_dir(&temp_dir)
-            .args(["--use-compress-program=zstd -d", "-xf", &archive.to_string_lossy()])
-            .output();
-        
-        match zstd_result {
-            Ok(o) if !o.status.success() => {
-                // Fallback to gzip for older backups
-                Command::new("tar")
-                    .current_dir(&temp_dir)
-                    .args(["-xzf", &archive.to_string_lossy()])
-                    .output()
-                    .map_err(|e| e.to_string())?
-            }
-            Ok(o) => o,
-            Err(e) => return Err(e.to_string())
-        }
-    } else {
-        Command::new("tar")
-            .current_dir(&temp_dir)
-            .args(["-xzf", &archive.to_string_lossy()])
-            .output()
-            .map_err(|e| e.to_string())?
-    };
-    
-    if !output.status.success() {
-        return Err("Entpacken fehlgeschlagen".to_string());
-    }
+    extract_archive_to(&archive, &temp_dir)?;
     
     let ext_file = temp_dir.join("vscode_extensions.txt");
     if !ext_file.exists() {
-        return Err("Extensions-Liste nicht gefunden".to_string());
+        return Err("Extensions list not found".to_string());
     }
     
     let file_content = fs::read_to_string(&ext_file).map_err(|e| e.to_string())?;
@@ -2668,7 +2857,7 @@ fn restore_vscode_extensions(backup_path: &Path, archive_name: &str, _reinstall:
     let _ = fs::remove_dir_all(&temp_dir);
     
     if installed == 0 && total > 0 {
-        return Err(format!("Keine Extensions installiert (0/{})", total));
+        return Err(format!("No extensions installed (0/{})", total));
     }
     
     Ok(installed)
@@ -2681,12 +2870,12 @@ fn delete_backup(target_path: String, timestamp: String) -> Result<(), String> {
     let backup_path = suite_root.join("data").join(&timestamp);
     
     if !backup_path.exists() {
-        return Err(format!("Backup {} nicht gefunden", timestamp));
+        return Err(format!("Backup {} not found", timestamp));
     }
     
     // Remove the backup data directory recursively
     fs::remove_dir_all(&backup_path)
-        .map_err(|e| format!("Fehler beim Löschen (data): {}", e))?;
+        .map_err(|e| format!("Error deleting (data): {}", e))?;
     
     // Also remove the inventories directory for this timestamp
     let inventories_path = suite_root.join("inventories").join(&timestamp);
@@ -2742,16 +2931,16 @@ fn build_menu(app_handle: &AppHandle) -> Result<(), Box<dyn std::error::Error>> 
         name: Some("macOS Backup Suite".to_string()),
         version: Some("1.0.0".to_string()),
         copyright: Some("© 2025 Norbert Jander".to_string()),
-        comments: Some("Backup & Restore für macOS".to_string()),
+        comments: Some("Backup & Restore for macOS".to_string()),
         ..Default::default()
     };
     
-    let about = PredefinedMenuItem::about(app_handle, Some("Über macOS Backup Suite"), Some(about_metadata))?;
+    let about = PredefinedMenuItem::about(app_handle, Some("About macOS Backup Suite"), Some(about_metadata))?;
     let separator = PredefinedMenuItem::separator(app_handle)?;
-    let hide = PredefinedMenuItem::hide(app_handle, Some("macOS Backup Suite ausblenden"))?;
-    let hide_others = PredefinedMenuItem::hide_others(app_handle, Some("Andere ausblenden"))?;
-    let show_all = PredefinedMenuItem::show_all(app_handle, Some("Alle einblenden"))?;
-    let quit = PredefinedMenuItem::quit(app_handle, Some("macOS Backup Suite beenden"))?;
+    let hide = PredefinedMenuItem::hide(app_handle, Some("Hide macOS Backup Suite"))?;
+    let hide_others = PredefinedMenuItem::hide_others(app_handle, Some("Hide Others"))?;
+    let show_all = PredefinedMenuItem::show_all(app_handle, Some("Show All"))?;
+    let quit = PredefinedMenuItem::quit(app_handle, Some("Quit macOS Backup Suite"))?;
     
     let app_menu = Submenu::with_items(
         app_handle,
@@ -2760,9 +2949,9 @@ fn build_menu(app_handle: &AppHandle) -> Result<(), Box<dyn std::error::Error>> 
         &[&about, &separator, &hide, &hide_others, &show_all, &PredefinedMenuItem::separator(app_handle)?, &quit],
     )?;
     
-    let backup_start = MenuItem::with_id(app_handle, "backup_start", "Backup starten", true, Some("CmdOrCtrl+B"))?;
-    let backup_add_folder = MenuItem::with_id(app_handle, "backup_add_folder", "Ordner hinzufügen...", true, Some("CmdOrCtrl+O"))?;
-    let backup_refresh_volumes = MenuItem::with_id(app_handle, "backup_refresh_volumes", "Volumes aktualisieren", true, Some("CmdOrCtrl+R"))?;
+    let backup_start = MenuItem::with_id(app_handle, "backup_start", "Start Backup", true, Some("CmdOrCtrl+B"))?;
+    let backup_add_folder = MenuItem::with_id(app_handle, "backup_add_folder", "Add Folder...", true, Some("CmdOrCtrl+O"))?;
+    let backup_refresh_volumes = MenuItem::with_id(app_handle, "backup_refresh_volumes", "Refresh Volumes", true, Some("CmdOrCtrl+R"))?;
     
     let backup_menu = Submenu::with_items(
         app_handle,
@@ -2771,44 +2960,44 @@ fn build_menu(app_handle: &AppHandle) -> Result<(), Box<dyn std::error::Error>> 
         &[&backup_start, &PredefinedMenuItem::separator(app_handle)?, &backup_add_folder, &backup_refresh_volumes],
     )?;
     
-    let restore_start = MenuItem::with_id(app_handle, "restore_start", "Wiederherstellen...", true, Some("CmdOrCtrl+Shift+R"))?;
-    let restore_verify = MenuItem::with_id(app_handle, "restore_verify", "Backup verifizieren", true, Some("CmdOrCtrl+V"))?;
-    let restore_show_files = MenuItem::with_id(app_handle, "restore_show_files", "Dateien anzeigen", true, Some("CmdOrCtrl+F"))?;
+    let restore_start = MenuItem::with_id(app_handle, "restore_start", "Restore...", true, Some("CmdOrCtrl+Shift+R"))?;
+    let restore_verify = MenuItem::with_id(app_handle, "restore_verify", "Verify Backup", true, Some("CmdOrCtrl+V"))?;
+    let restore_show_files = MenuItem::with_id(app_handle, "restore_show_files", "Show Files", true, Some("CmdOrCtrl+F"))?;
     
     let restore_menu = Submenu::with_items(
         app_handle,
-        "Wiederherstellen",
+        "Restore",
         true,
         &[&restore_start, &restore_verify, &PredefinedMenuItem::separator(app_handle)?, &restore_show_files],
     )?;
     
-    let log_copy = MenuItem::with_id(app_handle, "log_copy", "Protokoll kopieren", true, Some("CmdOrCtrl+Shift+C"))?;
-    let log_save = MenuItem::with_id(app_handle, "log_save", "Protokoll speichern...", true, Some("CmdOrCtrl+Shift+S"))?;
-    let log_clear = MenuItem::with_id(app_handle, "log_clear", "Protokoll löschen", true, Some("CmdOrCtrl+L"))?;
+    let log_copy = MenuItem::with_id(app_handle, "log_copy", "Copy Log", true, Some("CmdOrCtrl+Shift+C"))?;
+    let log_save = MenuItem::with_id(app_handle, "log_save", "Save Log...", true, Some("CmdOrCtrl+Shift+S"))?;
+    let log_clear = MenuItem::with_id(app_handle, "log_clear", "Clear Log", true, Some("CmdOrCtrl+L"))?;
     
     let log_menu = Submenu::with_items(
         app_handle,
-        "Protokoll",
+        "Log",
         true,
         &[&log_copy, &log_save, &PredefinedMenuItem::separator(app_handle)?, &log_clear],
     )?;
     
-    let minimize = PredefinedMenuItem::minimize(app_handle, Some("Im Dock ablegen"))?;
-    let fullscreen = PredefinedMenuItem::fullscreen(app_handle, Some("Vollbild"))?;
-    let close = PredefinedMenuItem::close_window(app_handle, Some("Fenster schließen"))?;
+    let minimize = PredefinedMenuItem::minimize(app_handle, Some("Minimize"))?;
+    let fullscreen = PredefinedMenuItem::fullscreen(app_handle, Some("Full Screen"))?;
+    let close = PredefinedMenuItem::close_window(app_handle, Some("Close Window"))?;
     
     let window_menu = Submenu::with_items(
         app_handle,
-        "Fenster",
+        "Window",
         true,
         &[&minimize, &fullscreen, &PredefinedMenuItem::separator(app_handle)?, &close],
     )?;
     
-    let help_item = MenuItem::with_id(app_handle, "show_help", "macOS Backup Suite Hilfe", true, Some("F1"))?;
+    let help_item = MenuItem::with_id(app_handle, "show_help", "macOS Backup Suite Help", true, Some("F1"))?;
     
     let help_menu = Submenu::with_items(
         app_handle,
-        "Hilfe",
+        "Help",
         true,
         &[&help_item],
     )?;
@@ -2840,6 +3029,34 @@ fn cancel_backup() -> Result<(), String> {
     Ok(())
 }
 
+/// Cancel any ongoing operation (backup or verify)
+#[tauri::command]
+fn cancel_operation() -> Result<(), String> {
+    BACKUP_CANCELLED.store(true, Ordering::SeqCst);
+    VERIFY_CANCELLED.store(true, Ordering::SeqCst);
+    OPERATION_IN_PROGRESS.store(false, Ordering::SeqCst);
+    
+    // Kill any running tar process
+    let pid = TAR_PID.load(Ordering::SeqCst);
+    if pid > 0 {
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGTERM);
+        }
+        TAR_PID.store(0, Ordering::SeqCst);
+    }
+    
+    Ok(())
+}
+
+/// Reset the cancelled flags before starting a new operation
+#[tauri::command]
+fn reset_operation_state() -> Result<(), String> {
+    BACKUP_CANCELLED.store(false, Ordering::SeqCst);
+    VERIFY_CANCELLED.store(false, Ordering::SeqCst);
+    OPERATION_IN_PROGRESS.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
 #[tauri::command]
 fn get_home_dir() -> Result<String, String> {
     dirs::home_dir()
@@ -2866,6 +3083,8 @@ pub fn run() {
             get_mas_apps,
             get_manual_apps,
             get_manual_apps_from_backup,
+            save_license_data,
+            load_license_data,
             get_vscode_extensions,
             create_backup,
             list_backups,
@@ -2876,6 +3095,8 @@ pub fn run() {
             verify_backup,
             verify_backup_parallel,
             cancel_backup,
+            cancel_operation,
+            reset_operation_state,
             get_home_dir,
             list_user_folders,
             check_read_permission,
@@ -2885,6 +3106,7 @@ pub fn run() {
             show_help_window,
             get_window_state,
             save_window_state,
+            detect_backup_volume,
         ])
         .setup(|app| {
             let app_handle = app.handle();
