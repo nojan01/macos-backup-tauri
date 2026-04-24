@@ -145,6 +145,22 @@
 <body>
     <div class="container">
         <h1>📖 macOS Backup Suite - Hilfe</h1>
+
+        <div class="section">
+            <h2><span class="emoji">✨</span>Neu in v1.2.7</h2>
+            <ul>
+                <li><strong>MAS-Liste zuverlässig gesichert:</strong> App-Store-Apps werden jetzt direkt über <code>mas list</code> erfasst (Fallback: Brewfile) – mit expliziter Log-Meldung.</li>
+                <li><strong>Resume-Dialog stabilisiert:</strong> Nach einem Abbruch erscheint beim nächsten Backup-Start verlässlich die Abfrage, ob fortgesetzt oder neu begonnen werden soll.</li>
+                <li><strong>DMG-Pfad dynamisch:</strong> Der App-Installer im Backup wird nicht mehr über eine hardcodierte Version gefunden, sondern per Verzeichnis-Scan.</li>
+                <li><strong>Kein Beachball mehr:</strong> Backup, Restore und Verify laufen auf einem Worker-Thread – die App bleibt während langer Operationen bedienbar.</li>
+                <li><strong>Pre-flight-Scan mit Fortschritt:</strong> Vor dem eigentlichen Backup wird der benötigte Speicherplatz ermittelt und mit dem Zielvolume abgeglichen (10 % Sicherheits-Marge).</li>
+                <li><strong>Resume nach Abbruch:</strong> Wird ein Backup abgebrochen, kann beim nächsten Start an exakt der Stelle fortgesetzt werden.</li>
+                <li><strong>Inkrementelles Backup:</strong> Unveränderte Ordner werden als Hardlink aus dem Vorgänger-Backup übernommen – spart Platz und Zeit.</li>
+                <li><strong>Erweiterter FDA-Check:</strong> Prüft explizit den Lesezugriff auf <code>~/Library/Application Support/com.apple.TCC</code>, bevor das Backup startet.</li>
+                <li><strong>Mehr System-Konfig-Pfade:</strong> oh-my-zsh, tmux, hammerspoon, karabiner, gh, ansible, terraform, fnm/rvm/jenv/goenv, Mail, Messages, Kalender, Kontakte, PreferencePanes, Screen Savers u. v. m.</li>
+                <li><strong>Versionsanzeige:</strong> Kopf- und Fußzeile zeigen jetzt die App-Version zur Verifizierung nach Updates.</li>
+            </ul>
+        </div>
         
         <div class="section">
             <h2><span class="emoji">👋</span>Willkommen</h2>
@@ -239,6 +255,18 @@
             </ul>
         </div>
         
+            <h3>🔁 Inkrementelles Backup</h3>
+            <p>Ab dem zweiten Backup eines Zielvolumes aktiviert sich automatisch der inkrementelle Modus:</p>
+            <ul>
+                <li>Ordner, deren Inhalt sich seit dem letzten Backup nicht geändert hat, werden als <strong>Hardlink</strong> (oder Copy-Fallback) aus dem Vorgänger-Backup übernommen.</li>
+                <li>Jedes Backup bleibt trotzdem ein in sich geschlossenes Vollbackup.</li>
+                <li>Änderungs-Erkennung erfolgt über einen Datei-Snapshot (Pfad, Größe, mtime).</li>
+            </ul>
+
+            <h3>♻️ Resume nach Abbruch</h3>
+            <p>Wird ein Backup durch Abbruch, Absturz oder Energieverlust unterbrochen, erkennt die App beim nächsten Start den unvollständigen Lauf und bietet an, an der letzten abgeschlossenen Position fortzusetzen – inklusive bereits erstellter Archive.</p>
+        </div>
+
         <div class="section">
             <h2><span class="emoji">♻️</span>Wiederherstellung</h2>
             
@@ -346,7 +374,7 @@
         </div>
         
         <footer>
-            <p>macOS Backup Suite v1.1 – © 2024-2025</p>
+            <p>macOS Backup Suite v1.2.7 – © 2024-2026</p>
             <p>Bei Fragen oder Problemen erstellen Sie bitte ein Issue auf GitHub.</p>
         </footer>
     </div>

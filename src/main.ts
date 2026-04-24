@@ -525,10 +525,12 @@ let fdaMessageShown = false; // Track if FDA message was already shown
 
 const INITIAL_DEFAULT_DIRECTORIES = [
   "~/Documents",
-  "~/Desktop", 
+  "~/Desktop",
   "~/Downloads",
   "~/Music",
+  "~/Movies",
   "~/Pictures",
+  "~/Public",
   "~/.ssh",
   "~/.gitconfig",
   "~/.zshrc",
@@ -548,18 +550,35 @@ const SYSTEM_CONFIG_DIRECTORIES = [
   "~/.gnupg",
   "~/.vimrc",
   "~/.vim",
+  "~/.oh-my-zsh",
+  "~/.p10k.zsh",
+  "~/.tmux.conf",
+  "~/.tmux",
+  "~/.hammerspoon",
+  "~/.subversion",
+  "~/.local/share",
+  "~/.local/bin",
+  "~/.config/karabiner",
+  "~/.config/gh",
+  "~/.gh",
   // Cloud & container tools
   "~/.docker",
   "~/.kube",
   "~/.aws",
+  "~/.ansible",
+  "~/.terraform.d",
   // Package managers & language runtimes
   "~/.npm",
   "~/.nvm",
+  "~/.fnm",
   "~/.pyenv",
   "~/.conda",
   "~/.cargo",
   "~/.gemrc",
   "~/.rbenv",
+  "~/.rvm",
+  "~/.jenv",
+  "~/.goenv",
   // macOS system settings
   "~/Library/LaunchAgents",
   "~/Library/Preferences",
@@ -572,11 +591,36 @@ const SYSTEM_CONFIG_DIRECTORIES = [
   "~/Library/Spelling",
   "~/Library/QuickLook",
   "~/Library/Scripts",
+  "~/Library/PreferencePanes",
+  "~/Library/Screen Savers",
+  "~/Library/Sounds",
+  "~/Library/Workflows",
+  "~/Library/Application Scripts",
+  "~/Library/Dictionaries",
+  // Persönliche Daten (lokale Kopien – iCloud-only sind davon nicht betroffen)
+  "~/Library/Mail",
+  "~/Library/Messages",
+  "~/Library/Calendars",
+  "~/Library/Application Support/AddressBook",
+  "~/Library/Stickies",
+  "~/Library/StickiesDatabase",
   // App-specific configs
   "~/Library/Application Support/Code/User",
+  "~/Library/Application Support/Cursor/User",
   "~/Library/Application Support/JetBrains",
   "~/Library/Application Support/iTerm2",
   "~/Library/Application Support/Firefox/Profiles",
+  "~/Library/Application Support/Google/Chrome/Default/Bookmarks",
+  "~/Library/Application Support/Google/Chrome/Default/Preferences",
+  "~/Library/Application Support/BraveSoftware/Brave-Browser/Default/Bookmarks",
+  "~/Library/Application Support/Sublime Text",
+  "~/Library/Application Support/Warp",
+  // Build/toolchain metadata (small, useful for quick restore)
+  "~/.tool-versions",
+  "~/.asdf",
+  "~/.sdkman",
+  "~/.m2/settings.xml",
+  "~/.gradle/gradle.properties",
 ];
 
 // Helpers
@@ -1109,7 +1153,56 @@ async function startBackup(): Promise<void> {
     log(`${t("selectBackupTarget")}`);
     return;
   }
-  
+
+  // Prüfen, ob ein abgebrochenes Backup fortgesetzt werden kann.
+  let resumeTimestamp: string | null = null;
+  try {
+    const resumable = await invoke<Array<{
+      timestamp: string;
+      completed_items: number;
+      completed_size_bytes: number;
+      completed_paths: string[];
+    }>>("list_resumable_backups", { targetPath });
+    if (resumable && resumable.length > 0) {
+      const latest = resumable[0];
+      const sizeMB = (latest.completed_size_bytes / (1024 * 1024)).toFixed(1);
+      const msg = `Ein abgebrochenes Backup vom ${latest.timestamp} wurde gefunden `
+        + `(${latest.completed_items} Einträge, ${sizeMB} MB bereits gesichert).\n\n`
+        + `Fortsetzen? (Nein = neues Backup starten)`;
+      const shouldResume = await ask(msg, {
+        title: "Backup fortsetzen?",
+        kind: "info",
+        okLabel: "Fortsetzen",
+        cancelLabel: "Neu starten",
+      });
+      if (shouldResume) {
+        resumeTimestamp = latest.timestamp;
+        log(`♻️ Setze Backup ${latest.timestamp} fort (${latest.completed_items} Items bereits erledigt)`);
+      } else {
+        const shouldDiscard = await ask(
+          `Abgebrochenes Backup ${latest.timestamp} verwerfen?`,
+          {
+            title: "Altes Backup verwerfen?",
+            kind: "warning",
+            okLabel: "Verwerfen",
+            cancelLabel: "Behalten",
+          }
+        );
+        if (shouldDiscard) {
+          try {
+            await invoke("discard_resumable_backup", { targetPath, timestamp: latest.timestamp });
+            log(`🗑 Verworfen: ${latest.timestamp}`);
+          } catch (err) {
+            log(`Fehler beim Verwerfen: ${err}`);
+          }
+        }
+      }
+    }
+  } catch (e) {
+    // list_resumable_backups fehlgeschlagen → normaler Ablauf
+    console.warn("list_resumable_backups failed:", e);
+  }
+
   // Reset operation state in backend
   await invoke("reset_operation_state");
   
@@ -1127,6 +1220,8 @@ async function startBackup(): Promise<void> {
     await invoke("create_backup", {
       targetPath: targetPath,
       directories: config.directories,
+      incremental: true,
+      resumeTimestamp: resumeTimestamp,
     });
     
     if (backupInProgress) {
@@ -1566,7 +1661,7 @@ btnRestoreTest.addEventListener("click", async () => {
       verified_files: number;
       failed_files: string[];
       message: string;
-    }>("verify_backup", {
+    }>("verify_backup_parallel", {
       targetPath: targetPath,
       timestamp: timestamp
     });

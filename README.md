@@ -58,6 +58,45 @@ Essentielle Tools in unter 10 Minuten:
 - Vollständige Backup-Metadaten in JSON
 - Automatische Bereinigung unvollständiger Backups
 
+### 🔗 Symlink-Handling
+
+Das Backup behandelt symbolische Links bewusst **als Symlinks** und folgt ihnen
+nicht — weder beim Archivieren noch beim Berechnen von Snapshots oder Größen.
+Das hat konkrete Konsequenzen, die Sie kennen sollten:
+
+- **Archivierung (tar):** `tar` speichert Symlinks standardmäßig als Links,
+  nicht als Kopie des Zielinhalts. Ein Symlink, der auf ein Verzeichnis
+  außerhalb des Backup-Scopes zeigt, wird also nur als Verweis gesichert.
+  Zeigt der Link nach der Wiederherstellung ins Leere, ist das **kein Fehler
+  des Backups**, sondern ein Hinweis, dass das Ziel selbst nicht Teil der
+  gesicherten Ordnerliste war.
+- **Inkrementelle Snapshots:** Der Manifest-Vergleich (`follow_links(false)`)
+  erkennt **Änderungen am Symlink selbst** (Ziel-Pfad, mtime), aber **nicht**
+  Änderungen am referenzierten Inhalt. Wenn nur das Ziel eines Symlinks
+  modifiziert wird und das Ziel **außerhalb** des gesicherten Baumes liegt,
+  erscheint das Archiv als unverändert und wird per Hardlink wiederverwendet.
+- **Größenberechnung / Platzbedarf:** Symlinks zählen mit 0 Bytes. Der
+  Pre-Flight-Check „freier Speicherplatz" folgt Symlinks nicht und
+  überschätzt daher nichts; er kann aber _unterschätzen_, falls Sie einen
+  Ordner per Symlink an anderer Stelle einbinden und den Zielordner
+  **zusätzlich** zur Sicherungsliste hinzufügen (→ Inhalt wird doppelt
+  archiviert).
+- **Restore / Extraktion:** Beim Zurückspielen werden Symlinks 1:1
+  rekonstruiert. Existiert das ursprüngliche Zielsystem nicht mehr (z. B.
+  externe Homebrew-Pfade nach Hardware-Wechsel), bleibt der Link als
+  „dangling symlink" bestehen, bis die referenzierten Pfade wiederhergestellt
+  werden.
+- **Sicherheit:** Die Archiv-Integritätsprüfung vor dem Extrahieren lehnt
+  Einträge mit `..`-Komponenten und absoluten Pfaden ab. Symlinks mit
+  absoluten Zielen werden unverändert geschrieben — prüfen Sie nach einem
+  Restore über ein Fremdsystem, ob die Symlinks in Ihrem Home-Verzeichnis
+  auf erwartete Pfade zeigen.
+
+**Empfehlung:** Vermeiden Sie Symlinks, die aus dem Backup-Scope in
+ungesicherte Bereiche zeigen, wenn diese Inhalte mit der Wiederherstellung
+zurückkehren sollen. Fügen Sie stattdessen das Zielverzeichnis direkt in die
+Sicherungsliste ein.
+
 ---
 
 ## 📥 Installation
