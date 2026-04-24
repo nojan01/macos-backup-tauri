@@ -1824,6 +1824,22 @@ fn create_backup_impl(
             let _ = window.emit("backup-log", "VS Code not installed - extensions skipped");
         }
     }
+
+    trace("calling get_mas_apps (inventory)");
+    match get_mas_apps() {
+        Ok(mas_output) if !mas_output.trim().is_empty() => {
+            let mas_path = inventory_root.join("mas_apps.txt");
+            let _ = fs::write(&mas_path, &mas_output);
+            let count = mas_output.lines().filter(|l| !l.trim().is_empty()).count();
+            let _ = window.emit("backup-log", format!("✅ Mac App Store Apps: {} Apps", count));
+        }
+        Ok(_) => {
+            let _ = window.emit("backup-log", "ℹ️ Mac App Store: keine Apps gefunden (mas list leer)");
+        }
+        Err(e) => {
+            let _ = window.emit("backup-log", format!("ℹ️ Mac App Store-Liste übersprungen: {}", e));
+        }
+    }
     
     trace("inventory done, emitting progress 15");
     let _ = window.emit("backup-progress", serde_json::json!({
@@ -2104,31 +2120,46 @@ fn create_backup_impl(
     } // end if !completed_paths.contains("homebrew-packages")
     
     // Archive MAS apps as a restorable item
+    if completed_paths.contains("mas-apps") {
+        let _ = window.emit("backup-log", "⏭️ MAS-Liste: bereits aus vorherigem Lauf vorhanden (Resume)");
+    }
     if !completed_paths.contains("mas-apps") {
         trace("archiving mas-apps");
     {
+        let _ = window.emit("backup-log", "📋 Sichere App-Store-Liste (mas)…");
+        // Alte temp-Datei aus vorherigem Lauf entfernen, damit keine veralteten Daten archiviert werden
         let mas_temp = std::env::temp_dir().join("mas_apps.txt");
+        let _ = fs::remove_file(&mas_temp);
         // Primär: mas list direkt abfragen (zuverlässiger als Brewfile-Parsing)
         let mut mas_line_count: usize = 0;
         let mut have_content = false;
+        let mut mas_source = "";
         match get_mas_apps() {
             Ok(mas_output) if !mas_output.trim().is_empty() => {
                 mas_line_count = mas_output.lines().filter(|l| !l.trim().is_empty()).count();
                 let _ = fs::write(&mas_temp, &mas_output);
                 have_content = true;
+                mas_source = "mas list";
             }
-            _ => {
-                // Fallback: aus Brewfile extrahieren
-                if let Ok(brewfile) = get_brew_packages() {
-                    let mas_lines: Vec<&str> = brewfile.lines()
-                        .filter(|line| line.trim().starts_with("mas "))
-                        .collect();
-                    if !mas_lines.is_empty() {
-                        mas_line_count = mas_lines.len();
-                        let mas_content = mas_lines.join("\n");
-                        let _ = fs::write(&mas_temp, &mas_content);
-                        have_content = true;
-                    }
+            Ok(_) => {
+                let _ = window.emit("backup-log", "ℹ️ `mas list` lieferte keine Apps – versuche Brewfile-Fallback");
+            }
+            Err(e) => {
+                let _ = window.emit("backup-log", format!("ℹ️ `mas` nicht verfügbar ({}) – versuche Brewfile-Fallback", e));
+            }
+        }
+        if !have_content {
+            // Fallback: aus Brewfile extrahieren
+            if let Ok(brewfile) = get_brew_packages() {
+                let mas_lines: Vec<&str> = brewfile.lines()
+                    .filter(|line| line.trim().starts_with("mas "))
+                    .collect();
+                if !mas_lines.is_empty() {
+                    mas_line_count = mas_lines.len();
+                    let mas_content = mas_lines.join("\n");
+                    let _ = fs::write(&mas_temp, &mas_content);
+                    have_content = true;
+                    mas_source = "Brewfile";
                 }
             }
         }
@@ -2161,7 +2192,7 @@ fn create_backup_impl(
                 source_size_bytes: source_size,
             });
             if let Some(it) = items.last() { append_resume_entry(&backup_root, it); }
-            let _ = window.emit("backup-log", format!("✅ MAS apps archived: {} Apps ({} bytes)", mas_line_count, source_size));
+            let _ = window.emit("backup-log", format!("✅ MAS-Liste gesichert: {} Apps via {} ({} bytes)", mas_line_count, mas_source, source_size));
             let _ = fs::remove_file(&mas_temp);
         }
     }
