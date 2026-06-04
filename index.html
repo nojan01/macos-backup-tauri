@@ -10,7 +10,7 @@
   <div class="container">
     <header>
       <div class="header-top">
-        <h1>🛡️ macOS Backup Suite <span style="font-size:0.55em;opacity:0.6;font-weight:normal;vertical-align:middle">v1.2.8</span></h1>
+        <h1>🛡️ macOS Backup Suite <span style="font-size:0.55em;opacity:0.6;font-weight:normal;vertical-align:middle">v1.2.9</span></h1>
         <div class="header-controls">
           <button id="btn-help" class="icon-btn" title="Hilfe">❓</button>
           <button id="btn-settings" class="icon-btn" title="Einstellungen">⚙️</button>
@@ -93,6 +93,7 @@
             <button id="show-manual-apps" class="btn-secondary">📦 Manuelle Apps</button>
             <button id="show-license-data" class="btn-secondary">🔑 Lizenzen</button>
             <button id="btn-restore-test" class="btn-secondary">✓ Verifizieren</button>
+            <button id="btn-test-restore" class="btn-secondary">🧪 Test-Restore</button>
             <button id="btn-delete-backup" class="btn-danger">🗑️ Löschen</button>
           </div>
         </section>
@@ -111,7 +112,7 @@
     </main>
 
     <footer>
-      <p>macOS Backup Suite v1.2.8 – Sichere Datensicherung für deinen Mac</p>
+      <p>macOS Backup Suite v1.2.9 – Sichere Datensicherung für deinen Mac</p>
     </footer>
   </div>
 
@@ -198,6 +199,35 @@
         <div class="modal-buttons">
           <button id="restore-cancel" class="btn-secondary">Abbrechen</button>
           <button id="restore-start" class="btn-primary">🔄 Wiederherstellen</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Test-Restore Modal -->
+    <div id="test-restore-modal" class="restore-overlay" style="display: none;">
+      <div class="modal-content restore-modal-content">
+        <h2>🧪 Test-Restore</h2>
+        <p>Ein Element zerstörungsfrei in einen Test-Ordner extrahieren. Es werden weder bestehende Dateien überschrieben noch wird an die Originalpfade geschrieben.</p>
+
+        <div class="form-group">
+          <label for="test-restore-item">Element aus Backup wählen:</label>
+          <select id="test-restore-item">
+            <option value="">– Bitte wählen –</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label>Zielordner für Test-Extraktion:</label>
+          <div class="button-row">
+            <input type="text" id="test-restore-dest" readonly placeholder="(noch nicht gewählt)" style="flex:1;" />
+            <button id="test-restore-pick-dest" class="btn-secondary">📁 Ordner wählen…</button>
+          </div>
+          <p class="hint">Im gewählten Ordner wird ein Unterordner <code>test-restore_&lt;timestamp&gt;_&lt;archiv&gt;/</code> angelegt.</p>
+        </div>
+
+        <div class="modal-buttons">
+          <button id="test-restore-cancel" class="btn-secondary">Abbrechen</button>
+          <button id="test-restore-start" class="btn-primary">🧪 Starten</button>
         </div>
       </div>
     </div>

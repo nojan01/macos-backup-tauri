@@ -1281,11 +1281,88 @@ fn compute_directory_size(path: &Path) -> u64 {
         .sum()
 }
 
+// ========== Exclude Patterns ==========
+//
+// Pfadbestandteile (Directory- oder Dateinamen), die von Backup-Snapshots UND
+// vom `tar`-Aufruf gleichermaßen ignoriert werden. Dadurch verhalten sich
+// inkrementeller Vergleich und tatsächlich archivierter Inhalt konsistent.
+//
+// Das sind typische „Churn"-Pfade, die sich bei nahezu jedem Backup ändern
+// und die Wiederverwendung unveränderter Archive sonst zuverlässig
+// verhindern. Nutzer können per Env-Var `BACKUP_EXTRA_EXCLUDES`
+// (kommagetrennt) weitere Komponenten ergänzen.
+const DEFAULT_EXCLUDE_COMPONENTS: &[&str] = &[
+    ".DS_Store",
+    ".Trash",
+    ".Spotlight-V100",
+    ".fseventsd",
+    "node_modules",
+    ".cache",
+    ".npm",
+    ".yarn-cache",
+    ".pnpm-store",
+    "Caches",
+    "Cache",
+    "Code Cache",
+    "GPUCache",
+    "ScriptCache",
+    "CachedData",
+    "Crash Reports",
+    "DiagnosticReports",
+    "Logs",
+];
+
+fn extra_exclude_components() -> Vec<String> {
+    std::env::var("BACKUP_EXTRA_EXCLUDES")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Liefert `true`, wenn einer der Pfadbestandteile (relativ zur Wurzel) in
+/// der Exclude-Liste steht. Angewandt sowohl auf Snapshot-Einträge als auch
+/// indirekt via `--exclude` an `tar`.
+fn is_path_excluded(rel: &str, extra: &[String]) -> bool {
+    for comp in rel.split('/') {
+        if comp.is_empty() { continue; }
+        if DEFAULT_EXCLUDE_COMPONENTS.iter().any(|e| *e == comp) {
+            return true;
+        }
+        if extra.iter().any(|e| e == comp) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Liefert alle `--exclude=PATTERN` Argumente für den `tar`-Aufruf.
+/// Für jede Komponente werden sowohl der Verzeichnisname selbst als auch
+/// alles darunter ausgeschlossen. BSD-/GNU-tar interpretieren das Muster
+/// via fnmatch gegen den archivierten Pfad.
+fn tar_exclude_args() -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
+    let extra = extra_exclude_components();
+    for comp in DEFAULT_EXCLUDE_COMPONENTS.iter().map(|s| s.to_string()).chain(extra.into_iter()) {
+        // Direkter Treffer (z. B. Top-Level-Datei wie ".DS_Store")
+        args.push(comp.clone());
+        // Als Verzeichnis irgendwo im Baum
+        args.push(format!("*/{}", comp));
+        // Inhalt eines solchen Verzeichnisses
+        args.push(format!("*/{}/*", comp));
+    }
+    args
+}
+
 // ========== Incremental Backup: Manifest Helpers ==========
 
 /// Ein Manifest-Eintrag: relativer Pfad, Dateigröße in Bytes, mtime als Unix-Sekunden.
 /// Unveränderte Snapshots über zwei Backups hinweg erlauben Archiv-Wiederverwendung.
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 struct ManifestEntry {
     p: String,
     s: u64,
@@ -1298,6 +1375,7 @@ struct ManifestEntry {
 fn compute_snapshot(root: &Path) -> Vec<ManifestEntry> {
     use std::time::UNIX_EPOCH;
     let mut entries: Vec<ManifestEntry> = Vec::new();
+    let extra = extra_exclude_components();
 
     if root.is_file() {
         if let Ok(md) = fs::symlink_metadata(root) {
@@ -1314,7 +1392,21 @@ fn compute_snapshot(root: &Path) -> Vec<ManifestEntry> {
         return entries;
     }
 
-    for dent in WalkDir::new(root).follow_links(false).into_iter().filter_map(|e| e.ok()) {
+    // WalkDir mit `filter_entry`, damit ausgeschlossene Verzeichnisse gar
+    // nicht erst betreten werden — das spart bei großen Caches deutlich
+    // Stat-Syscalls (z. B. `~/Library/Caches`).
+    let walker = WalkDir::new(root).follow_links(false).into_iter();
+    let walker = walker.filter_entry(|dent| {
+        let path = dent.path();
+        if path == root { return true; }
+        let rel = match path.strip_prefix(root) {
+            Ok(r) => r.to_string_lossy().to_string(),
+            Err(_) => return true,
+        };
+        !is_path_excluded(&rel, &extra)
+    });
+
+    for dent in walker.filter_map(|e| e.ok()) {
         let path = dent.path();
         if path == root { continue; }
         let rel = match path.strip_prefix(root) {
@@ -1531,27 +1623,37 @@ fn create_tar_gz(source: &Path, target: &Path) -> Result<(), String> {
     
     // Check if zstd is available, fallback to gzip
     let zstd_path = get_zstd_path();
-    
+
+    // Gemeinsame Exclude-Argumente (Caches, Logs, .DS_Store, node_modules …)
+    let mut exclude_args: Vec<String> = vec![
+        "*.sock".to_string(),
+        "*/sockets/*".to_string(),
+    ];
+    exclude_args.extend(tar_exclude_args());
+
     // Spawn the process so we can track and kill it
     let mut child = if let Some(zstd_bin) = zstd_path {
         // Kompressionsstufe konfigurierbar per Env-Var `BACKUP_ZSTD_LEVEL`
-        // (1 = schnell, 3 = default, 19 = klein, 22 = maximal).
+        // (1 = schnell [Default], 3 = ausgewogen, 19 = klein, 22 = maximal).
+        //
+        // Default = 1: Für Folgebackups dominieren die nicht-komprimierten
+        // Operationen (I/O, Hash, Walk). Level 1 ist ~3–5× schneller als 3
+        // bei ~10 % größerem Archiv — ein klarer Gewinn, wenn Zeit knapp ist.
         let zstd_level: u32 = std::env::var("BACKUP_ZSTD_LEVEL")
             .ok()
             .and_then(|v| v.parse().ok())
             .filter(|&n: &u32| (1..=22).contains(&n))
-            .unwrap_or(3);
+            .unwrap_or(1);
         // Use zstd compression (much faster, better compression)
         let mut cmd = Command::new("tar");
         cmd.current_dir(source_parent)
-            .args([
-                &format!("--use-compress-program={} -T0 -{}", zstd_bin, zstd_level),  // -T0 uses all CPU cores
-                "-cf",
-                &target.to_string_lossy(),
-                "--exclude", "*.sock",
-                "--exclude", "*/sockets/*",
-                &source_name,
-            ]);
+            .arg(format!("--use-compress-program={} -T0 -{}", zstd_bin, zstd_level))
+            .arg("-cf")
+            .arg(&*target.to_string_lossy());
+        for ex in &exclude_args {
+            cmd.arg("--exclude").arg(ex);
+        }
+        cmd.arg(&source_name);
         // Create new process group so we can kill all children
         unsafe {
             cmd.pre_exec(|| {
@@ -1564,13 +1666,12 @@ fn create_tar_gz(source: &Path, target: &Path) -> Result<(), String> {
         // Fallback to gzip
         let mut cmd = Command::new("tar");
         cmd.current_dir(source_parent)
-            .args([
-                "-czf",
-                &target.to_string_lossy(),
-                "--exclude", "*.sock",
-                "--exclude", "*/sockets/*",
-                &source_name,
-            ]);
+            .arg("-czf")
+            .arg(&*target.to_string_lossy());
+        for ex in &exclude_args {
+            cmd.arg("--exclude").arg(ex);
+        }
+        cmd.arg(&source_name);
         unsafe {
             cmd.pre_exec(|| {
                 libc::setpgid(0, 0);
@@ -1717,9 +1818,27 @@ fn create_backup_impl(
         serde_json::json!({ "progress": 1, "message": "Scanne Quellverzeichnisse..." }),
     );
     trace("pre-flight scan start");
+    // Vorheriges Backup vorab laden – sowohl für die inkrementelle
+    // Archiv-Wiederverwendung als auch für eine realistische
+    // Speicherplatz-Schätzung: unveränderte Verzeichnisse werden später per
+    // Hardlink übernommen und benötigen keinen zusätzlichen Platz.
+    let previous = if incremental {
+        load_previous_backup(&suite_root)
+    } else {
+        None
+    };
     let home_pre = dirs::home_dir().unwrap_or_default();
     let mut estimated_source_bytes: u64 = 0;
+    let mut estimated_new_bytes: u64 = 0;
     let pre_total = directories.len().max(1);
+
+    // Snapshot-Cache: pro Eintrag aus `directories` das berechnete Manifest
+    // (oder None für Dateien / fehlende Pfade). Dadurch muss die Hauptschleife
+    // weder `compute_directory_size` noch erneut `compute_snapshot` aufrufen —
+    // ein kompletter Walk pro Top-Level-Verzeichnis statt bisher drei.
+    let mut cached_snapshots: Vec<Option<Vec<ManifestEntry>>> = vec![None; directories.len()];
+    let mut cached_sizes: Vec<Option<u64>> = vec![None; directories.len()];
+
     for (pre_i, dir) in directories.iter().enumerate() {
         let expanded = if dir.starts_with("~/") {
             home_pre.join(&dir[2..])
@@ -1741,30 +1860,70 @@ fn create_backup_impl(
             continue;
         }
         let t0 = std::time::Instant::now();
-        let added = if expanded.is_file() {
-            fs::metadata(&expanded).map(|m| m.len()).unwrap_or(0)
+        let (added, snap_opt) = if expanded.is_file() {
+            let sz = fs::metadata(&expanded).map(|m| m.len()).unwrap_or(0);
+            (sz, None)
         } else {
-            compute_directory_size(&expanded)
+            // Einziger Walk: Snapshot inkl. Excludes berechnen, Größe daraus
+            // summieren. Ergebnis für die Hauptschleife cachen.
+            let snap = compute_snapshot(&expanded);
+            let sz: u64 = snap.iter().map(|e| e.s).sum();
+            (sz, Some(snap))
         };
+
+        // Inkrementell: Wird dieses Verzeichnis voraussichtlich unverändert
+        // sein (gleiches Manifest wie im Vorgänger, Archiv vorhanden), wird es
+        // später per Hardlink übernommen und braucht keinen neuen Speicher.
+        // Solche Einträge fließen daher NICHT in die Bedarfsschätzung ein.
+        let mut will_reuse = false;
+        if let (Some(snap), Some((prev_ts, prev_meta))) = (snap_opt.as_ref(), previous.as_ref()) {
+            let name = expanded.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "backup".to_string());
+            let archive_ext = if is_zstd_available() { "tar.zst" } else { "tar.gz" };
+            let archive_name = format!(
+                "{}.{}",
+                name.to_lowercase().replace(' ', "-").replace('.', "_"),
+                archive_ext
+            );
+            let prev_inventory = suite_root.join("inventories").join(prev_ts);
+            if let Some(prev_snapshot) = load_manifest(&prev_inventory, &archive_name) {
+                if &prev_snapshot == snap
+                    && prev_meta.items.iter().any(|it| it.path == *dir && it.archive == archive_name)
+                    && suite_root.join("data").join(prev_ts).join(&archive_name).exists()
+                {
+                    will_reuse = true;
+                }
+            }
+        }
+
+        cached_snapshots[pre_i] = snap_opt;
+        cached_sizes[pre_i] = Some(added);
         let dt = t0.elapsed().as_secs_f32();
-        trace(&format!("  -> {} bytes in {:.2}s", added, dt));
+        trace(&format!("  -> {} bytes in {:.2}s (reuse={})", added, dt, will_reuse));
         estimated_source_bytes = estimated_source_bytes.saturating_add(added);
+        if !will_reuse {
+            estimated_new_bytes = estimated_new_bytes.saturating_add(added);
+        }
     }
     trace(&format!("pre-flight scan done, total {} bytes", estimated_source_bytes));
-    if estimated_source_bytes > 0 {
+    if estimated_new_bytes > 0 {
         let free_gb = get_free_space_gb(Path::new(&target_path));
-        let estimated_gb = (estimated_source_bytes as f64) / (1024.0 * 1024.0 * 1024.0);
+        // Nur neu zu schreibende (nicht wiederverwendbare) Daten zählen. Die
+        // unkomprimierte Größe ist dabei eine konservative Obergrenze, da das
+        // Archiv anschließend komprimiert wird.
+        let estimated_gb = (estimated_new_bytes as f64) / (1024.0 * 1024.0 * 1024.0);
         let required_gb = estimated_gb * 1.10; // 10% margin
         let _ = window.emit(
             "backup-log",
             format!(
-                "Free space check: {:.2} GB free, ~{:.2} GB source (need ≥ {:.2} GB with margin)",
+                "Free space check: {:.2} GB free, ~{:.2} GB new/changed (need ≥ {:.2} GB with margin)",
                 free_gb, estimated_gb, required_gb
             ),
         );
         if free_gb > 0.0 && free_gb < required_gb {
             let msg = format!(
-                "Insufficient free space on target: {:.2} GB free, ~{:.2} GB required (source {:.2} GB + 10% margin). Aborting.",
+                "Insufficient free space on target: {:.2} GB free, ~{:.2} GB required (new/changed {:.2} GB + 10% margin). Aborting.",
                 free_gb, required_gb, estimated_gb
             );
             let _ = window.emit("backup-log", format!("❌ {}", msg));
@@ -1871,13 +2030,7 @@ fn create_backup_impl(
 
     // Inkrementelles Backup: vorheriges Backup ermitteln (Timestamp + Metadata),
     // um Manifeste vergleichen und Archive per Hardlink wiederverwenden zu können.
-    trace("checking previous backup (incremental)");
-    let previous = if incremental {
-        load_previous_backup(&suite_root)
-    } else {
-        None
-    };
-    trace(&format!("previous backup check done, found={}", previous.is_some()));
+    trace(&format!("previous backup found={}", previous.is_some()));
     if let Some((prev_ts, _)) = &previous {
         let _ = window.emit(
             "backup-log",
@@ -1936,7 +2089,11 @@ fn create_backup_impl(
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "backup".to_string());
         
-        let archive_ext = if is_zstd_available() { "tar.zst" } else { "tar.gz" };
+        // Einzeldateien werden mit gzip (tar::Builder + GzEncoder) gepackt,
+        // Verzeichnisse via `create_tar_gz` mit zstd (sofern verfügbar). Die
+        // Endung muss zum tatsächlichen Kompressor passen, sonst schlägt die
+        // zstd-Vorprüfung beim Verify/Restore unnötig fehl.
+        let archive_ext = if !is_file && is_zstd_available() { "tar.zst" } else { "tar.gz" };
         let archive_name = format!("{}.{}", name.to_lowercase().replace(' ', "-").replace('.', "_"), archive_ext);
         let archive_path = backup_root.join(&archive_name);
         
@@ -1948,7 +2105,9 @@ fn create_backup_impl(
         }));
         
         let source_size = if is_file {
-            fs::metadata(&expanded).map(|m| m.len()).unwrap_or(0)
+            cached_sizes[i].unwrap_or_else(|| fs::metadata(&expanded).map(|m| m.len()).unwrap_or(0))
+        } else if let Some(sz) = cached_sizes[i] {
+            sz
         } else {
             trace(&format!("  compute_directory_size start: {}", dir));
             let s = compute_directory_size(&expanded);
@@ -1957,8 +2116,15 @@ fn create_backup_impl(
         };
 
         // --- Inkrementell: Snapshot berechnen und mit Vorgänger vergleichen ---
+        // Pre-flight hat das Manifest bereits erzeugt und gecacht — für
+        // Verzeichnisse wird es hier wiederverwendet, um einen zweiten Walk
+        // über dieselben Dateien zu vermeiden.
         trace(&format!("  compute_snapshot start: {}", dir));
-        let current_snapshot = compute_snapshot(&expanded);
+        let current_snapshot = if let Some(s) = cached_snapshots[i].take() {
+            s
+        } else {
+            compute_snapshot(&expanded)
+        };
         trace(&format!("  compute_snapshot done ({} entries)", current_snapshot.len()));
 
         let mut reused_from_prev: Option<(String, String, u64)> = None; // (prev_ts, prev_hash, prev_archive_size)
@@ -2087,7 +2253,8 @@ fn create_backup_impl(
     if !completed_paths.contains("homebrew-packages") {
         trace("archiving homebrew-packages");
     if let Ok(brewfile) = get_brew_packages() {
-        let brew_archive_name = if is_zstd_available() { "homebrew-packages.tar.zst" } else { "homebrew-packages.tar.gz" };
+        // Immer gzip (GzEncoder) – daher konsequent als .tar.gz benennen.
+        let brew_archive_name = "homebrew-packages.tar.gz";
         let brew_archive_path = backup_root.join(brew_archive_name);
         let brew_temp = std::env::temp_dir().join("homebrew_packages.txt");
         let _ = fs::write(&brew_temp, &brewfile);
@@ -2169,7 +2336,8 @@ fn create_backup_impl(
         }
 
         if mas_temp.exists() {
-            let mas_archive_name = if is_zstd_available() { "mas-apps.tar.zst" } else { "mas-apps.tar.gz" };
+            // Immer gzip (GzEncoder) – daher konsequent als .tar.gz benennen.
+            let mas_archive_name = "mas-apps.tar.gz";
             let mas_archive_path = backup_root.join(mas_archive_name);
             let source_size = fs::metadata(&mas_temp).map(|m| m.len()).unwrap_or(0);
 
@@ -2202,11 +2370,11 @@ fn create_backup_impl(
     if !completed_paths.contains("vscode-extensions") {
         trace("archiving vscode-extensions");
     if let Ok(extensions) = get_vscode_extensions() {
-        let vscode_archive_name = if is_zstd_available() { "vscode-extensions.tar.zst" } else { "vscode-extensions.tar.gz" };
+        // Immer gzip (GzEncoder) – daher konsequent als .tar.gz benennen.
+        let vscode_archive_name = "vscode-extensions.tar.gz";
         let vscode_archive_path = backup_root.join(vscode_archive_name);
         let vscode_temp = std::env::temp_dir().join("vscode_extensions.txt");
-        let vscode_content = extensions.join("
-");
+        let vscode_content = extensions.join("\n");
         let _ = fs::write(&vscode_temp, &vscode_content);
         
         if vscode_temp.exists() {
@@ -2513,7 +2681,18 @@ fn verify_backup_impl(
     let total_files = metadata.items.len();
     let mut verified_files = 0;
     let mut failed_files = Vec::new();
-    
+
+    if total_files == 0 {
+        let _ = window.emit("backup-log", "Keine Dateien im Backup zum Verifizieren.");
+        return Ok(VerifyResult {
+            success: true,
+            total_files: 0,
+            verified_files: 0,
+            failed_files: Vec::new(),
+            message: "Keine Dateien zum Verifizieren".to_string(),
+        });
+    }
+
     for (i, item) in metadata.items.iter().enumerate() {
         // Check for cancellation
         if VERIFY_CANCELLED.load(Ordering::SeqCst) {
@@ -2624,6 +2803,14 @@ fn verify_backup_parallel_impl(
     let mut processed = 0;
     
     for chunk in chunks {
+        // Abbruch zwischen den Batches sauber behandeln: laufende hash_file-
+        // Aufrufe brechen intern via VERIFY_CANCELLED ab und würden sonst
+        // fälschlich als „Read error“ in failed_files landen. Hier stattdessen
+        // kontrolliert mit klarer Meldung aussteigen.
+        if VERIFY_CANCELLED.load(Ordering::SeqCst) {
+            VERIFY_CANCELLED.store(false, Ordering::SeqCst);
+            return Err("Verification cancelled".to_string());
+        }
         let mut handles = Vec::new();
         
         for item in chunk {
@@ -2671,6 +2858,12 @@ fn verify_backup_parallel_impl(
             message: format!("{}/{} files verified", processed, total_files),
             fraction,
         });
+    }
+    
+    // Falls der Abbruch erst während des letzten Batches eintraf.
+    if VERIFY_CANCELLED.load(Ordering::SeqCst) {
+        VERIFY_CANCELLED.store(false, Ordering::SeqCst);
+        return Err("Verification cancelled".to_string());
     }
     
     let verified_files = verified_counter.load(AtomicOrdering::SeqCst);
@@ -2870,6 +3063,190 @@ async fn restore_items(
     })
     .await
     .map_err(|e| format!("Restore task join error: {}", e))?
+}
+
+/// Ergebnis eines Test-Restores.
+#[derive(Serialize, Debug, Clone)]
+pub struct TestRestoreResult {
+    pub item_path: String,
+    pub archive: String,
+    pub dest_dir: String,
+    pub extracted_path: String,
+    pub bytes_extracted: u64,
+    pub file_count: u64,
+}
+
+/// Test-Restore: extrahiert genau ein Backup-Item in einen frei gewählten
+/// Zielordner. Schreibt **nur** in einen Unterordner unterhalb von `dest_dir`,
+/// niemals an den ursprünglichen Pfad. Dadurch lässt sich ein Backup
+/// zerstörungsfrei verifizieren.
+///
+/// Sicherheitsregeln:
+/// * `dest_dir` muss existieren und ein Verzeichnis sein.
+/// * Es wird ein eindeutiger Unterordner `test-restore_<timestamp>_<archive>/`
+///   angelegt; existiert er bereits, wird mit Suffix `-N` versucht, bis ein
+///   freier Name gefunden ist (max. 100 Versuche).
+/// * Spezial-Items wie `homebrew-packages`, `mas-apps`, `vscode-extensions`
+///   werden abgelehnt — Test-Restore unterstützt nur Datei-/Ordner-Archive.
+#[tauri::command]
+async fn test_restore_item(
+    target_path: String,
+    timestamp: String,
+    item_path: String,
+    dest_dir: String,
+    window: tauri::Window,
+) -> Result<TestRestoreResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        test_restore_item_impl(target_path, timestamp, item_path, dest_dir, window)
+    })
+    .await
+    .map_err(|e| format!("Test-Restore task join error: {}", e))?
+}
+
+fn test_restore_item_impl(
+    target_path: String,
+    timestamp: String,
+    item_path: String,
+    dest_dir: String,
+    window: tauri::Window,
+) -> Result<TestRestoreResult, String> {
+    // Backup laden
+    let backup_path = PathBuf::from(&target_path)
+        .join("macos-backup-suite")
+        .join("data")
+        .join(&timestamp);
+    let metadata_path = backup_path.join("metadata.json");
+    if !metadata_path.exists() {
+        return Err(format!("Backup nicht gefunden: {}", timestamp));
+    }
+    let metadata = load_backup_metadata(&metadata_path)?;
+
+    // Spezial-Items ausschließen
+    const UNSUPPORTED: &[&str] = &[
+        "homebrew-packages",
+        "mas-apps",
+        "vscode-extensions",
+        "homebrew-cache",
+        "safari-settings",
+    ];
+    if UNSUPPORTED.contains(&item_path.as_str()) {
+        return Err(format!(
+            "Test-Restore wird für Spezial-Item '{}' nicht unterstützt — bitte ein Datei-/Ordner-Archiv wählen.",
+            item_path
+        ));
+    }
+
+    // Item in Metadata finden
+    let backup_item = metadata
+        .items
+        .iter()
+        .find(|it| it.path == item_path)
+        .ok_or_else(|| format!("Item '{}' nicht im Backup vorhanden", item_path))?;
+
+    let archive_path = backup_path.join(&backup_item.archive);
+    if !archive_path.exists() {
+        return Err(format!("Archiv nicht gefunden: {}", backup_item.archive));
+    }
+
+    // Zielverzeichnis prüfen — muss existieren und ein Verzeichnis sein.
+    let dest_root = PathBuf::from(&dest_dir);
+    if !dest_root.exists() {
+        return Err(format!("Zielordner existiert nicht: {}", dest_dir));
+    }
+    if !dest_root.is_dir() {
+        return Err(format!("Ziel ist kein Verzeichnis: {}", dest_dir));
+    }
+
+    // Sicherheits-Check: niemals direkt ins Backup-Verzeichnis schreiben.
+    if let (Ok(canon_dest), Ok(canon_backup)) = (dest_root.canonicalize(), backup_path.canonicalize()) {
+        if canon_dest.starts_with(&canon_backup) {
+            return Err("Zielordner darf nicht innerhalb des Backups liegen".to_string());
+        }
+    }
+
+    // Eindeutigen Unterordner erzeugen
+    let safe_archive = backup_item
+        .archive
+        .replace(['/', '\\'], "_");
+    let base_name = format!("test-restore_{}_{}", timestamp, safe_archive);
+    let mut extract_dir = dest_root.join(&base_name);
+    let mut attempt: u32 = 1;
+    while extract_dir.exists() {
+        if attempt > 100 {
+            return Err("Konnte keinen freien Zielordner finden (100 Versuche überschritten)".to_string());
+        }
+        extract_dir = dest_root.join(format!("{}-{}", base_name, attempt));
+        attempt += 1;
+    }
+
+    let _ = window.emit(
+        "restore-log",
+        format!(
+            "🧪 Test-Restore: '{}' aus Backup {} -> {}",
+            item_path,
+            timestamp,
+            extract_dir.display()
+        ),
+    );
+    let _ = window.emit(
+        "restore-progress",
+        serde_json::json!({ "progress": 5, "message": "Vorbereiten..." }),
+    );
+
+    // Extrahieren (nutzt Hash-Vorprüfung via verify_archive_integrity intern)
+    fs::create_dir_all(&extract_dir)
+        .map_err(|e| format!("Konnte Zielordner nicht anlegen: {}", e))?;
+
+    let _ = window.emit(
+        "restore-progress",
+        serde_json::json!({ "progress": 30, "message": "Entpacke Archiv..." }),
+    );
+
+    if let Err(e) = extract_archive_to(&archive_path, &extract_dir) {
+        // Aufräumen, damit kein halb-extrahierter Ordner liegen bleibt
+        let _ = fs::remove_dir_all(&extract_dir);
+        return Err(format!("Extraktion fehlgeschlagen: {}", e));
+    }
+
+    let _ = window.emit(
+        "restore-progress",
+        serde_json::json!({ "progress": 80, "message": "Ergebnis prüfen..." }),
+    );
+
+    // Größe + Dateianzahl ermitteln (nur zur Anzeige)
+    let mut bytes: u64 = 0;
+    let mut count: u64 = 0;
+    for dent in WalkDir::new(&extract_dir).into_iter().filter_map(|e| e.ok()) {
+        if let Ok(md) = dent.metadata() {
+            if md.is_file() {
+                bytes = bytes.saturating_add(md.len());
+                count += 1;
+            }
+        }
+    }
+
+    let _ = window.emit(
+        "restore-log",
+        format!(
+            "✅ Test-Restore abgeschlossen: {} Dateien, {} Bytes -> {}",
+            count,
+            bytes,
+            extract_dir.display()
+        ),
+    );
+    let _ = window.emit(
+        "restore-progress",
+        serde_json::json!({ "progress": 100, "message": "Test-Restore fertig" }),
+    );
+
+    Ok(TestRestoreResult {
+        item_path,
+        archive: backup_item.archive.clone(),
+        dest_dir,
+        extracted_path: extract_dir.to_string_lossy().to_string(),
+        bytes_extracted: bytes,
+        file_count: count,
+    })
 }
 
 fn restore_items_impl(
@@ -4061,7 +4438,11 @@ fn dry_run_backup(
         let (bytes, is_file) = if expanded.is_file() {
             (fs::metadata(&expanded).map(|m| m.len()).unwrap_or(0), true)
         } else {
-            (compute_directory_size(&expanded), false)
+            // Konsistent mit dem echten Backup: ausgeschlossene Pfade
+            // (Caches, node_modules, Logs …) zählen nicht mit, sonst zeigt die
+            // Vorschau eine deutlich zu große Quellgröße an.
+            let snap = compute_snapshot(&expanded);
+            (snap.iter().map(|e| e.s).sum(), false)
         };
         total_bytes += bytes;
 
@@ -4107,7 +4488,7 @@ fn dry_run_backup(
 fn build_menu(app_handle: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let about_metadata = AboutMetadata {
         name: Some("macOS Backup Suite".to_string()),
-        version: Some("1.0.0".to_string()),
+        version: Some(env!("CARGO_PKG_VERSION").to_string()),
         copyright: Some("© 2025 Norbert Jander".to_string()),
         comments: Some("Backup & Restore for macOS".to_string()),
         ..Default::default()
@@ -4290,6 +4671,7 @@ pub fn run() {
             apply_retention_policy,
             dry_run_backup,
             restore_items,
+            test_restore_item,
             quick_restore_essentials,
             list_backup_files,
             verify_backup,

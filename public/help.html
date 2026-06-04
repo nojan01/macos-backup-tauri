@@ -147,6 +147,17 @@
         <h1>📖 macOS Backup Suite - Hilfe</h1>
 
         <div class="section">
+            <h2><span class="emoji">✨</span>Neu in v1.2.9</h2>
+            <ul>
+                <li><strong>Schnellere Folge-Backups:</strong> Pro Top-Level-Verzeichnis nur noch ein Baum-Walk statt drei – Pre-flight-Scan, Größen- und Snapshot-Berechnung teilen sich jetzt dasselbe Ergebnis.</li>
+                <li><strong>Mehr Archiv-Wiederverwendung:</strong> Typische „Churn"-Pfade (<code>Caches</code>, <code>Logs</code>, <code>.DS_Store</code>, <code>node_modules</code>, <code>.Trash</code>, <code>.Spotlight-V100</code>, <code>.fseventsd</code> u. a.) werden in Snapshot und <code>tar</code> konsistent ausgeschlossen – unveränderte Verzeichnisse werden viel häufiger als Hardlink übernommen.</li>
+                <li><strong>Schnellere Kompression:</strong> zstd-Default-Level von 3 auf 1 gesenkt (~3–5× schneller bei ~10 % größerem Archiv). Überschreibbar per Env-Var <code>BACKUP_ZSTD_LEVEL</code> (1–22).</li>
+                <li><strong>Eigene Excludes:</strong> Zusätzliche Pfad-Komponenten können per <code>BACKUP_EXTRA_EXCLUDES</code> (kommagetrennt) ergänzt werden.</li>
+                <li><strong>🧪 Test-Restore:</strong> Neuer Button im Bereich „Vorhandene Backups". Extrahiert ein einzelnes gesichertes Verzeichnis zerstörungsfrei in einen frei gewählten Zielordner (Unterordner <code>test-restore_&lt;timestamp&gt;_&lt;archiv&gt;/</code>). Originaldateien werden nie überschrieben – ideal, um die Wiederherstellbarkeit eines Backups zu prüfen.</li>
+            </ul>
+        </div>
+
+        <div class="section">
             <h2><span class="emoji">✨</span>Neu in v1.2.8</h2>
             <ul>
                 <li><strong>MAS-Liste sichtbar im Log:</strong> Der Sicherungsvorgang gibt jetzt "📋 Sichere App-Store-Liste…" und anschließend die Anzahl gefundener Apps sowie die Quelle (<code>mas list</code> oder Brewfile) aus.</li>
@@ -374,7 +385,7 @@
         </div>
         
         <footer>
-            <p>macOS Backup Suite v1.2.8 – © 2024-2026</p>
+            <p>macOS Backup Suite v1.2.9 – © 2024-2026</p>
             <p>Bei Fragen oder Problemen erstellen Sie bitte ein Issue auf GitHub.</p>
         </footer>
     </div>

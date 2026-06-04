@@ -2,7 +2,8 @@
 # Post-build script: Embed DMG into the app bundle and set custom icon
 
 APP_PATH="src-tauri/target/release/bundle/macos/macOS Backup Suite.app"
-DMG_SOURCE="src-tauri/target/release/bundle/dmg/macOS Backup Suite_1.0.0_aarch64.dmg"
+# Find the built DMG regardless of version/arch in its filename.
+DMG_SOURCE=$(ls -t src-tauri/target/release/bundle/dmg/*.dmg 2>/dev/null | head -n 1)
 DMG_DEST="$APP_PATH/Contents/Resources/macOS Backup Suite.dmg"
 ICON_PATH="src-tauri/icons/icon.icns"
 

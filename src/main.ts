@@ -459,6 +459,13 @@ const btnBackup = document.getElementById("btn-backup") as HTMLButtonElement;
 const btnCancel = document.getElementById("btn-cancel") as HTMLButtonElement;
 const btnRestore = document.getElementById("btn-restore") as HTMLButtonElement;
 const btnRestoreTest = document.getElementById("btn-restore-test") as HTMLButtonElement;
+const btnTestRestore = document.getElementById("btn-test-restore") as HTMLButtonElement;
+const testRestoreModal = document.getElementById("test-restore-modal") as HTMLDivElement;
+const testRestoreItemSelect = document.getElementById("test-restore-item") as HTMLSelectElement;
+const testRestoreDestInput = document.getElementById("test-restore-dest") as HTMLInputElement;
+const testRestorePickDest = document.getElementById("test-restore-pick-dest") as HTMLButtonElement;
+const testRestoreCancel = document.getElementById("test-restore-cancel") as HTMLButtonElement;
+const testRestoreStart = document.getElementById("test-restore-start") as HTMLButtonElement;
 const backupSelect = document.getElementById("backup-select") as HTMLSelectElement;
 const showFilesBtn = document.getElementById("show-files") as HTMLButtonElement;
 const showManualAppsBtn = document.getElementById("show-manual-apps") as HTMLButtonElement;
@@ -2316,3 +2323,157 @@ interface WindowState {
 (window as unknown as { showHelp: () => void }).showHelp = function() {
   openHelpModal();
 };
+
+// ============== Test-Restore ==============
+//
+// Extrahiert ein einzelnes Backup-Item zerstörungsfrei in einen vom Nutzer
+// gewählten Ordner. Schreibt nie an die Originalpfade. Nützlich, um zu
+// prüfen, ob ein Backup tatsächlich entpackbar ist und die erwarteten
+// Dateien enthält.
+
+interface TestRestoreResult {
+  item_path: string;
+  archive: string;
+  dest_dir: string;
+  extracted_path: string;
+  bytes_extracted: number;
+  file_count: number;
+}
+
+interface TestRestoreBackupItem {
+  path: string;
+  archive: string;
+  archive_size_bytes: number;
+  source_size_bytes: number;
+}
+
+interface TestRestoreBackupDetails {
+  timestamp: string;
+  items: TestRestoreBackupItem[];
+}
+
+const TEST_RESTORE_UNSUPPORTED = new Set([
+  "homebrew-packages",
+  "mas-apps",
+  "vscode-extensions",
+  "homebrew-cache",
+  "safari-settings",
+]);
+
+function formatBytesShort(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+}
+
+async function openTestRestoreModal(): Promise<void> {
+  const timestamp = backupSelect.value;
+  if (!timestamp) {
+    log(t("selectTestBackup") || "Bitte zuerst ein Backup auswählen.");
+    return;
+  }
+  const targetPath = getFullTargetPath();
+  if (!targetPath) {
+    log(t("selectTargetFirst") || "Bitte zuerst Zielpfad wählen.");
+    return;
+  }
+
+  // Items des Backups laden
+  testRestoreItemSelect.innerHTML = '<option value="">– Wird geladen... –</option>';
+  testRestoreDestInput.value = "";
+  testRestoreModal.style.display = "flex";
+
+  try {
+    const details: TestRestoreBackupDetails = await invoke("list_backup_files", {
+      targetPath,
+      timestamp,
+    });
+
+    testRestoreItemSelect.innerHTML = '<option value="">– Bitte wählen –</option>';
+    for (const it of details.items) {
+      if (TEST_RESTORE_UNSUPPORTED.has(it.path)) continue;
+      const opt = document.createElement("option");
+      opt.value = it.path;
+      const sizeStr = formatBytesShort(it.archive_size_bytes);
+      opt.textContent = `${it.path}  (${sizeStr})`;
+      testRestoreItemSelect.appendChild(opt);
+    }
+    if (testRestoreItemSelect.options.length <= 1) {
+      log("⚠️ Kein test-restore-fähiges Item in diesem Backup gefunden.");
+    }
+  } catch (e) {
+    log(`❌ Konnte Backup-Inhalt nicht lesen: ${e}`);
+    testRestoreModal.style.display = "none";
+  }
+}
+
+btnTestRestore.addEventListener("click", () => {
+  void openTestRestoreModal();
+});
+
+testRestoreCancel.addEventListener("click", () => {
+  testRestoreModal.style.display = "none";
+});
+
+testRestorePickDest.addEventListener("click", async () => {
+  try {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: "Zielordner für Test-Restore wählen",
+    });
+    if (typeof selected === "string" && selected.length > 0) {
+      testRestoreDestInput.value = selected;
+    }
+  } catch (e) {
+    log(`❌ Ordner-Auswahl fehlgeschlagen: ${e}`);
+  }
+});
+
+testRestoreStart.addEventListener("click", async () => {
+  const itemPath = testRestoreItemSelect.value;
+  const destDir = testRestoreDestInput.value;
+  const timestamp = backupSelect.value;
+  const targetPath = getFullTargetPath();
+
+  if (!itemPath) {
+    log("⚠️ Bitte ein Element auswählen.");
+    return;
+  }
+  if (!destDir) {
+    log("⚠️ Bitte einen Zielordner auswählen.");
+    return;
+  }
+  if (!timestamp || !targetPath) {
+    log("⚠️ Backup oder Zielpfad fehlt.");
+    return;
+  }
+
+  testRestoreModal.style.display = "none";
+
+  // Progress-UI vorbereiten (gleiche Bar wie Restore)
+  progressFill.style.width = "0%";
+  progressFill.classList.add("animating");
+  progressMessage.textContent = "🧪 Test-Restore läuft...";
+  log(`🧪 Test-Restore: ${itemPath} -> ${destDir}`);
+
+  try {
+    const result = await invoke<TestRestoreResult>("test_restore_item", {
+      targetPath,
+      timestamp,
+      itemPath,
+      destDir,
+    });
+    progressFill.classList.remove("animating");
+    progressFill.style.width = "100%";
+    progressMessage.textContent = "🧪 Test-Restore abgeschlossen";
+    log(`✅ Test-Restore OK: ${result.file_count} Dateien, ${formatBytesShort(result.bytes_extracted)}`);
+    log(`   📁 Entpackt nach: ${result.extracted_path}`);
+  } catch (e) {
+    progressFill.classList.remove("animating");
+    progressMessage.textContent = "❌ Test-Restore fehlgeschlagen";
+    log(`❌ Test-Restore Fehler: ${e}`);
+  }
+});
