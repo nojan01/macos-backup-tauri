@@ -1,3 +1,4 @@
+import { createRestoreRow, restoreStatusKey } from "./restore-ui";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize, LogicalPosition } from "@tauri-apps/api/window";
@@ -22,6 +23,7 @@ interface BackupConfig {
 interface BackupItem {
   timestamp: string;
   hash_verified: boolean;
+  metadata_valid: boolean;
 }
 
 interface BackupFileInfo {
@@ -207,6 +209,11 @@ const translations: Record<string, Record<string, string>> = {
     selectAll: "Alle auswählen",
     deselectAll: "Alle abwählen",
     restoreComplete: "Wiederherstellung abgeschlossen",
+    restoreWithErrors: "Wiederherstellung mit Fehlern beendet",
+    restoreNothingChanged: "Keine Änderungen – vorhandene Elemente übersprungen",
+    backupNotVerified: "noch nicht verifiziert",
+    backupInvalid: "Metadaten ungültig oder unvollständig",
+    operationBusy: "Ein Vorgang läuft bereits. Bitte warten.",
     restoredItems: "Wiederhergestellt",
     skippedItems: "Übersprungen",
     errorItems: "Fehler",
@@ -393,6 +400,11 @@ const translations: Record<string, Record<string, string>> = {
     selectAll: "Select all",
     deselectAll: "Deselect all",
     restoreComplete: "Restore complete",
+    restoreWithErrors: "Restore finished with errors",
+    restoreNothingChanged: "No changes – existing items skipped",
+    backupNotVerified: "not yet verified",
+    backupInvalid: "invalid or incomplete metadata",
+    operationBusy: "An operation is already running. Please wait.",
     restoredItems: "Restored",
     skippedItems: "Skipped",
     errorItems: "Errors",
@@ -493,6 +505,8 @@ const defaultDirectoriesList = document.getElementById("default-directories-list
 const addDefaultDirectoryBtn = document.getElementById("add-default-directory") as HTMLButtonElement;
 const settingsCancelBtn = document.getElementById("settings-cancel") as HTMLButtonElement;
 const settingsSaveBtn = document.getElementById("settings-save") as HTMLButtonElement;
+const backupHomebrewCheckbox = document.getElementById("backup-homebrew") as HTMLInputElement;
+const backupMasCheckbox = document.getElementById("backup-mas") as HTMLInputElement;
 const backupHomebrewCacheCheckbox = document.getElementById("backup-homebrew-cache") as HTMLInputElement;
 const backupSafariSettingsCheckbox = document.getElementById("backup-safari-settings") as HTMLInputElement;
 const restoreQuickBtn = document.getElementById("restore-quick") as HTMLButtonElement;
@@ -869,9 +883,10 @@ async function loadBackups(): Promise<void> {
     for (const backup of backups) {
       const option = document.createElement("option");
       option.value = backup.timestamp;
-      const verified = backup.hash_verified ? "✓" : "✗";
+      const verified = backup.metadata_valid ? t("backupNotVerified") : t("backupInvalid");
       const formatted = formatTimestamp(backup.timestamp);
       option.textContent = `${formatted} [${verified}]`;
+      option.dataset.label = formatted;
       backupSelect.appendChild(option);
     }
     
@@ -921,8 +936,8 @@ function updateDefaultDirectoriesList(): void {
   for (const dir of tempDefaultDirectories) {
     const li = document.createElement("li");
     li.innerHTML = `
-      <span>${dir}</span>
-      <button class="remove-dir" data-path="${dir}">✕</button>
+      <span>${escapeHtml(dir)}</span>
+      <button class="remove-dir" data-path="${escapeHtml(dir)}">✕</button>
     `;
     defaultDirectoriesList.appendChild(li);
   }
@@ -1061,14 +1076,14 @@ function addUserFolderItem(user: UserFolder): void {
   li.innerHTML = `
     <div class="user-folder-info">
       <span class="user-folder-icon">${icon}</span>
-      <span class="user-folder-name">${user.name}</span>
+      <span class="user-folder-name">${escapeHtml(user.name)}</span>
       <span class="user-folder-access ${accessClass}">${accessIcon}</span>
     </div>
     <div class="user-folder-actions">
-      <button class="btn-secondary btn-small select-user-home" data-path="${user.path}" ${!user.readable ? 'disabled' : ''}>
+      <button class="btn-secondary btn-small select-user-home" data-path="${escapeHtml(user.path)}" ${!user.readable ? 'disabled' : ''}>
         ${t("addFolder")}
       </button>
-      <button class="btn-secondary btn-small select-user-subfolder" data-path="${user.path}" ${!user.readable ? 'disabled' : ''}>
+      <button class="btn-secondary btn-small select-user-subfolder" data-path="${escapeHtml(user.path)}" ${!user.readable ? 'disabled' : ''}>
         ${t("selectSubfolder")}
       </button>
     </div>
@@ -1147,6 +1162,7 @@ async function addFolderWithPermissionCheck(path: string): Promise<void> {
 
 // Start backup
 async function startBackup(): Promise<void> {
+  if (operationInProgress) { log(t("operationBusy")); return; }
   // Re-check FDA before starting backup
   await checkFullDiskAccess();
   if (!hasFDA) {
@@ -1211,10 +1227,11 @@ async function startBackup(): Promise<void> {
   }
 
   // Reset operation state in backend
-  await invoke("reset_operation_state");
+  try { await invoke("reset_operation_state"); } catch (e) { log(String(e)); return; }
   
   backupInProgress = true;
   operationInProgress = true;
+  setOperationControls(true);
   btnBackup.disabled = true;
   btnBackup.style.display = "none";
   btnCancel.style.display = "block";
@@ -1250,6 +1267,7 @@ async function startBackup(): Promise<void> {
   } finally {
     backupInProgress = false;
     operationInProgress = false;
+    setOperationControls(false);
     btnBackup.disabled = false;
     btnBackup.style.display = "block";
     btnCancel.style.display = "none";
@@ -1281,14 +1299,10 @@ async function cancelOperation(): Promise<void> {
   } catch (e) {
     log(`${t("backupFailed")} ${e}`);
   } finally {
+    // The active invoke releases controls only after the backend actually exits.
     backupInProgress = false;
     verifyInProgress = false;
-    operationInProgress = false;
-    btnBackup.disabled = false;
-    btnBackup.style.display = "block";
-    btnCancel.style.display = "none";
-    btnRestoreTest.disabled = false;
-    statusEl.textContent = t("ready");
+    btnCancel.disabled = true;
   }
 }
 
@@ -1472,18 +1486,9 @@ function showRestoreModal(details: BackupDetails): void {
   for (const item of details.items) {
     const icon = getRestoreItemIcon(item.path);
     const size = formatRestoreBytes(item.source_size_bytes);
-    const div = document.createElement("div");
-    div.className = "restore-item";
-    div.innerHTML = `
-      <input type="checkbox" class="restore-checkbox" value="${item.path}" checked />
-      <span class="restore-item-icon">${icon}</span>
-      <div class="restore-item-info">
-        <div class="restore-item-path">${item.path}</div>
-        <div class="restore-item-size">${size}</div>
-      </div>
-    `;
-    restoreItemsList.appendChild(div);
+    restoreItemsList.appendChild(createRestoreRow(item.path, icon, size));
   }
+  restoreOverwrite.checked = false;
   restoreModal.style.display = "flex";
 }
 
@@ -1523,6 +1528,26 @@ restoreCancel.addEventListener("click", () => {
   restoreModal.style.display = "none";
 });
 
+
+function setOperationControls(busy: boolean): void {
+  for (const button of [btnBackup, btnRestore, btnRestoreTest, btnTestRestore, btnDeleteBackup, restoreStart, restoreQuickBtn, testRestoreStart]) {
+    if (button) button.disabled = busy;
+  }
+  backupSelect.disabled = busy;
+  volumeSelect.disabled = busy;
+  browseTargetBtn.disabled = busy;
+}
+function beginRestore(): boolean {
+  if (operationInProgress) { log(t("operationBusy")); return false; }
+  operationInProgress = true;
+  setOperationControls(true);
+  return true;
+}
+function endRestore(): void {
+  operationInProgress = false;
+  setOperationControls(false);
+}
+
 // Quick-Restore: Install essential packages first for rapid productivity
 if (restoreQuickBtn) {
   restoreQuickBtn.addEventListener("click", async () => {
@@ -1543,13 +1568,14 @@ if (restoreQuickBtn) {
     log(`⚡ ${t("quickRestoreStarted")}`);
     log(`   ${t("quickRestoreInstalling")}`);
     
+    if (!beginRestore()) return;
     try {
       const result = await invoke<RestoreResult>("quick_restore_essentials", {
         targetPath: targetPath,
         timestamp: timestamp,
       });
       
-      log(`✅ ${t("quickRestoreComplete")}`);
+      log(`${result.error_count > 0 ? "❌" : "✅"} ${t(restoreStatusKey(result))}`);
       log(`   ${t("installed")}: ${result.restored_count}`);
       if (result.skipped_count > 0) {
         log(`   ${t("skipped")}: ${result.skipped_count}`);
@@ -1560,11 +1586,14 @@ if (restoreQuickBtn) {
       
       progressFill.classList.remove("animating");
       progressFill.style.width = "100%";
-      progressMessage.textContent = `⚡ ${t("quickRestoreDone")}`;
+      progressMessage.textContent = t(restoreStatusKey(result));
+      for (const error of result.errors) log(`❌ ${error}`);
     } catch (e) {
       log(`❌ ${t("quickRestoreError")} ${e}`);
       progressFill.classList.remove("animating");
       progressMessage.textContent = t("quickRestoreErrorProgress");
+    } finally {
+      endRestore();
     }
   });
 }
@@ -1593,6 +1622,7 @@ restoreStart.addEventListener("click", async () => {
   
   log(`🔄 ${t("restoring")} ${selectedItems.length} ${t("items")}...`);
   
+  if (!beginRestore()) return;
   try {
     const result = await invoke<RestoreResult>("restore_items", {
       targetPath: targetPath,
@@ -1601,7 +1631,7 @@ restoreStart.addEventListener("click", async () => {
       overwrite: overwrite,
     });
     
-    log(`✅ ${t("restoreComplete")}:`);
+    log(`${result.error_count > 0 ? "❌" : "✅"} ${t(restoreStatusKey(result))}:`);
     log(`   ${t("restoredItems")}: ${result.restored_count}`);
     if (result.skipped_count > 0) {
       log(`   ${t("skippedItems")}: ${result.skipped_count}`);
@@ -1614,11 +1644,13 @@ restoreStart.addEventListener("click", async () => {
     }
     progressFill.classList.remove("animating");
     progressFill.style.width = "100%";
-    progressMessage.textContent = t("restoreComplete");
+    progressMessage.textContent = t(restoreStatusKey(result));
   } catch (e) {
     log(`❌ ${t("restoreError")} ${e}`);
     progressFill.classList.remove("animating");
     progressMessage.textContent = t("restoreErrorProgress");
+  } finally {
+    endRestore();
   }
 });
 
@@ -1627,11 +1659,12 @@ listen("restore-log", (event: { payload: string }) => {
 });
 
 listen("restore-progress", (event: { payload: { progress: number; message: string } }) => {
-  progressFill.style.width = `${event.payload.progress}%`;
+  if (typeof event.payload.progress === "number") progressFill.style.width = `${event.payload.progress}%`;
   progressMessage.textContent = event.payload.message;
 });
 
 btnRestoreTest.addEventListener("click", async () => {
+  if (operationInProgress) { log(t("operationBusy")); return; }
   const timestamp = backupSelect.value;
   if (!timestamp) {
     log(t("selectTestBackup"));
@@ -1644,12 +1677,17 @@ btnRestoreTest.addEventListener("click", async () => {
     return;
   }
   
+  // Invalidate an earlier checkmark before checking again (including cancellation/failure).
+  const checkedOption = Array.from(backupSelect.options).find(o => o.value === timestamp);
+  if (checkedOption) checkedOption.textContent = `${checkedOption.dataset.label || formatTimestamp(timestamp)} [${t("backupNotVerified")}]`;
+
   // Reset operation state in backend
-  await invoke("reset_operation_state");
+  try { await invoke("reset_operation_state"); } catch (e) { log(String(e)); return; }
   
   // Set up UI for verification
   verifyInProgress = true;
   operationInProgress = true;
+  setOperationControls(true);
   btnRestoreTest.disabled = true;
   btnBackup.disabled = true;
   btnBackup.style.display = "none";
@@ -1677,6 +1715,8 @@ btnRestoreTest.addEventListener("click", async () => {
       if (result.success) {
         log(`✅ ${result.message}`);
         statusEl.textContent = result.message;
+        const option = Array.from(backupSelect.options).find(o => o.value === timestamp);
+        if (option) option.textContent = `${option.dataset.label || formatTimestamp(timestamp)} [✓]`;
       } else {
         log(`❌ ${result.message}`);
         for (const failure of result.failed_files) {
@@ -1696,6 +1736,7 @@ btnRestoreTest.addEventListener("click", async () => {
   } finally {
     verifyInProgress = false;
     operationInProgress = false;
+    setOperationControls(false);
     btnRestoreTest.disabled = false;
     btnBackup.disabled = false;
     btnBackup.style.display = "block";
@@ -1875,7 +1916,7 @@ function renderLicenseList(filter: string) {
     .replace("{total}", String(currentLicenseData.length));
   
   let html = `<div class="license-filter">
-    <input type="text" id="license-filter-input" placeholder="${t("licenseFilter")}" value="${filter}" />
+    <input type="text" id="license-filter-input" placeholder="${t("licenseFilter")}" value="${escapeHtml(filter)}" />
   </div>
   <div class="license-stats">${statsText}</div>`;
   
@@ -1887,21 +1928,21 @@ function renderLicenseList(filter: string) {
       const readonlyAttr = currentLicenseReadonly ? "readonly" : "";
       const readonlyClass = currentLicenseReadonly ? "license-readonly" : "";
       html += `<div class="license-app-entry ${hasData ? "has-data" : ""} ${readonlyClass}">
-        <div class="license-app-name"><span class="app-icon">📦</span> ${entry.app_name}</div>
+        <div class="license-app-name"><span class="app-icon">📦</span> ${escapeHtml(entry.app_name)}</div>
         <div class="license-fields three-cols">
           <div class="license-field">
             <label>${t("licenseRegisteredName")}</label>
-            <input type="text" data-app="${entry.app_name}" data-field="registered_name" 
+            <input type="text" data-app="${escapeHtml(entry.app_name)}" data-field="registered_name"
               value="${escapeHtml(entry.registered_name)}" placeholder="${t("licenseRegisteredName")}" ${readonlyAttr} />
           </div>
           <div class="license-field">
             <label>${t("licenseLicenseKey")}</label>
-            <input type="text" data-app="${entry.app_name}" data-field="license_key" 
+            <input type="text" data-app="${escapeHtml(entry.app_name)}" data-field="license_key"
               value="${escapeHtml(entry.license_key)}" placeholder="${t("licenseLicenseKey")}" ${readonlyAttr} />
           </div>
           <div class="license-field">
             <label>${t("licenseNotes")}</label>
-            <input type="text" data-app="${entry.app_name}" data-field="notes" 
+            <input type="text" data-app="${escapeHtml(entry.app_name)}" data-field="notes"
               value="${escapeHtml(entry.notes)}" placeholder="${t("licenseNotes")}" ${readonlyAttr} />
           </div>
         </div>
@@ -2045,6 +2086,7 @@ showLicenseDataBtn.addEventListener("click", async () => {
 
 // Delete backup handler
 btnDeleteBackup.addEventListener("click", async () => {
+  if (operationInProgress) { log(t("operationBusy")); return; }
   const selectedBackup = backupSelect.value;
   if (!selectedBackup) {
     log(t("selectBackupFirst"));
@@ -2116,6 +2158,8 @@ btnSettings.addEventListener("click", () => {
   updateDefaultDirectoriesList();
   // Load new settings checkboxes
   if (backupHomebrewCacheCheckbox) {
+    backupHomebrewCheckbox.checked = config.backup_homebrew;
+    backupMasCheckbox.checked = config.backup_mas;
     backupHomebrewCacheCheckbox.checked = config.backup_homebrew_cache || false;
   }
   if (backupSafariSettingsCheckbox) {
@@ -2132,6 +2176,8 @@ settingsSaveBtn.addEventListener("click", async () => {
   config.default_directories = [...tempDefaultDirectories];
   // Save new settings
   if (backupHomebrewCacheCheckbox) {
+    config.backup_homebrew = backupHomebrewCheckbox.checked;
+    config.backup_mas = backupMasCheckbox.checked;
     config.backup_homebrew_cache = backupHomebrewCacheCheckbox.checked;
   }
   if (backupSafariSettingsCheckbox) {
@@ -2459,6 +2505,7 @@ testRestoreStart.addEventListener("click", async () => {
   progressMessage.textContent = "🧪 Test-Restore läuft...";
   log(`🧪 Test-Restore: ${itemPath} -> ${destDir}`);
 
+  if (!beginRestore()) return;
   try {
     const result = await invoke<TestRestoreResult>("test_restore_item", {
       targetPath,
@@ -2475,5 +2522,7 @@ testRestoreStart.addEventListener("click", async () => {
     progressFill.classList.remove("animating");
     progressMessage.textContent = "❌ Test-Restore fehlgeschlagen";
     log(`❌ Test-Restore Fehler: ${e}`);
+  } finally {
+    endRestore();
   }
 });

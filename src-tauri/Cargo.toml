@@ -1,6 +1,6 @@
 [package]
 name = "macos-backup-suite"
-version = "1.2.9"
+version = "1.2.10"
 description = "macOS Backup Suite - Inventar, Backup und Restore für macOS"
 authors = ["Nojan"]
 edition = "2021"
@@ -30,3 +30,7 @@ dirs = "5"
 tauri-plugin-store = "2.4.1"
 
 libc = "0.2"
+
+unicode-normalization = "0.1"
+
+xattr = "1"

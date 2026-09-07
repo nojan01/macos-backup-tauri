@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "macOS Backup Suite",
-  "version": "1.2.9",
+  "version": "1.2.10",
   "identifier": "com.nojan.macos-backup-suite",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -24,12 +24,16 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-src 'none'",
+      "devCsp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data:; connect-src ipc: http://ipc.localhost http://localhost:1420 ws://localhost:1420 http://127.0.0.1:1420 ws://127.0.0.1:1420; object-src 'none'; base-uri 'none'; frame-src 'none'"
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["dmg", "app"],
+    "targets": [
+      "dmg",
+      "app"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -42,7 +46,9 @@
     "longDescription": "GUI-Tool zum Erfassen von Software-Inventar, Sichern von Ordnern auf externe Laufwerke und Wiederherstellen inklusive Homebrew, MAS und VS Code Extensions.",
     "macOS": {
       "minimumSystemVersion": "12.0",
-      "entitlements": null
+      "entitlements": null,
+      "signingIdentity": "Developer ID Application: Norbert Jander (TXF2V79Z6N)",
+      "hardenedRuntime": true
     }
   }
 }
