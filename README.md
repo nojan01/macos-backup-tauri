@@ -137,7 +137,7 @@ Sicherungsliste ein.
 
 ### Download
 Laden Sie die neueste Version herunter:
-➡️ **[macOS Backup Suite v1.2.10](https://github.com/nojan01/macos-backup-tauri/releases/latest)**
+➡️ **[macOS Backup Suite v1.2.11](https://github.com/nojan01/macos-backup-tauri/releases/latest)**
 
 ### Voraussetzungen
 - macOS 12.0 oder neuer

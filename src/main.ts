@@ -1,4 +1,5 @@
 import { createRestoreRow, restoreStatusKey } from "./restore-ui";
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize, LogicalPosition } from "@tauri-apps/api/window";
@@ -1313,6 +1314,9 @@ async function cancelBackup(): Promise<void> {
 
 // Event listeners for progress updates from backend
 async function setupEventListeners(): Promise<void> {
+  await listen<string>("backup-activity", (event) => {
+    progressMessage.textContent = event.payload;
+  });
   await listen<string>("backup-log", (event) => {
     log(event.payload);
   });
@@ -2227,6 +2231,10 @@ btnLanguage.addEventListener("click", toggleLanguage);
 
 // Initialize
 async function init(): Promise<void> {
+  try {
+    const version = await getVersion();
+    document.querySelectorAll<HTMLElement>("[data-app-version]").forEach(el => { el.textContent = `v${version}`; });
+  } catch (error) { log(`App-Version konnte nicht gelesen werden: ${error}`); }
   log(t("started"));
   await setupEventListeners();
   await loadConfig();

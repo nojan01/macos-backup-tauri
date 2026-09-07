@@ -391,3 +391,23 @@ fn readback_cleans_immutable_files_without_changing_source() {
     drop(ReadbackDir(private));
     assert!(!cleanup_path.exists());
 }
+
+#[test]
+fn large_file_scan_reports_progress_inside_file_and_matches_manifest() {
+    let d=fixture();let path=d.0.join("large.bin");let payload=vec![0x5a;5*1024*1024+17];fs::write(&path,&payload).unwrap();
+    let mut events=Vec::new();let snapshot=scan_with_activity(&path,&mut |a|events.push(a.clone())).unwrap();
+    assert!(events.iter().any(|a| a.bytes>0 && a.bytes<(payload.len() as u64)));
+    assert_eq!(events.last().unwrap().bytes,payload.len() as u64);
+    assert!(events.windows(2).all(|p|p[0].bytes<=p[1].bytes));
+    assert_eq!(snapshot,compute_snapshot(&path).unwrap());
+}
+#[test]
+fn progress_does_not_prevent_cancelling_inside_large_file() {
+    let d=fixture();let path=d.0.join("large.bin");fs::write(&path,vec![0x5a;3*1024*1024]).unwrap();
+    let result=scan_with_activity(&path,&mut |a| {if a.bytes>0 {BACKUP_CANCELLED.store(true,Ordering::SeqCst);}});
+    BACKUP_CANCELLED.store(false,Ordering::SeqCst);assert!(result.unwrap_err().contains("abgebrochen"));
+}
+#[test]
+fn accelerated_sha256_matches_known_digest() {
+    assert_eq!(format!("{:x}",Sha256::digest(b"abc")),"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+}

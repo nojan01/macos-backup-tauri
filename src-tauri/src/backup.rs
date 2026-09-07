@@ -8,6 +8,52 @@ use std::os::unix::{
     fs::{MetadataExt, OpenOptionsExt},
 };
 
+// Backup work runs on a single blocking worker. The scoped, thread-local reporter
+// also covers nested scans/readback without leaking a window into other operations.
+thread_local! {
+    static PROGRESS: std::cell::RefCell<Option<ProgressReporter>> = const { std::cell::RefCell::new(None) };
+}
+struct ProgressReporter {
+    window: tauri::Window,
+    last_ui: std::time::Instant,
+    last_log: std::time::Instant,
+}
+pub(super) struct BackupProgress;
+impl BackupProgress {
+    pub fn attach(window: tauri::Window) -> Self {
+        PROGRESS.with(|p| *p.borrow_mut()=Some(ProgressReporter { window,last_ui:std::time::Instant::now(),last_log:std::time::Instant::now() }));
+        Self
+    }
+}
+impl Drop for BackupProgress {
+    fn drop(&mut self) {PROGRESS.with(|p| *p.borrow_mut()=None);}
+}
+#[derive(Clone,Debug)]
+struct ScanActivity {
+    current_file: PathBuf,
+    entries: u64,
+    bytes: u64,
+    elapsed: std::time::Duration,
+    boundary: bool,
+}
+fn report_activity(activity: &ScanActivity) {
+    PROGRESS.with(|p| {
+        if let Some(reporter)=p.borrow_mut().as_mut() {
+            if !activity.boundary && reporter.last_ui.elapsed()<std::time::Duration::from_millis(500) {return;}
+            let mib=activity.bytes as f64 / (1024.0*1024.0);
+            let speed=mib/activity.elapsed.as_secs_f64().max(0.001);
+            let name=activity.current_file.file_name().unwrap_or_default().to_string_lossy();
+            let message=format!("Prüfe Dateien: {} Einträge · {:.1} MiB gelesen · {:.1} MiB/s · {}",activity.entries,mib,speed,name);
+            let _=reporter.window.emit("backup-activity",&message);
+            reporter.last_ui=std::time::Instant::now();
+            if activity.boundary || reporter.last_log.elapsed()>=std::time::Duration::from_secs(10) {
+                let _=reporter.window.emit("backup-log",&message);
+                reporter.last_log=std::time::Instant::now();
+            }
+        }
+    });
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ManifestEntry {
@@ -82,7 +128,14 @@ fn read_acl(path: &Path) -> Result<String, String> {
 }
 
 pub(super) fn compute_snapshot(root: &Path) -> Result<Vec<ManifestEntry>, String> {
+    scan_with_activity(root, &mut report_activity)
+}
+fn scan_with_activity(root: &Path, report: &mut impl FnMut(&ScanActivity)) -> Result<Vec<ManifestEntry>, String> {
     cancelled()?;
+    let started=std::time::Instant::now();
+    let mut activity=ScanActivity {current_file:root.to_path_buf(),entries:0,bytes:0,elapsed:started.elapsed(),boundary:true};
+    report(&activity);
+    activity.boundary=false;
     if std::env::var("BACKUP_EXTRA_EXCLUDES").is_ok_and(|v| !v.trim().is_empty()) {
         return Err("BACKUP_EXTRA_EXCLUDES wird nicht mehr stillschweigend angewandt. Variable entfernen; alle ausgewählten Daten werden vollständig gesichert.".into());
     }
@@ -94,6 +147,10 @@ pub(super) fn compute_snapshot(root: &Path) -> Result<Vec<ManifestEntry>, String
         cancelled()?;
         let dent = dent.map_err(|e| fail(root, e))?;
         let path = dent.path();
+        activity.current_file=path.to_path_buf();
+        activity.entries+=1;
+        activity.elapsed=started.elapsed();
+        report(&activity);
         let md = fs::symlink_metadata(path).map_err(|e| fail(path, e))?;
         let kind = if md.is_file() {
             "file"
@@ -127,6 +184,9 @@ pub(super) fn compute_snapshot(root: &Path) -> Result<Vec<ManifestEntry>, String
                     break;
                 }
                 digest.update(&buf[..n]);
+                activity.bytes+=n as u64;
+                activity.elapsed=started.elapsed();
+                report(&activity);
             }
             format!("{:x}", digest.finalize())
         } else {
@@ -179,6 +239,9 @@ pub(super) fn compute_snapshot(root: &Path) -> Result<Vec<ManifestEntry>, String
         });
     }
     entries.sort_by(|a, b| a.p.cmp(&b.p));
+    activity.elapsed=started.elapsed();
+    activity.boundary=true;
+    report(&activity);
     Ok(entries)
 }
 

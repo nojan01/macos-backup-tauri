@@ -24,3 +24,12 @@ test('partial and total failures never select the success message', () => {
   assert.equal(restoreStatusKey({ error_count: 0, restored_count: 0 }), 'restoreNothingChanged');
   assert.equal(restoreStatusKey({ error_count: 0, restored_count: 2 }), 'restoreComplete');
 });
+
+
+test('version labels use the installed app version instead of a hardcoded release', () => {
+  const html=fs.readFileSync(new URL('../index.html',import.meta.url),'utf8');
+  const main=fs.readFileSync(new URL('../src/main.ts',import.meta.url),'utf8');
+  assert.equal((html.match(/data-app-version/g)||[]).length,2);
+  assert.doesNotMatch(html,/v\d+\.\d+\.\d+/);
+  assert.match(main,/await getVersion\(\)/);
+});

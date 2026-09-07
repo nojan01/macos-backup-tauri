@@ -1351,6 +1351,7 @@ fn create_backup_impl(
     resume_timestamp: Option<String>,
 ) -> Result<BackupMetadata, String> {
     let _guard = OperationGuard::acquire()?;
+    let _progress = BackupProgress::attach(window.clone());
     // Debug-Trace-Closure (No-op in Release-Builds). Für Diagnose kann hier
     // wieder ein Schreiber in /tmp/macos-backup-trace.log aktiviert werden.
     let trace = |_msg: &str| {};
