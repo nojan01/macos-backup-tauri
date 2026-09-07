@@ -37,7 +37,10 @@
 - **Ordner-Backup** – Wichtige Verzeichnisse als komprimierte Archive (.tar.zst)
 - **Homebrew** – Paketlisten (Brewfile) + optionaler vollständiger Download-Cache
 - **Mac App Store** – Alle installierten MAS-Apps
-- **VS Code** – Erweiterungen und Einstellungen
+- **App-Einstellungen** – Eigene Checkboxen für VS Code (User-Einstellungen, Profile, Snippets und Erweiterungsliste), ChatGPT und Codex; standardmäßig aktiv, vorhandene Quellen werden vor jedem Backup neu erkannt.
+- **Codex** – Konfiguration, zusätzliche Konfigurationsprofile, globale Regeln, eigene Skills und gemeinsame lokale App-Einstellungen. Kein vollständiger Chatverlauf, keine Arbeitskopien, keine Plugin-Binärdateien oder Codex-Anmeldedaten. Die erkannten Pfade sind im Einstellungsdialog einsehbar.
+- **Optionale App-Quellen** – Fehlende optionale Pfade werden nicht hinzugefügt. Zugriffsfehler brechen die Prüfung ab. Bereits ausgewählte übergeordnete Ordner und gemeinsam verwendete Einstellungspfade werden beim Ergänzen berücksichtigt. Manuell ausgewählte Quellen bleiben unabhängig von den Checkboxen enthalten. Apps vor dem Backup schließen.
+- **Wiederherstellung der App-Einstellungen** – Normale Archive mit vollständiger Inhalts- und Rückleseprüfung; im Wiederherstellungsdialog anhand ihrer ursprünglichen Pfade auswählbar.
 - **Safari** – Lesezeichen, Leseliste, Erweiterungen, Preferences
 - **Konfigurationsdateien** – SSH, Git, Shell-Configs
 
@@ -145,7 +148,7 @@ Sicherungsliste ein.
 
 ### Download
 Laden Sie die neueste Version herunter:
-➡️ **[macOS Backup Suite v1.2.13](https://github.com/nojan01/macos-backup-tauri/releases/latest)**
+➡️ **[macOS Backup Suite v1.2.14](https://github.com/nojan01/macos-backup-tauri/releases/latest)**
 
 ### Voraussetzungen
 - macOS 12.0 oder neuer

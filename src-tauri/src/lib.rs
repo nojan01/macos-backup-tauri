@@ -1,3 +1,4 @@
+mod app_settings;
 mod backup;
 use backup::*;
 mod restore;
@@ -71,6 +72,8 @@ fn default_theme() -> String {
     "auto".to_string()
 }
 
+fn default_app_settings() -> bool { true }
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct BackupConfig {
     pub target_volume: String,
@@ -88,6 +91,13 @@ pub struct BackupConfig {
     pub backup_homebrew_cache: bool,
     #[serde(default)]
     pub backup_safari_settings: bool,
+    #[serde(default = "default_app_settings")]
+    pub backup_vscode_settings: bool,
+    #[serde(default = "default_app_settings")]
+    pub backup_chatgpt_settings: bool,
+    #[serde(default = "default_app_settings")]
+    pub backup_codex_settings: bool,
+
 }
 
 impl Default for BackupConfig {
@@ -106,6 +116,10 @@ impl Default for BackupConfig {
             theme: default_theme(),
             backup_homebrew_cache: false,
             backup_safari_settings: false,
+            backup_vscode_settings: true,
+            backup_chatgpt_settings: true,
+            backup_codex_settings: true,
+
         }
     }
 }
@@ -1389,7 +1403,25 @@ fn create_backup_impl(
         return Err("Backup-Ziel muss ein vorhandenes absolutes Verzeichnis sein".into());
     }
     let _ = window.emit("backup-progress",serde_json::json!({"progress":0,"message":"Prüfe Verfügbarkeit aller ausgewählten Quellen …"}));
-    validate_selected_sources(&directories,target,&dirs::home_dir().ok_or("Benutzerverzeichnis nicht verfügbar")?)?;
+    let home_settings = dirs::home_dir().ok_or("Benutzerverzeichnis nicht verfügbar")?;
+    // Validate explicit selections first: optional detection must not hide a stale
+    // manually selected source. Freeze options and detected sources for this run.
+    validate_selected_sources(&directories, target, &home_settings)?;
+    let config = load_config()?;
+    let settings = app_settings::discover(&home_settings, &config)?;
+    let mut directories = directories;
+    for group in &settings {
+        let message = if group.paths.is_empty() {
+            format!("{}: keine lokalen Einstellungsdateien gefunden; Option bleibt für künftige Backups aktiv.", group.name)
+        } else {
+            format!("{}: {} vorhandene Einstellungspfade ausgewählt (bereits enthaltene Pfade werden nicht doppelt ergänzt).", group.name, group.paths.len())
+        };
+        let _ = window.emit("backup-log", message);
+    }
+    for path in app_settings::append_sources(&mut directories, &settings, &home_settings) {
+        let _ = window.emit("backup-log", format!("App-Einstellungen: {path}"));
+    }
+    validate_selected_sources(&directories, target, &home_settings)?;
     let suite_root = target.join("macos-backup-suite");
 
     // --- Resume-Modus: bestehenden Backup-Ordner wiederverwenden ---
@@ -1549,15 +1581,14 @@ fn create_backup_impl(
         "message": "Initialisiere Backup..."
     }));
     
-    let config = load_config()?;
     let _ = window.emit("backup-log", "Vollständige Sicherung ohne versteckte Ausschlüsse; Rückleseprüfung benötigt zusätzlichen temporären Speicher.");
     let brew_inventory = if config.backup_homebrew { Some(get_brew_packages()?) } else { None };
     let mas_inventory = if config.backup_mas { Some(get_mas_apps()?) } else { None };
-    let vscode_inventory = match get_vscode_extensions() {
+    let vscode_inventory = if config.backup_vscode_settings { match get_vscode_extensions() {
         Ok(items) => Some(items.join("\n")),
         Err(e) if e=="VS Code not installed" => {let _ = window.emit("backup-log", e); None},
         Err(e) => return Err(e),
-    };
+    }} else { None };
     let manual=get_manual_apps()?.join("\n");
     atomic_write(&inventory_root.join("manual_apps.txt"),manual.as_bytes())?;
 
@@ -3117,6 +3148,14 @@ fn get_home_dir() -> Result<String, String> {
         .ok_or_else(|| "Could not determine home directory".to_string())
 }
 
+#[tauri::command]
+async fn get_app_settings_sources() -> Result<Vec<app_settings::SettingsSources>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let home = dirs::home_dir().ok_or("Benutzerverzeichnis nicht verfügbar")?;
+        app_settings::discover(&home, &BackupConfig::default())
+    }).await.map_err(|e| e.to_string())?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -3128,6 +3167,7 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .invoke_handler(tauri::generate_handler![
             load_config,
+            get_app_settings_sources,
             save_config,
             get_external_volumes,
             check_homebrew,

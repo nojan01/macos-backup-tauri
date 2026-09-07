@@ -152,6 +152,19 @@
         <p class="settings-hint">Lesezeichen, Leseliste, Extensions, Top Sites</p>
       </div>
       
+      <div class="settings-section">
+        <h3 data-i18n="appSettingsTitle">App-Einstellungen</h3>
+        <label class="checkbox-label"><input type="checkbox" id="backup-vscode-settings" aria-describedby="vscode-settings-status" /><span data-i18n="appSettingsVscode">VS Code: Einstellungen, Profile, Snippets und Erweiterungsliste</span></label>
+        <p id="vscode-settings-status" class="settings-hint" aria-live="polite"></p>
+        <label class="checkbox-label"><input type="checkbox" id="backup-chatgpt-settings" aria-describedby="chatgpt-settings-status" /><span data-i18n="appSettingsChatgpt">ChatGPT: lokale App-Einstellungen</span></label>
+        <p id="chatgpt-settings-status" class="settings-hint" aria-live="polite"></p>
+        <label class="checkbox-label"><input type="checkbox" id="backup-codex-settings" aria-describedby="codex-settings-status" /><span data-i18n="appSettingsCodex">Codex: Konfiguration, Regeln und eigene Skills</span></label>
+        <p id="codex-settings-status" class="settings-hint" aria-live="polite"></p>
+        <p class="settings-hint" data-i18n="appSettingsHint"></p>
+        <p class="settings-hint" data-i18n="appSettingsScope"></p>
+        <details><summary data-i18n="appSettingsPaths">Erkannte Einstellungspfade anzeigen</summary><ul id="app-settings-paths"></ul></details>
+      </div>
+
       <div class="modal-actions">
         <button id="settings-cancel" class="btn-secondary"><span data-i18n="cancel">Abbrechen</span></button>
         <button id="settings-save" class="btn-primary"><span data-i18n="save">Speichern</span></button>

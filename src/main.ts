@@ -20,6 +20,10 @@ interface BackupConfig {
   theme: string;
   backup_homebrew_cache: boolean;
   backup_safari_settings: boolean;
+  backup_vscode_settings: boolean;
+  backup_chatgpt_settings: boolean;
+  backup_codex_settings: boolean;
+
 }
 
 interface BackupItem {
@@ -203,6 +207,18 @@ const translations: Record<string, Record<string, string>> = {
     addSystemConfigs: "System-Configs",
     systemConfigsAdded: "System-Konfigurationspfade hinzugefügt:",
     systemConfigsHint: "Wichtige Konfig-Dateien für schnelle Wiederherstellung",
+    appSettingsTitle: "App-Einstellungen",
+    appSettingsVscode: "VS Code: Einstellungen, Profile, Snippets und Erweiterungsliste",
+    appSettingsChatgpt: "ChatGPT: lokale App-Einstellungen",
+    appSettingsCodex: "Codex: Konfiguration, Regeln und eigene Skills",
+    appSettingsHint: "Vorhandene Einstellungen werden vor jedem Backup automatisch erkannt, auch bei später installierten Apps. Fehlende optionale Pfade werden nicht hinzugefügt. Gemeinsam genutzte Einstellungen werden einmal ergänzt; manuell ausgewählte Ordner bleiben unabhängig von den Checkboxen enthalten.",
+    appSettingsScope: "ChatGPT, Codex und VS Code vor dem Backup schließen. Diese Optionen sichern Einstellungen, keinen vollständigen Chatverlauf, keine Arbeitskopien und keine Online-Kontodaten. Installierte Plugin-Dateien und Anmeldedaten unter ~/.codex sind nicht Teil dieser Option.",
+    appSettingsPaths: "Erkannte Einstellungspfade anzeigen",
+    appSettingsDetecting: "Suche lokale Einstellungen …",
+    appSettingsFound: "Einstellungspfade gefunden",
+    appSettingsAbsent: "Keine lokalen Einstellungen gefunden – automatische Prüfung beim nächsten Backup.",
+    appSettingsDetectError: "Einstellungspfade konnten nicht vollständig geprüft werden.",
+
     restoreModalTitle: "Wiederherstellung",
     selectItemsToRestore: "Elemente zur Wiederherstellung auswählen:",
     overwriteExisting: "Bestehende Dateien überschreiben",
@@ -380,6 +396,18 @@ const translations: Record<string, Record<string, string>> = {
     addSystemConfigs: "System Configs",
     systemConfigsAdded: "System config paths added:",
     systemConfigsHint: "Important config files for quick restore",
+    appSettingsTitle: "App settings",
+    appSettingsVscode: "VS Code: settings, profiles, snippets and extension list",
+    appSettingsChatgpt: "ChatGPT: local app settings",
+    appSettingsCodex: "Codex: configuration, rules and custom skills",
+    appSettingsHint: "Existing settings are detected before each backup, including apps installed later. Missing optional paths are not added. Shared settings are added once; manually selected folders remain included independently of these checkboxes.",
+    appSettingsScope: "Close ChatGPT, Codex and VS Code before backup. These options save settings, not a full chat history, working copies or online account data. Installed plugin files and credentials under ~/.codex are not part of this option.",
+    appSettingsPaths: "Show detected settings paths",
+    appSettingsDetecting: "Looking for local settings …",
+    appSettingsFound: "settings paths found",
+    appSettingsAbsent: "No local settings found – checked again at the next backup.",
+    appSettingsDetectError: "Settings paths could not be fully checked.",
+
     licenseDataTitle: "Registration Data",
     licenseDataDescription: "Registration data for manually installed apps:",
     licenseRegisteredName: "Name",
@@ -513,6 +541,34 @@ const backupHomebrewCheckbox = document.getElementById("backup-homebrew") as HTM
 const backupMasCheckbox = document.getElementById("backup-mas") as HTMLInputElement;
 const backupHomebrewCacheCheckbox = document.getElementById("backup-homebrew-cache") as HTMLInputElement;
 const backupSafariSettingsCheckbox = document.getElementById("backup-safari-settings") as HTMLInputElement;
+const appSettingsControls = ["vscode", "chatgpt", "codex"].map(id => ({
+  id,
+  key: `backup_${id}_settings` as "backup_vscode_settings" | "backup_chatgpt_settings" | "backup_codex_settings",
+  checkbox: document.getElementById(`backup-${id}-settings`) as HTMLInputElement,
+  status: document.getElementById(`${id}-settings-status`) as HTMLParagraphElement,
+}));
+const appSettingsPaths = document.getElementById("app-settings-paths") as HTMLUListElement;
+
+async function refreshAppSettingsPreview(): Promise<void> {
+  appSettingsPaths.replaceChildren();
+  for (const control of appSettingsControls) control.status.textContent = t("appSettingsDetecting");
+  try {
+    const groups = await invoke<Array<{id: string; name: string; paths: string[]}>>("get_app_settings_sources");
+    for (const group of groups) {
+      const control = appSettingsControls.find(c => c.id === group.id)!;
+      control.status.textContent = group.paths.length ? `${group.paths.length} ${t("appSettingsFound")}` : t("appSettingsAbsent");
+      for (const path of group.paths) {
+        const item = document.createElement("li");
+        item.textContent = `${group.name}: ${path}`;
+        appSettingsPaths.appendChild(item);
+      }
+    }
+  } catch (error) {
+    for (const control of appSettingsControls) control.status.textContent = t("appSettingsDetectError");
+    log(`${t("appSettingsDetectError")} ${error}`);
+  }
+}
+
 const restoreQuickBtn = document.getElementById("restore-quick") as HTMLButtonElement;
 const userFolderDialog = document.getElementById("user-folder-dialog") as HTMLDialogElement;
 const userFolderList = document.getElementById("user-folder-list") as HTMLUListElement;
@@ -538,6 +594,10 @@ let config: BackupConfig = {
   theme: "auto",
   backup_homebrew_cache: false,
   backup_safari_settings: false,
+  backup_vscode_settings: true,
+  backup_chatgpt_settings: true,
+  backup_codex_settings: true,
+
 };
 
 let currentVolumes: Volume[] = [];
@@ -631,7 +691,6 @@ const SYSTEM_CONFIG_DIRECTORIES = [
   "~/Library/Stickies",
   "~/Library/StickiesDatabase",
   // App-specific configs
-  "~/Library/Application Support/Code/User",
   "~/Library/Application Support/Cursor/User",
   "~/Library/Application Support/JetBrains",
   "~/Library/Application Support/iTerm2",
@@ -2159,7 +2218,9 @@ btnSettings.addEventListener("click", () => {
   if (backupSafariSettingsCheckbox) {
     backupSafariSettingsCheckbox.checked = config.backup_safari_settings || false;
   }
+  for (const control of appSettingsControls) control.checkbox.checked = config[control.key];
   settingsDialog.showModal();
+  void refreshAppSettingsPreview();
 });
 
 settingsCancelBtn.addEventListener("click", () => {
@@ -2167,19 +2228,25 @@ settingsCancelBtn.addEventListener("click", () => {
 });
 
 settingsSaveBtn.addEventListener("click", async () => {
-  config.default_directories = [...tempDefaultDirectories];
-  // Save new settings
-  if (backupHomebrewCacheCheckbox) {
-    config.backup_homebrew = backupHomebrewCheckbox.checked;
-    config.backup_mas = backupMasCheckbox.checked;
-    config.backup_homebrew_cache = backupHomebrewCacheCheckbox.checked;
+  const next = {...config,
+    default_directories: [...tempDefaultDirectories],
+    backup_homebrew: backupHomebrewCheckbox.checked,
+    backup_mas: backupMasCheckbox.checked,
+    backup_homebrew_cache: backupHomebrewCacheCheckbox.checked,
+    backup_safari_settings: backupSafariSettingsCheckbox.checked,
+  };
+  for (const control of appSettingsControls) next[control.key] = control.checkbox.checked;
+  settingsSaveBtn.disabled = true;
+  try {
+    await invoke("save_config", {config: next});
+    config = next;
+    log(t("settingsSaved"));
+    settingsDialog.close();
+  } catch (error) {
+    log(`${t("saveError")} ${error}`);
+  } finally {
+    settingsSaveBtn.disabled = false;
   }
-  if (backupSafariSettingsCheckbox) {
-    config.backup_safari_settings = backupSafariSettingsCheckbox.checked;
-  }
-  await saveConfig();
-  log(t("settingsSaved"));
-  settingsDialog.close();
 });
 
 addDefaultDirectoryBtn.addEventListener("click", async () => {

@@ -287,7 +287,7 @@ header h1 {
 }
 
 .primary-actions {
-  margin-bottom: 16px;
+  margin-bottom: 0;
 }
 
 .btn-primary,
@@ -331,7 +331,11 @@ header h1 {
 }
 
 .progress-section {
-  margin-top: 12px;
+  margin-top: 16px;
+}
+
+#btn-cancel {
+  margin-bottom: 16px;
 }
 
 .progress-section p {
@@ -966,4 +970,17 @@ footer {
   color: var(--text-secondary);
   text-align: right;
   margin-bottom: 8px;
+}
+
+#app-settings-paths {
+  padding-left: 18px;
+  margin-top: 8px;
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+#settings-dialog {
+  margin: auto;
+  max-height: 90vh;
+  overflow-y: auto;
 }
