@@ -95,6 +95,10 @@ struct ArchiveInput {
 }
 impl Read for ArchiveInput {
     fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+        if BACKUP_CANCELLED.load(Ordering::SeqCst) || VERIFY_CANCELLED.load(Ordering::SeqCst) {
+            // Interrupted would be retried automatically by io::copy and could loop forever.
+            return Err(io::Error::other("Vorgang abgebrochen"));
+        }
         self.reader.read(b)
     }
 }
@@ -407,6 +411,7 @@ pub(super) fn merge_tree(
     target: &Path,
     overwrite: bool,
 ) -> Result<MergeResult, String> {
+    if BACKUP_CANCELLED.load(Ordering::SeqCst) || VERIFY_CANCELLED.load(Ordering::SeqCst) {return Err("Vorgang abgebrochen".into());}
     let src = fs::symlink_metadata(source).map_err(|e| e.to_string())?;
     if let Some(dst) = destination_metadata(target)? {
         if src.is_dir() && dst.is_dir() && !dst.file_type().is_symlink() {
@@ -732,6 +737,7 @@ pub(super) fn restore_selected(
         errors: vec![],
     };
     for (i, item) in selected.iter().enumerate() {
+        if BACKUP_CANCELLED.load(Ordering::SeqCst) || VERIFY_CANCELLED.load(Ordering::SeqCst) {return Err("Vorgang abgebrochen".into());}
         if let Some(w) = window {
             let _=w.emit("restore-progress",serde_json::json!({"progress":i*100/selected.len(),"message":format!("Restoring {}",item.path)}));
         }
@@ -1092,5 +1098,23 @@ pub(super) fn ensure_operation_idle() -> Result<(), String> {
         Err("Another operation is still running".into())
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    #[test]
+    fn archive_reader_stops_between_reads_on_cancel() {
+        let _guard=OperationGuard::acquire().unwrap();
+        let mut reader=ArchiveInput {reader:Box::new(io::Cursor::new(vec![1u8;1024])),child:None};
+        let mut buffer=[0;16];assert_eq!(reader.read(&mut buffer).unwrap(),16);
+        cancel_operation().unwrap();
+        let error=reader.read(&mut buffer).unwrap_err();
+        assert_ne!(error.kind(),io::ErrorKind::Interrupted);
+        assert!(error.to_string().contains("abgebrochen"));
+        assert!(OperationGuard::acquire().is_err());
+        assert!(reset_operation_state().is_err());
+        BACKUP_CANCELLED.store(false,Ordering::SeqCst);VERIFY_CANCELLED.store(false,Ordering::SeqCst);
     }
 }

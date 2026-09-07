@@ -5,7 +5,7 @@ use std::ffi::{CStr, CString};
 use std::io::Write;
 use std::os::unix::{
     ffi::OsStrExt,
-    fs::{MetadataExt, OpenOptionsExt},
+    fs::{FileTypeExt, MetadataExt, OpenOptionsExt},
 };
 
 // Backup work runs on a single blocking worker. The scoped, thread-local reporter
@@ -17,11 +17,12 @@ struct ProgressReporter {
     window: tauri::Window,
     last_ui: std::time::Instant,
     last_log: std::time::Instant,
+    skipped_sockets: std::collections::BTreeSet<PathBuf>,
 }
 pub(super) struct BackupProgress;
 impl BackupProgress {
     pub fn attach(window: tauri::Window) -> Self {
-        PROGRESS.with(|p| *p.borrow_mut()=Some(ProgressReporter { window,last_ui:std::time::Instant::now(),last_log:std::time::Instant::now() }));
+        PROGRESS.with(|p| *p.borrow_mut()=Some(ProgressReporter { window,last_ui:std::time::Instant::now(),last_log:std::time::Instant::now(),skipped_sockets:Default::default() }));
         Self
     }
 }
@@ -35,10 +36,17 @@ struct ScanActivity {
     bytes: u64,
     elapsed: std::time::Duration,
     boundary: bool,
+    skipped_socket: bool,
 }
 fn report_activity(activity: &ScanActivity) {
     PROGRESS.with(|p| {
         if let Some(reporter)=p.borrow_mut().as_mut() {
+            if activity.skipped_socket {
+                if reporter.skipped_sockets.insert(activity.current_file.clone()) {
+                    let _=reporter.window.emit("backup-log",format!("Laufzeit-Socket übersprungen (keine Dateidaten): {}",activity.current_file.display()));
+                }
+                return;
+            }
             if !activity.boundary && reporter.last_ui.elapsed()<std::time::Duration::from_millis(500) {return;}
             let mib=activity.bytes as f64 / (1024.0*1024.0);
             let speed=mib/activity.elapsed.as_secs_f64().max(0.001);
@@ -133,7 +141,7 @@ pub(super) fn compute_snapshot(root: &Path) -> Result<Vec<ManifestEntry>, String
 fn scan_with_activity(root: &Path, report: &mut impl FnMut(&ScanActivity)) -> Result<Vec<ManifestEntry>, String> {
     cancelled()?;
     let started=std::time::Instant::now();
-    let mut activity=ScanActivity {current_file:root.to_path_buf(),entries:0,bytes:0,elapsed:started.elapsed(),boundary:true};
+    let mut activity=ScanActivity {current_file:root.to_path_buf(),entries:0,bytes:0,elapsed:started.elapsed(),boundary:true,skipped_socket:false};
     report(&activity);
     activity.boundary=false;
     if std::env::var("BACKUP_EXTRA_EXCLUDES").is_ok_and(|v| !v.trim().is_empty()) {
@@ -152,6 +160,13 @@ fn scan_with_activity(root: &Path, report: &mut impl FnMut(&ScanActivity)) -> Re
         activity.elapsed=started.elapsed();
         report(&activity);
         let md = fs::symlink_metadata(path).map_err(|e| fail(path, e))?;
+        if md.file_type().is_socket() {
+            if path == root { return Err(fail(path,"Der ausgewählte Pfad ist ein Laufzeit-Socket und enthält keine sicherbaren Dateidaten. Bitte den übergeordneten Ordner auswählen.")); }
+            activity.skipped_socket=true;
+            report(&activity);
+            activity.skipped_socket=false;
+            continue;
+        }
         let kind = if md.is_file() {
             "file"
         } else if md.is_dir() {
@@ -159,7 +174,7 @@ fn scan_with_activity(root: &Path, report: &mut impl FnMut(&ScanActivity)) -> Re
         } else if md.file_type().is_symlink() {
             "link"
         } else {
-            return Err(fail(path,"Nicht unterstützte Spezialdatei (z. B. Socket/FIFO). Quelle vor dem Backup bereinigen oder enger auswählen."));
+            return Err(fail(path,"Nicht unterstützte Spezialdatei (z. B. FIFO/Gerätedatei). Quelle vor dem Backup bereinigen oder enger auswählen."));
         };
         let rel = path.strip_prefix(root).map_err(|e| fail(path, e))?;
         let p = rel
@@ -495,6 +510,25 @@ pub(super) fn validate_source_target(source: &Path, target: &Path) -> Result<(),
     Ok(())
 }
 
+fn socket_report_json(paths: &std::collections::BTreeSet<PathBuf>) -> Result<Vec<u8>,String> {
+    serde_json::to_vec_pretty(&serde_json::json!({
+        "schema_version":1,
+        "reason":"Unix runtime sockets contain no restorable file data and are recreated by their applications.",
+        "skipped_unix_sockets":paths,
+    })).map_err(|e|e.to_string())
+}
+pub(super) fn write_socket_report(backup_root: &Path) -> Result<(),String> {
+    PROGRESS.with(|p| {
+        if let Some(reporter)=p.borrow().as_ref() {
+            atomic_write(&backup_root.join("skipped-runtime-sockets.json"),&socket_report_json(&reporter.skipped_sockets)?)?;
+            if !reporter.skipped_sockets.is_empty() {
+                let _=reporter.window.emit("backup-log",format!("{} Laufzeit-Sockets übersprungen; vollständige Liste: skipped-runtime-sockets.json",reporter.skipped_sockets.len()));
+            }
+        }
+        Ok(())
+    })
+}
+
 pub(super) fn finish_backup(
     root: &Path,
     metadata: &BackupMetadata,
@@ -511,6 +545,7 @@ pub(super) fn finish_backup(
         ensure_unchanged(source, expected)?;
     }
     cancelled()?;
+    write_socket_report(root)?;
     atomic_write(
         &root.join("metadata.json"),
         &serde_json::to_vec_pretty(metadata).map_err(|e| e.to_string())?,

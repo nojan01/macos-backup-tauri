@@ -411,3 +411,51 @@ fn progress_does_not_prevent_cancelling_inside_large_file() {
 fn accelerated_sha256_matches_known_digest() {
     assert_eq!(format!("{:x}",Sha256::digest(b"abc")),"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
 }
+
+
+#[test]
+fn git_runtime_socket_does_not_block_archiving_or_restore() {
+    let _guard=OperationGuard::acquire().unwrap();
+    let d=PrivateDir::new(Path::new("/tmp"),"socket-test").unwrap();
+    let source=d.0.join("project");fs::create_dir_all(source.join(".git")).unwrap();
+    fs::write(source.join(".git/HEAD"),b"ref: refs/heads/main\n").unwrap();
+    fs::write(source.join("ordinary.sock"),b"important file content").unwrap();
+    let socket=source.join(".git/fsmonitor--daemon.ipc");
+    let _listener=std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let mut skipped=std::collections::BTreeSet::new();
+    let snapshot=scan_with_activity(&source,&mut |a| {if a.skipped_socket {skipped.insert(a.current_file.clone());}}).unwrap();
+    assert_eq!(skipped,std::collections::BTreeSet::from([socket.clone()]));
+    assert!(!snapshot.iter().any(|e|e.p.ends_with("fsmonitor--daemon.ipc")));
+    assert!(snapshot.iter().any(|e|e.p=="ordinary.sock"));
+    let archive=d.0.join("project.tar.gz");create_verified_archive(&source,&archive,true).unwrap();
+    let target=d.0.join("restored/project");fs::create_dir(target.parent().unwrap()).unwrap();staged_restore(&archive,&target,true).unwrap();
+    assert_eq!(fs::read(target.join(".git/HEAD")).unwrap(),b"ref: refs/heads/main\n");
+    assert_eq!(fs::read(target.join("ordinary.sock")).unwrap(),b"important file content");
+    assert!(!target.join(".git/fsmonitor--daemon.ipc").exists());
+    let audit:serde_json::Value=serde_json::from_slice(&socket_report_json(&skipped).unwrap()).unwrap();
+    assert_eq!(audit["skipped_unix_sockets"][0],socket.to_str().unwrap());
+}
+#[test]
+fn a_regular_file_named_like_git_socket_is_still_backed_up() {
+    let d=fixture();let root=d.0.join("project");fs::create_dir_all(root.join(".git")).unwrap();
+    fs::write(root.join(".git/fsmonitor--daemon.ipc"),b"regular data").unwrap();
+    let snapshot=compute_snapshot(&root).unwrap();assert!(snapshot.iter().any(|e|e.p==".git/fsmonitor--daemon.ipc"&&e.kind=="file"));
+    create_verified_archive(&root,&d.0.join("archive"),true).unwrap();
+}
+#[test]
+fn explicit_socket_source_and_nested_fifo_remain_errors() {
+    let _guard=OperationGuard::acquire().unwrap();let d=PrivateDir::new(Path::new("/tmp"),"socket-test").unwrap();
+    let socket=d.0.join("endpoint");let _listener=std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    assert!(compute_snapshot(&socket).unwrap_err().contains("Laufzeit-Socket"));
+    let root=d.0.join("data");fs::create_dir(&root).unwrap();let fifo=root.join("pipe");let name=CString::new(fifo.as_os_str().as_bytes()).unwrap();assert_eq!(unsafe{libc::mkfifo(name.as_ptr(),0o600)},0);
+    assert!(compute_snapshot(&root).unwrap_err().contains("FIFO"));
+}
+
+#[test]
+fn archive_validation_and_restore_merge_honor_cancellation() {
+    let d=fixture();let source=d.0.join("source");fs::write(&source,b"data").unwrap();let archive=d.0.join("archive");create_verified_archive(&source,&archive,true).unwrap();
+    cancel_operation().unwrap();
+    assert!(archive_index(&archive).unwrap_err().contains("abgebrochen"));
+    let target=d.0.join("target");assert!(merge_tree(&source,&target,true).unwrap_err().contains("abgebrochen"));assert!(!target.exists());assert!(source.exists());
+    BACKUP_CANCELLED.store(false,Ordering::SeqCst);VERIFY_CANCELLED.store(false,Ordering::SeqCst);
+}

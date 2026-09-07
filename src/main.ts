@@ -1,3 +1,4 @@
+import { renderCancelControl } from "./cancel-ui";
 import { createRestoreRow, restoreStatusKey } from "./restore-ui";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
@@ -145,6 +146,7 @@ const translations: Record<string, Record<string, string>> = {
     verifyCancelled: "Verifizierung abgebrochen!",
     verifyRunning: "Verifizierung läuft...",
     operationCancelled: "Operation abgebrochen!",
+    cancelling: "Abbruch läuft …",
     configLoaded: "Konfiguration geladen.",
     defaultConfigUsed: "Standardkonfiguration verwendet.",
     volumesFound: "beschreibbare Volumes gefunden (Time Machine ausgeschlossen).",
@@ -321,6 +323,7 @@ const translations: Record<string, Record<string, string>> = {
     verifyCancelled: "Verification cancelled!",
     verifyRunning: "Verification running...",
     operationCancelled: "Operation cancelled!",
+    cancelling: "Cancelling …",
     configLoaded: "Configuration loaded.",
     defaultConfigUsed: "Default configuration used.",
     volumesFound: "writable volumes found (Time Machine excluded).",
@@ -540,6 +543,7 @@ let config: BackupConfig = {
 let currentVolumes: Volume[] = [];
 let backupInProgress = false;
 let verifyInProgress = false;
+let cancelRequested = false;
 let operationInProgress = false; // Generic flag for any long-running operation
 let tempDefaultDirectories: string[] = [];
 let hasFDA = true; // Full Disk Access status
@@ -715,7 +719,7 @@ function updateUITranslations(): void {
   });
   
   btnBackup.innerHTML = `📤 ${t("createBackup")}`;
-  btnCancel.textContent = t("cancel");
+  renderCancelControl(btnCancel, operationInProgress, cancelRequested, {cancel: t("cancel"), cancelling: t("cancelling")});
   btnRestore.innerHTML = `📥 ${t("restore")}`;
   addDirectoryBtn.innerHTML = `+ ${t("addFolder")}`;
   if (addUserDirectoryBtn) {
@@ -1235,8 +1239,6 @@ async function startBackup(): Promise<void> {
   setOperationControls(true);
   btnBackup.disabled = true;
   btnBackup.style.display = "none";
-  btnCancel.style.display = "block";
-  btnCancel.disabled = false;
   statusEl.textContent = t("backupRunning");
   progressMessage.textContent = t("startingBackup");
   progressFill.style.width = "0%";
@@ -1249,7 +1251,8 @@ async function startBackup(): Promise<void> {
       resumeTimestamp: resumeTimestamp,
     });
     
-    if (backupInProgress) {
+    if (cancelRequested) statusEl.textContent = t("backupCancelled");
+    if (backupInProgress && !cancelRequested) {
       await sendNotification({
         title: t("backupNotification"),
         body: t("backupNotificationBody"),
@@ -1259,7 +1262,7 @@ async function startBackup(): Promise<void> {
     }
     await loadBackups();
   } catch (e) {
-    if (backupInProgress) {
+    if (backupInProgress && !cancelRequested) {
       log(`${t("backupFailed")} ${e}`);
       statusEl.textContent = t("backupFailed");
     } else {
@@ -1271,39 +1274,24 @@ async function startBackup(): Promise<void> {
     setOperationControls(false);
     btnBackup.disabled = false;
     btnBackup.style.display = "block";
-    btnCancel.style.display = "none";
   }
 }
 
 // Cancel any running operation (backup or verify)
 async function cancelOperation(): Promise<void> {
-  if (!operationInProgress) return;
-  
+  if (!operationInProgress || cancelRequested) return;
+  cancelRequested = true;
+  renderCancelControl(btnCancel, true, true, {cancel: t("cancel"), cancelling: t("cancelling")});
+  statusEl.textContent = t("cancelling");
+  progressMessage.textContent = t("cancelling");
   try {
     await invoke("cancel_operation");
-    
-    if (backupInProgress) {
-      log(t("backupCancelled"));
-      statusEl.textContent = t("backupCancelled");
-    } else if (verifyInProgress) {
-      log(t("verifyCancelled"));
-      statusEl.textContent = t("verifyCancelled");
-    } else {
-      log(t("operationCancelled"));
-      statusEl.textContent = t("operationCancelled");
-    }
-    
-    // Reset UI state
-    progressFill.style.width = "0%";
-    progressMessage.textContent = operationInProgress && backupInProgress ? t("backupCancelled") : t("verifyCancelled");
-    
+    // Keep controls locked until the active invocation has actually returned.
+    if (operationInProgress) log(t("cancelling"));
   } catch (e) {
+    cancelRequested = false;
+    renderCancelControl(btnCancel, operationInProgress, false, {cancel: t("cancel"), cancelling: t("cancelling")});
     log(`${t("backupFailed")} ${e}`);
-  } finally {
-    // The active invoke releases controls only after the backend actually exits.
-    backupInProgress = false;
-    verifyInProgress = false;
-    btnCancel.disabled = true;
   }
 }
 
@@ -1315,13 +1303,14 @@ async function cancelBackup(): Promise<void> {
 // Event listeners for progress updates from backend
 async function setupEventListeners(): Promise<void> {
   await listen<string>("backup-activity", (event) => {
-    progressMessage.textContent = event.payload;
+    if (!cancelRequested) progressMessage.textContent = event.payload;
   });
   await listen<string>("backup-log", (event) => {
     log(event.payload);
   });
   
   await listen<{ progress: number; message: string }>("backup-progress", (event) => {
+    if (cancelRequested) return;
     progressMessage.textContent = event.payload.message;
     progressFill.style.width = `${event.payload.progress}%`;
   });
@@ -1534,6 +1523,8 @@ restoreCancel.addEventListener("click", () => {
 
 
 function setOperationControls(busy: boolean): void {
+  if (!busy) cancelRequested = false;
+  renderCancelControl(btnCancel, busy, cancelRequested, {cancel: t("cancel"), cancelling: t("cancelling")});
   for (const button of [btnBackup, btnRestore, btnRestoreTest, btnTestRestore, btnDeleteBackup, restoreStart, restoreQuickBtn, testRestoreStart]) {
     if (button) button.disabled = busy;
   }
@@ -1663,6 +1654,7 @@ listen("restore-log", (event: { payload: string }) => {
 });
 
 listen("restore-progress", (event: { payload: { progress: number; message: string } }) => {
+  if (cancelRequested) return;
   if (typeof event.payload.progress === "number") progressFill.style.width = `${event.payload.progress}%`;
   progressMessage.textContent = event.payload.message;
 });
@@ -1695,8 +1687,6 @@ btnRestoreTest.addEventListener("click", async () => {
   btnRestoreTest.disabled = true;
   btnBackup.disabled = true;
   btnBackup.style.display = "none";
-  btnCancel.style.display = "block";
-  btnCancel.disabled = false;
   statusEl.textContent = t("verifyRunning");
   progressMessage.textContent = t("verifyStarted");
   progressFill.style.width = "0%";
@@ -1715,7 +1705,8 @@ btnRestoreTest.addEventListener("click", async () => {
       timestamp: timestamp
     });
     
-    if (verifyInProgress) {
+    if (cancelRequested) statusEl.textContent = t("verifyCancelled");
+    if (verifyInProgress && !cancelRequested) {
       if (result.success) {
         log(`✅ ${result.message}`);
         statusEl.textContent = result.message;
@@ -1730,7 +1721,7 @@ btnRestoreTest.addEventListener("click", async () => {
       }
     }
   } catch (e) {
-    if (verifyInProgress) {
+    if (verifyInProgress && !cancelRequested) {
       log(`${t("backupFailed")} ${e}`);
       statusEl.textContent = t("backupFailed");
     } else {
@@ -1744,7 +1735,6 @@ btnRestoreTest.addEventListener("click", async () => {
     btnRestoreTest.disabled = false;
     btnBackup.disabled = false;
     btnBackup.style.display = "block";
-    btnCancel.style.display = "none";
     progressMessage.textContent = t("ready");
   }
 });

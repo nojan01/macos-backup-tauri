@@ -23,7 +23,6 @@ use std::sync::OnceLock;
 
 static BACKUP_CANCELLED: AtomicBool = AtomicBool::new(false);
 static VERIFY_CANCELLED: AtomicBool = AtomicBool::new(false);
-static OPERATION_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static TAR_PID: AtomicU32 = AtomicU32::new(0);
 
 /// Cached zstd path - computed once at first use
@@ -3090,7 +3089,6 @@ fn cancel_backup() -> Result<(), String> {
 fn cancel_operation() -> Result<(), String> {
     BACKUP_CANCELLED.store(true, Ordering::SeqCst);
     VERIFY_CANCELLED.store(true, Ordering::SeqCst);
-    OPERATION_IN_PROGRESS.store(false, Ordering::SeqCst);
     
     // Kill any running tar process (group), escalating TERM -> KILL.
     let pid = TAR_PID.swap(0, Ordering::SeqCst);
@@ -3107,7 +3105,6 @@ fn reset_operation_state() -> Result<(), String> {
     ensure_operation_idle()?;
     BACKUP_CANCELLED.store(false, Ordering::SeqCst);
     VERIFY_CANCELLED.store(false, Ordering::SeqCst);
-    OPERATION_IN_PROGRESS.store(true, Ordering::SeqCst);
     Ok(())
 }
 

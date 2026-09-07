@@ -74,7 +74,11 @@ Essentielle Tools in unter 10 Minuten:
   Verknüpfungen werden mit der Quelle verglichen. Die Rückleseprüfung benötigt lokalen
   temporären Speicher für jeweils einen entpackten Quellordner; der Platz wird geprüft.
 - Fehlende oder unlesbare Quellen, Lese-/Schreibfehler und nicht unterstützte
-  Spezialdateien wie Sockets/FIFOs brechen die Sicherung ab. Fehlende ausgewählte
+  Spezialdateien wie FIFOs/Gerätedateien brechen die Sicherung ab. Echte Unix-Sockets
+  innerhalb eines Quellordners werden als flüchtige Kommunikationsendpunkte übersprungen;
+  ihre Pfade stehen im Protokoll und in `skipped-runtime-sockets.json` beim Backup.
+  Die Ausnahme richtet sich nach dem Dateityp, nicht nach Namen oder Ordnern.
+  Normale Dateien, auch mit `.sock` im Namen, bleiben vollständig enthalten. Fehlende ausgewählte
   Homebrew-/App-Store-Inventare sind ebenfalls Fehler. Die Auswahl lässt sich in den
   Einstellungen ändern. Ein Backup-Ziel innerhalb einer Quelle wird abgelehnt.
 - Quellen werden vor dem Archivieren und nochmals vor dem Abschluss geprüft.
@@ -137,7 +141,7 @@ Sicherungsliste ein.
 
 ### Download
 Laden Sie die neueste Version herunter:
-➡️ **[macOS Backup Suite v1.2.11](https://github.com/nojan01/macos-backup-tauri/releases/latest)**
+➡️ **[macOS Backup Suite v1.2.12](https://github.com/nojan01/macos-backup-tauri/releases/latest)**
 
 ### Voraussetzungen
 - macOS 12.0 oder neuer

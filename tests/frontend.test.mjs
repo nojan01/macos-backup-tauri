@@ -33,3 +33,15 @@ test('version labels use the installed app version instead of a hardcoded releas
   assert.doesNotMatch(html,/v\d+\.\d+\.\d+/);
   assert.match(main,/await getVersion\(\)/);
 });
+
+const cancelSource=fs.readFileSync(new URL('../src/cancel-ui.ts',import.meta.url),'utf8');
+const cancelOutput=ts.transpileModule(cancelSource,{compilerOptions:{module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2020}}).outputText;
+const {renderCancelControl}=await import(`data:text/javascript;base64,${Buffer.from(cancelOutput).toString('base64')}`);
+test('cancel remains visible for checks and can be retried after a failed request', () => {
+  const button={disabled:false,textContent:'',style:{display:'none'}};
+  const labels={cancel:'Abbrechen',cancelling:'Abbruch läuft …'};
+  renderCancelControl(button,true,false,labels);assert.equal(button.style.display,'block');assert.equal(button.disabled,false);
+  renderCancelControl(button,true,true,labels);assert.equal(button.style.display,'block');assert.equal(button.disabled,true);assert.equal(button.textContent,labels.cancelling);
+  renderCancelControl(button,true,false,labels);assert.equal(button.disabled,false);
+  renderCancelControl(button,false,false,labels);assert.equal(button.style.display,'none');assert.equal(button.disabled,true);
+});
