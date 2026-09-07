@@ -39,6 +39,7 @@ impl PrivateDir {
 }
 impl Drop for PrivateDir {
     fn drop(&mut self) {
+        let _phase=crate::work_progress::Phase::enter("Temporäre Dateien aufräumen");
         let _ = fs::remove_dir_all(&self.0);
     }
 }
@@ -92,6 +93,7 @@ pub(super) fn verify_item(backup: &Path, item: &BackupItem) -> Result<(), String
 struct ArchiveInput {
     reader: Box<dyn Read>,
     child: Option<std::process::Child>,
+    progress: crate::work_progress::Bytes,
 }
 impl Read for ArchiveInput {
     fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
@@ -99,7 +101,9 @@ impl Read for ArchiveInput {
             // Interrupted would be retried automatically by io::copy and could loop forever.
             return Err(io::Error::other("Vorgang abgebrochen"));
         }
-        self.reader.read(b)
+        let n=self.reader.read(b)?;
+        self.progress.add(n);
+        Ok(n)
     }
 }
 impl Drop for ArchiveInput {
@@ -135,6 +139,7 @@ fn open_archive(archive: &Path) -> Result<ArchiveInput, String> {
         let reader = Box::new(child.stdout.take().ok_or("No decompressor output")?);
         Ok(ArchiveInput {
             reader,
+            progress: crate::work_progress::Bytes::new(),
             child: Some(child),
         })
     } else {
@@ -142,6 +147,7 @@ fn open_archive(archive: &Path) -> Result<ArchiveInput, String> {
         Ok(ArchiveInput {
             reader: Box::new(flate2::read::MultiGzDecoder::new(f)),
             child: None,
+            progress: crate::work_progress::Bytes::new(),
         })
     }
 }
@@ -158,6 +164,7 @@ fn relative_path(path: &Path) -> Result<PathBuf, String> {
 }
 /// Read actual tar headers, not a newline-delimited listing (filenames may contain newlines).
 pub(super) fn archive_index(archive: &Path) -> Result<BTreeSet<PathBuf>, String> {
+    let _phase=crate::work_progress::Phase::enter("Archivstruktur und Kompression prüfen");
     let mut input = open_archive(archive)?;
     let mut entries = BTreeMap::new();
     let mut hardlinks = Vec::new();
@@ -278,7 +285,15 @@ pub(super) fn require_root(
 
 /// Only call on a new, empty, private directory. Live targets use staged_restore.
 pub(super) fn unpack_private(archive: &Path, target: &Path) -> Result<(), String> {
-    archive_index(archive)?;
+    unpack_private_with_root(archive, target, None)
+}
+
+// Validate structure and expected root in a single full archive traversal. This
+// entry point always performs validation; callers cannot bypass it with a flag.
+pub(super) fn unpack_private_with_root(archive: &Path, target: &Path, root: Option<&std::ffi::OsStr>) -> Result<(), String> {
+    let index=archive_index(archive)?;
+    if let Some(root)=root {require_root(&index,root)?;}
+    let _phase=crate::work_progress::Phase::enter("Archiv entpacken / macOS-Dateiattribute und Rechte setzen");
     let md = fs::symlink_metadata(target).map_err(|e| e.to_string())?;
     if !md.is_dir()
         || md.file_type().is_symlink()
@@ -301,7 +316,9 @@ pub(super) fn unpack_private(archive: &Path, target: &Path) -> Result<(), String
         cmd.arg("-xzpf");
     }
     cmd.arg(&archive).arg("--no-same-owner").current_dir(target);
-    let output = run_with_timeout(cmd, std::time::Duration::from_secs(3600))?;
+    // Large archives can spend substantial time restoring per-file macOS
+    // metadata. Match the creation deadline; cancellation remains available.
+    let output = run_with_timeout(cmd, std::time::Duration::from_secs(24 * 3600))?;
     require_success("Archive extraction", &output)?;
     Ok(())
 }
@@ -1107,7 +1124,7 @@ mod cancellation_tests {
     #[test]
     fn archive_reader_stops_between_reads_on_cancel() {
         let _guard=OperationGuard::acquire().unwrap();
-        let mut reader=ArchiveInput {reader:Box::new(io::Cursor::new(vec![1u8;1024])),child:None};
+        let mut reader=ArchiveInput {reader:Box::new(io::Cursor::new(vec![1u8;1024])),child:None,progress:crate::work_progress::Bytes::new()};
         let mut buffer=[0;16];assert_eq!(reader.read(&mut buffer).unwrap(),16);
         cancel_operation().unwrap();
         let error=reader.read(&mut buffer).unwrap_err();

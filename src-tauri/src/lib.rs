@@ -1,3 +1,4 @@
+mod work_progress;
 mod app_settings;
 mod backup;
 use backup::*;
@@ -1006,6 +1007,7 @@ fn run_streamed(
 
 #[tauri::command]
 fn get_brew_packages() -> Result<String, String> {
+    let _phase = work_progress::Phase::enter("Software-Inventar erfassen");
     let brew_path = find_brew_path()
         .ok_or_else(|| "Homebrew not found. Please install Homebrew: https://brew.sh".to_string())?;
 
@@ -1022,6 +1024,7 @@ fn get_brew_packages() -> Result<String, String> {
 
 #[tauri::command]
 fn get_mas_apps() -> Result<String, String> {
+    let _phase = work_progress::Phase::enter("Software-Inventar erfassen");
     let mas_path = find_homebrew_command("mas")
         .ok_or_else(|| "mas not found. Install with: brew install mas".to_string())?;
 
@@ -1112,6 +1115,7 @@ fn get_manual_apps() -> Result<Vec<String>, String> {
 
 #[tauri::command]
 fn get_vscode_extensions() -> Result<Vec<String>, String> {
+    let _phase = work_progress::Phase::enter("Software-Inventar erfassen");
     // Prüfe verschiedene VS Code Installationspfade
     let possible_paths = [
         "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
@@ -1297,6 +1301,8 @@ fn load_previous_backup(suite_root: &Path) -> Option<(String, BackupMetadata)> {
 }
 
 fn hash_file(path: &Path) -> Result<String, String> {
+    let _phase = work_progress::Phase::enter("Archiv-Prüfsumme berechnen");
+    let mut progress = work_progress::Bytes::new();
     let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
     let mut hasher = Sha256::new();
     // Larger buffer for less syscalls on multi-GB archives
@@ -1317,6 +1323,7 @@ fn hash_file(path: &Path) -> Result<String, String> {
             break;
         }
         hasher.update(&buffer[..bytes_read]);
+        progress.add(bytes_read);
     }
     
     Ok(format!("{:x}", hasher.finalize()))
@@ -1660,10 +1667,10 @@ fn create_backup_impl(
             "message": format!("Archiving {}...", name)
         }));
         
-        let current_snapshot = compute_snapshot(&expanded)?;
-        if cached_snapshots[i].as_ref() != Some(&current_snapshot) {
-            return Err(format!("Quelle seit Backup-Beginn verändert: {dir}. Schreibende Programme schließen und erneut starten."));
-        }
+        // The preflight already read every byte. Archive exactly that baseline,
+        // verify the extracted data against it, then re-read the source to detect
+        // changes. Do not add another identical full scan immediately beforehand.
+        let current_snapshot = cached_snapshots[i].as_ref().ok_or("Quellmanifest fehlt")?.clone();
         let source_size: u64 = current_snapshot.iter().map(|e| e.s).sum();
         trace(&format!("  compute_snapshot done ({} entries)", current_snapshot.len()));
 
@@ -1723,15 +1730,7 @@ fn create_backup_impl(
             );
         }
 
-        if is_file {
-            trace("  archiving single file");
-            create_file_archive(&expanded, &name, &archive_path)?;
-            trace("  single file archive done");
-        } else {
-            trace(&format!("  create_tar_gz start -> {}", archive_path.display()));
-            create_tar_gz(&expanded, &archive_path)?;
-            trace("  create_tar_gz done");
-        }
+        create_verified_archive_from_snapshot(&expanded, &archive_path, is_file, &current_snapshot)?;
         
         // Check for cancellation after archive
         if BACKUP_CANCELLED.load(Ordering::SeqCst) {
@@ -2068,6 +2067,7 @@ fn verify_backup_impl(
     timestamp: String,
 ) -> Result<VerifyResult, String> {
     let _guard = OperationGuard::acquire()?;
+    let _progress = BackupProgress::attach(window.clone());
     validate_component(&timestamp)?;
     let backup_path = PathBuf::from(&target_path)
         .join("macos-backup-suite")
@@ -2523,6 +2523,7 @@ fn test_restore_item_impl(
     window: tauri::Window,
 ) -> Result<TestRestoreResult, String> {
     let _guard = OperationGuard::acquire()?;
+    let _progress = BackupProgress::attach(window.clone());
     validate_component(&timestamp)?;
     let backup = PathBuf::from(&target_path)
         .join("macos-backup-suite/data")
@@ -2550,6 +2551,7 @@ fn restore_items_impl(
     window: tauri::Window,
 ) -> Result<RestoreResult, String> {
     let _guard = OperationGuard::acquire()?;
+    let _progress = BackupProgress::attach(window.clone());
     validate_component(&timestamp)?;
     let backup = PathBuf::from(&target_path)
         .join("macos-backup-suite/data")

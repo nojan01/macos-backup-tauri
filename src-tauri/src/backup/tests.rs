@@ -485,3 +485,105 @@ fn preflight_rejects_unreadable_roots_overlap_and_duplicates() {
     let duplicate=vec!["~/Documents".into(),dir.to_str().unwrap().into()];assert!(validate_selected_sources(&duplicate,&d.0.join("dest"),&d.0).unwrap_err().contains("mehrfach"));
     fs::set_permissions(&dir,fs::Permissions::from_mode(0)).unwrap();let result=validate_selected_sources(&selected,&d.0.join("dest"),&d.0);fs::set_permissions(&dir,fs::Permissions::from_mode(0o700)).unwrap();assert!(result.unwrap_err().contains("nicht lesbar"));
 }
+
+#[test]
+#[ignore = "manual representative backup benchmark"]
+fn representative_backup_roundtrip() {
+    let d=fixture();let source=d.0.join("Documents");fs::create_dir(&source).unwrap();
+    let data=vec![37u8;1024*1024];
+    for i in 0..1500 {
+        let sub=source.join(format!("package-{i}"));fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("settings.json"),b"{\"test\":true}").unwrap();
+        xattr::set(&sub,"com.example.backup-benchmark",b"attribute").unwrap();
+    }
+    for i in 0..64 {fs::write(source.join(format!("data-{i}")),&data).unwrap();}
+    let start=std::time::Instant::now();
+    let initial=compute_snapshot(&source).unwrap();
+    let archive=d.0.join("documents.tar.gz");
+    create_verified_archive_from_snapshot(&source,&archive,true,&initial).unwrap();
+    let _hash=hash_file(&archive).unwrap();
+    ensure_unchanged(&source,&initial).unwrap();
+    println!("REPRESENTATIVE_BACKUP {:.3}s {} entries",start.elapsed().as_secs_f64(),initial.len());
+}
+
+#[test]
+fn cached_source_baseline_rejects_changed_added_and_removed_files() {
+    for change in ["changed", "added", "removed"] {
+        let d=fixture();let source=d.0.join("source");fs::create_dir(&source).unwrap();let file=source.join("file");fs::write(&file,b"original").unwrap();
+        let baseline=compute_snapshot(&source).unwrap();
+        match change {
+            "changed" => fs::write(&file,b"modified").unwrap(),
+            "added" => fs::write(source.join("new"),b"new data").unwrap(),
+            _ => fs::remove_file(&file).unwrap(),
+        }
+        let target=d.0.join("archive.tar.gz");
+        assert!(create_verified_archive_from_snapshot(&source,&target,true,&baseline).is_err(),"{change} source accepted");
+        assert!(!target.exists(),"{change} source published");
+    }
+}
+#[test]
+fn single_validation_unpack_still_rejects_wrong_root_before_writing() {
+    let d=fixture();let source=d.0.join("actual");fs::write(&source,b"payload").unwrap();let archive=d.0.join("archive.tar.gz");create_verified_archive(&source,&archive,true).unwrap();
+    let stage=PrivateDir::temp().unwrap();
+    assert!(unpack_private_with_root(&archive,&stage.0,Some(std::ffi::OsStr::new("wrong"))).is_err());
+    assert!(fs::read_dir(&stage.0).unwrap().next().is_none());
+}
+
+#[test]
+fn regenerated_provenance_is_allowed_only_in_readback_not_source_guards() {
+    let d=fixture();let source=d.0.join("Documents");fs::create_dir(&source).unwrap();fs::write(source.join("data"),b"must survive").unwrap();
+    xattr::set(&source,"com.example.required",b"keep this metadata").unwrap();
+    let archive=d.0.join("archive.tar.gz");create_verified_archive(&source,&archive,true).unwrap();
+    let mut expected=compute_snapshot(&source).unwrap();
+    for entry in &mut expected {entry.xattrs.insert("com.apple.provenance".into(),"different source application".into());}
+    verify_archive_source(&archive,"Documents",&expected).unwrap();
+    assert!(ensure_unchanged(&source,&expected).is_err());
+    expected[0].xattrs.insert("com.example.required".into(),"missing or corrupt metadata".into());
+    let error=verify_archive_source(&archive,"Documents",&expected).unwrap_err();
+    assert!(error.contains("bei Documents:"));assert!(error.contains("com.example.required"));
+}
+#[test]
+fn provenance_exception_never_hides_content_acl_resource_forks_or_other_xattrs() {
+    let d=fixture();let file=d.0.join("file");fs::write(&file,b"contents").unwrap();
+    let original=compute_snapshot(&file).unwrap().remove(0);
+    for field in ["hash","acl","com.apple.ResourceFork","com.apple.FinderInfo","com.apple.macl","com.apple.quarantine"] {
+        let mut changed=original.clone();
+        changed.xattrs.insert("com.apple.provenance".into(),"regenerated".into());
+        match field {"hash"=>changed.hash="bad".into(),"acl"=>changed.acl="different".into(),_=>{changed.xattrs.insert(field.into(),"bad".into());}}
+        assert!(!readback_differences(&changed,&original).is_empty(),"{field} mismatch hidden");
+    }
+}
+
+#[test]
+#[ignore = "manual read-only metadata probe; requires BACKUP_PROBE_ROOT"]
+fn actual_directory_root_metadata_roundtrip() {
+    let root=PathBuf::from(std::env::var("BACKUP_PROBE_ROOT").expect("Explicit root required"));
+    let md=fs::symlink_metadata(&root).unwrap();assert!(md.is_dir());
+    let mut attrs=BTreeMap::new();
+    for key in xattr::list(&root).unwrap() {attrs.insert(key.to_str().unwrap().to_string(),format!("{:x}",Sha256::digest(xattr::get(&root,&key).unwrap().unwrap())));}
+    use std::os::macos::fs::MetadataExt as MacMetadataExt;
+    let expected=ManifestEntry {p:String::new(),s:0,kind:"dir".into(),hash:String::new(),link:None,mode:md.mode(),uid:md.uid(),gid:md.gid(),m:md.mtime(),mn:md.mtime_nsec(),c:md.ctime(),cn:md.ctime_nsec(),dev:md.dev(),ino:md.ino(),flags:md.st_flags(),xattrs:attrs,acl:read_acl(&root).unwrap()};
+    let d=fixture();let archive=d.0.join("root.tar.gz");
+    let mut cmd=Command::new("/usr/bin/tar");cmd.args(["--format=pax","--acls","--xattrs","--fflags","--no-recursion","-czf"]).arg(&archive).arg("-C").arg(root.parent().unwrap()).arg(root.file_name().unwrap());
+    require_success("Root metadata fixture",&run_with_timeout(cmd,std::time::Duration::from_secs(60)).unwrap()).unwrap();
+    verify_archive_source(&archive,root.file_name().unwrap().to_str().unwrap(),&[expected]).unwrap();
+    println!("ACTUAL_ROOT_METADATA_ROUNDTRIP passed; no child contents read");
+}
+
+#[test]
+#[ignore = "manual read-only real-source probe; requires BACKUP_PROBE_SOURCE"]
+fn actual_source_backup_finalize_and_test_restore() {
+    let source=PathBuf::from(std::env::var("BACKUP_PROBE_SOURCE").expect("Explicit source required"));
+    let d=fixture();let backup=d.0.join("backup");fs::create_dir(&backup).unwrap();
+    let expected=compute_snapshot(&source).unwrap();let bytes=expected.iter().map(|e|e.s).sum();
+    let name=archive_name_for(&source,"tar.gz");let archive=backup.join(&name);
+    create_verified_archive_from_snapshot(&source,&archive,true,&expected).unwrap();
+    let meta=BackupMetadata {timestamp:"20260907-120000".into(),items:vec![BackupItem {path:source.to_str().unwrap().into(),archive:name,hash:hash_file(&archive).unwrap(),archive_size_bytes:fs::metadata(&archive).unwrap().len(),source_size_bytes:bytes}],hash_algorithm:"sha256".into(),total_source_size_bytes:bytes,start_time:String::new(),end_time:String::new(),duration_seconds:0};
+    finish_backup(&backup,&meta,&[(source.clone(),expected.clone())]).unwrap();
+    let destination=d.0.join("restore");fs::create_dir(&destination).unwrap();
+    let result=test_restore_to(&backup,source.to_str().unwrap(),&destination).unwrap();
+    let restored=compute_snapshot(&Path::new(&result.extracted_path).join(source.file_name().unwrap())).unwrap();
+    assert_eq!(restored.len(),expected.len());
+    for (actual,original) in restored.iter().zip(&expected) {assert!(readback_differences(actual,original).is_empty());}
+    println!("ACTUAL_SOURCE_BACKUP_AND_RESTORE passed: {} files, {} bytes",result.file_count,result.bytes_extracted);
+}

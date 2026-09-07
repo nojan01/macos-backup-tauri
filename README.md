@@ -76,6 +76,19 @@ Essentielle Tools in unter 10 Minuten:
   Verzeichnis entpackt. Inhalte, Rechte, ACLs, erweiterte Attribute, Zeitstempel und
   Verknüpfungen werden mit der Quelle verglichen. Die Rückleseprüfung benötigt lokalen
   temporären Speicher für jeweils einen entpackten Quellordner; der Platz wird geprüft.
+- Das von macOS beim Kopieren neu vergebene Herkunftsattribut `com.apple.provenance`
+  wird weiter archiviert und bei Quelländerungen berücksichtigt. Ausschließlich beim
+  Vergleich der entpackten Kopie darf es abweichen. Dateiinhalte, ACLs, Resource Forks
+  und alle übrigen erweiterten Attribute werden unverändert geprüft. Fehlermeldungen
+  nennen den betroffenen Pfad und das abweichende Merkmal, auch beim obersten Ordner.
+- Archivieren, Strukturprüfung, Entpacken einschließlich macOS-Dateiattributen,
+  Rücklesevergleich, Prüfsummen und Aufräumen haben eigene Statusmeldungen. Eine
+  sekündliche Laufzeitanzeige bleibt auch bei stillen Unterprozessen aktiv; verstrichene
+  Zeit wird nicht als gemessener Datei- oder Prozentfortschritt ausgegeben.
+- Die Archivierung nutzt das bereits vollständig gelesene Quellmanifest. Redundante
+  Quellscans und der doppelte Archivdurchlauf vor derselben Rücklese-Extraktion entfallen.
+  Der vollständige Vergleich mit dem entpackten Archiv, die frische Quellprüfung danach
+  und die globale Abschlussprüfung bleiben erhalten.
 - Fehlende oder unlesbare Quellen, Lese-/Schreibfehler und nicht unterstützte
   Spezialdateien wie FIFOs/Gerätedateien brechen die Sicherung ab. Echte Unix-Sockets
   innerhalb eines Quellordners werden als flüchtige Kommunikationsendpunkte übersprungen;
@@ -148,7 +161,7 @@ Sicherungsliste ein.
 
 ### Download
 Laden Sie die neueste Version herunter:
-➡️ **[macOS Backup Suite v1.2.14](https://github.com/nojan01/macos-backup-tauri/releases/latest)**
+➡️ **[macOS Backup Suite v1.2.15](https://github.com/nojan01/macos-backup-tauri/releases/latest)**
 
 ### Voraussetzungen
 - macOS 12.0 oder neuer

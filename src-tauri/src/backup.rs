@@ -19,11 +19,11 @@ struct ProgressReporter {
     last_log: std::time::Instant,
     skipped_sockets: std::collections::BTreeSet<PathBuf>,
 }
-pub(super) struct BackupProgress;
+pub(super) struct BackupProgress { _work: crate::work_progress::Session }
 impl BackupProgress {
     pub fn attach(window: tauri::Window) -> Self {
-        PROGRESS.with(|p| *p.borrow_mut()=Some(ProgressReporter { window,last_ui:std::time::Instant::now(),last_log:std::time::Instant::now(),skipped_sockets:Default::default() }));
-        Self
+        PROGRESS.with(|p| *p.borrow_mut()=Some(ProgressReporter { window:window.clone(),last_ui:std::time::Instant::now(),last_log:std::time::Instant::now(),skipped_sockets:Default::default() }));
+        Self { _work: crate::work_progress::Session::attach(window) }
     }
 }
 impl Drop for BackupProgress {
@@ -51,13 +51,11 @@ fn report_activity(activity: &ScanActivity) {
             let mib=activity.bytes as f64 / (1024.0*1024.0);
             let speed=mib/activity.elapsed.as_secs_f64().max(0.001);
             let name=activity.current_file.file_name().unwrap_or_default().to_string_lossy();
-            let message=format!("Prüfe Dateien: {} Einträge · {:.1} MiB gelesen · {:.1} MiB/s · {}",activity.entries,mib,speed,name);
-            let _=reporter.window.emit("backup-activity",&message);
+            let message=format!("{} Einträge · {:.1} MiB gelesen · {:.1} MiB/s · {}",activity.entries,mib,speed,name);
             reporter.last_ui=std::time::Instant::now();
-            if activity.boundary || reporter.last_log.elapsed()>=std::time::Duration::from_secs(10) {
-                let _=reporter.window.emit("backup-log",&message);
-                reporter.last_log=std::time::Instant::now();
-            }
+            let log=activity.boundary || reporter.last_log.elapsed()>=std::time::Duration::from_secs(10);
+            crate::work_progress::detail(message,log);
+            if log { reporter.last_log=std::time::Instant::now(); }
         }
     });
 }
@@ -136,6 +134,10 @@ fn read_acl(path: &Path) -> Result<String, String> {
 }
 
 pub(super) fn compute_snapshot(root: &Path) -> Result<Vec<ManifestEntry>, String> {
+    snapshot_with_phase(root, "Quelldateien lesen und prüfen")
+}
+fn snapshot_with_phase(root: &Path, label: &str) -> Result<Vec<ManifestEntry>, String> {
+    let _phase=crate::work_progress::Phase::enter(&format!("{label}: {}",root.file_name().unwrap_or_default().to_string_lossy()));
     scan_with_activity(root, &mut report_activity)
 }
 fn scan_with_activity(root: &Path, report: &mut impl FnMut(&ScanActivity)) -> Result<Vec<ManifestEntry>, String> {
@@ -261,7 +263,7 @@ fn scan_with_activity(root: &Path, report: &mut impl FnMut(&ScanActivity)) -> Re
 }
 
 pub(super) fn ensure_unchanged(source: &Path, expected: &[ManifestEntry]) -> Result<(), String> {
-    if compute_snapshot(source)? != expected {
+    if snapshot_with_phase(source, "Quelländerungen prüfen")? != expected {
         return Err(fail(source,"Quelle während der Sicherung verändert. Schreibende Programme schließen und Backup erneut starten."));
     }
     Ok(())
@@ -317,6 +319,7 @@ pub(super) fn reuse_archive(source: &Path, target: &Path) -> Result<(), String> 
 struct ReadbackDir(PrivateDir);
 impl Drop for ReadbackDir {
     fn drop(&mut self) {
+        let _phase=crate::work_progress::Phase::enter("Temporäre Rücklesedaten aufräumen");
         if fs::remove_dir_all(&self.0 .0).is_ok() {
             return;
         }
@@ -357,6 +360,31 @@ impl Drop for ReadbackDir {
     }
 }
 
+// macOS regenerates this OS-managed provenance marker for files created by a
+// different application. Preserve it in the archive and source-change manifests,
+// but do not demand byte identity after extraction. No other xattr is exempt.
+fn readback_differences(actual: &ManifestEntry, expected: &ManifestEntry) -> Vec<String> {
+    let mut fields=Vec::new();
+    for (different,label) in [
+        (actual.p!=expected.p,"Pfad"),
+        (actual.kind!=expected.kind,"Dateityp"),
+        (actual.s!=expected.s,"Dateigröße"),
+        (actual.hash!=expected.hash,"Dateiinhalt (SHA-256)"),
+        (actual.link!=expected.link,"Linkziel"),
+        (actual.mode!=expected.mode,"Zugriffsmodus"),
+        ((actual.m,actual.mn)!=(expected.m,expected.mn),"Änderungszeit"),
+        (actual.flags!=expected.flags,"Dateiflags"),
+        (actual.acl!=expected.acl,"Zugriffsrechte (ACL)"),
+    ] { if different {fields.push(label.to_string());} }
+    let keys:std::collections::BTreeSet<_>=actual.xattrs.keys().chain(expected.xattrs.keys()).collect();
+    for key in keys {
+        if key!="com.apple.provenance" && actual.xattrs.get(key)!=expected.xattrs.get(key) {
+            fields.push(format!("Erweitertes Attribut {key}"));
+        }
+    }
+    fields
+}
+
 /// Extract and compare actual restored bytes and metadata, rather than trusting tar's exit code.
 pub(super) fn verify_archive_source(
     archive: &Path,
@@ -375,44 +403,18 @@ pub(super) fn verify_archive_source(
     // which cannot represent macOS ACLs and xattrs as ordinary extracted files.
     let owned = ReadbackDir(PrivateDir::temp()?);
     let stage = &owned.0;
-    require_root(&archive_index(archive)?, std::ffi::OsStr::new(root_name))?;
-    unpack_private(archive, &stage.0)?;
-    let actual = compute_snapshot(&stage.0.join(root_name))?;
+    unpack_private_with_root(archive, &stage.0, Some(std::ffi::OsStr::new(root_name)))?;
+    let actual = snapshot_with_phase(&stage.0.join(root_name), "Rückgelesene Dateiinhalte prüfen")?;
     if actual.len() != expected.len() {
-        return Err(fail(archive, "Archiv enthält nicht alle Quelldateien"));
+        return Err(fail(archive, format!("Anzahl der Archiveinträge stimmt nicht: erwartet {}, zurückgelesen {}",expected.len(),actual.len())));
     }
     // Identity/change times belong to the live filesystem, ownership is deliberately
     // mapped to the restoring user. All restorable content/permissions are compared.
     for (a, b) in actual.iter().zip(expected) {
-        if (
-            a.p.as_str(),
-            a.s,
-            &a.kind,
-            &a.hash,
-            &a.link,
-            a.mode,
-            a.m,
-            a.mn,
-            a.flags,
-            &a.xattrs,
-            &a.acl,
-        ) != (
-            b.p.as_str(),
-            b.s,
-            &b.kind,
-            &b.hash,
-            &b.link,
-            b.mode,
-            b.m,
-            b.mn,
-            b.flags,
-            &b.xattrs,
-            &b.acl,
-        ) {
-            return Err(fail(
-                archive,
-                format!("Archiv-Rückleseprüfung fehlgeschlagen: {}", b.p),
-            ));
+        let differences=readback_differences(a,b);
+        if !differences.is_empty() {
+            let name=if b.p.is_empty() {root_name.to_string()} else {format!("{root_name}/{}",b.p)};
+            return Err(fail(archive, format!("Archiv-Rückleseprüfung fehlgeschlagen bei {name}: {}",differences.join(", "))));
         }
     }
     // Hard links within a source must still share an inode after extraction.
@@ -437,6 +439,15 @@ pub(super) fn create_verified_archive(
     gzip: bool,
 ) -> Result<(), String> {
     let expected = compute_snapshot(source)?;
+    create_verified_archive_from_snapshot(source, target, gzip, &expected)
+}
+
+/// Reuse the caller's full source baseline. It is verified against both the
+/// extracted archive and a fresh full source scan before publishing the archive.
+pub(super) fn create_verified_archive_from_snapshot(
+    source: &Path, target: &Path, gzip: bool, expected: &[ManifestEntry],
+) -> Result<(), String> {
+    cancelled()?;
     let bytes = expected
         .iter()
         .map(|e| e.s.saturating_add(4096))
@@ -453,7 +464,7 @@ pub(super) fn create_verified_archive(
     let tmp = stage.0.join("archive");
     // Exact NUL-delimited list; no glob exclusions, no recursive second traversal.
     let mut members = Vec::new();
-    for item in &expected {
+    for item in expected {
         members.extend_from_slice(b"./");
         members.extend_from_slice(name.as_bytes());
         if !item.p.is_empty() {
@@ -484,7 +495,10 @@ pub(super) fn create_verified_archive(
         cmd.arg("-czf");
     }
     cmd.arg(&tmp).arg("-T").arg(&list);
-    let output = run_with_timeout(cmd, std::time::Duration::from_secs(24 * 3600))?;
+    let output = {
+        let _phase=crate::work_progress::Phase::enter(&format!("Archiv erstellen und komprimieren: {name}"));
+        run_with_timeout(cmd, std::time::Duration::from_secs(24 * 3600))?
+    };
     require_success("Archive creation", &output)?;
     if !output.stderr.is_empty() {
         return Err(fail(
@@ -492,9 +506,8 @@ pub(super) fn create_verified_archive(
             format!("tar meldet: {}", String::from_utf8_lossy(&output.stderr)),
         ));
     }
-    ensure_unchanged(source, &expected)?;
-    verify_archive_source(&tmp, name, &expected)?;
-    ensure_unchanged(source, &expected)?;
+    verify_archive_source(&tmp, name, expected)?;
+    ensure_unchanged(source, expected)?;
     cancelled()?;
     publish(&tmp, target)
 }
