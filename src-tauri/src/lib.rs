@@ -1388,6 +1388,8 @@ fn create_backup_impl(
     if !target.is_absolute() || !fs::metadata(target).map_err(|e|format!("Backup-Ziel nicht erreichbar: {e}"))?.is_dir() {
         return Err("Backup-Ziel muss ein vorhandenes absolutes Verzeichnis sein".into());
     }
+    let _ = window.emit("backup-progress",serde_json::json!({"progress":0,"message":"Prüfe Verfügbarkeit aller ausgewählten Quellen …"}));
+    validate_selected_sources(&directories,target,&dirs::home_dir().ok_or("Benutzerverzeichnis nicht verfügbar")?)?;
     let suite_root = target.join("macos-backup-suite");
 
     // --- Resume-Modus: bestehenden Backup-Ordner wiederverwenden ---

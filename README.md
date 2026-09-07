@@ -81,6 +81,10 @@ Essentielle Tools in unter 10 Minuten:
   Normale Dateien, auch mit `.sock` im Namen, bleiben vollständig enthalten. Fehlende ausgewählte
   Homebrew-/App-Store-Inventare sind ebenfalls Fehler. Die Auswahl lässt sich in den
   Einstellungen ändern. Ein Backup-Ziel innerhalb einer Quelle wird abgelehnt.
+- Vor dem ersten Inhalts-Scan werden sämtliche ausgewählten Quellpfade auf Existenz,
+  grundlegende Lesbarkeit und Überschneidung mit dem Ziel geprüft. Fehlende Einträge
+  werden gesammelt gemeldet, bevor große Ordner gelesen werden. Gespeicherte Auswahlpfade
+  werden dabei nicht automatisch entfernt oder stillschweigend übersprungen.
 - Quellen werden vor dem Archivieren und nochmals vor dem Abschluss geprüft.
   Archive, Manifeste, Zwischenstände und Abschlussmetadaten werden über temporäre
   Dateien, Synchronisierung und atomisches Umbenennen veröffentlicht.
@@ -141,7 +145,7 @@ Sicherungsliste ein.
 
 ### Download
 Laden Sie die neueste Version herunter:
-➡️ **[macOS Backup Suite v1.2.12](https://github.com/nojan01/macos-backup-tauri/releases/latest)**
+➡️ **[macOS Backup Suite v1.2.13](https://github.com/nojan01/macos-backup-tauri/releases/latest)**
 
 ### Voraussetzungen
 - macOS 12.0 oder neuer

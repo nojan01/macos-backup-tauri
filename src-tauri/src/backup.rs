@@ -499,8 +499,36 @@ pub(super) fn create_verified_archive(
     publish(&tmp, target)
 }
 
+/// Validate every selected root before hashing any source or creating a backup.
+/// This is deliberately shallow: missing late entries must not cost a full scan.
+pub(super) fn validate_selected_sources(directories: &[String], target: &Path, home: &Path) -> Result<(),String> {
+    let mut problems=Vec::new();
+    let mut seen=std::collections::BTreeSet::new();
+    for source in directories {
+        cancelled()?;
+        let path=if source=="~" {home.to_path_buf()} else if let Some(rel)=source.strip_prefix("~/") {home.join(rel)} else {PathBuf::from(source)};
+        let check=(|| -> Result<(),String> {
+            if !path.is_absolute() || path.file_name().is_none() || path.components().any(|c|matches!(c,std::path::Component::ParentDir)) {return Err("Ungültiger absoluter Quellpfad".into());}
+            if !seen.insert(path.clone()) {return Err("Quelle mehrfach ausgewählt".into());}
+            let md=fs::symlink_metadata(&path).map_err(|e| if e.kind()==std::io::ErrorKind::NotFound {"Pfad existiert nicht mehr – Auswahl korrigieren oder Quelle wieder verfügbar machen".to_string()} else {e.to_string()})?;
+            if md.is_dir() { fs::read_dir(&path).map_err(|e|format!("Verzeichnis nicht lesbar: {e}"))?; }
+            else if md.is_file() { fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(&path).map_err(|e|format!("Datei nicht lesbar: {e}"))?; }
+            else if md.file_type().is_symlink() {fs::read_link(&path).map_err(|e|e.to_string())?;}
+            else {return Err("Ausgewählter Pfad ist eine Spezialdatei, keine sicherbare Datei oder Ordner".into());}
+            validate_source_target(&path,target)
+        })();
+        if let Err(error)=check {problems.push(format!("{source}: {error}"));}
+    }
+    if problems.is_empty() {Ok(())} else {Err(format!("Quellprüfung fehlgeschlagen. Es wurden noch keine Dateiinhalte gelesen.\n{}",problems.join("\n")))}
+}
+
 pub(super) fn validate_source_target(source: &Path, target: &Path) -> Result<(), String> {
-    let canonical = fs::canonicalize(source).map_err(|e| fail(source, e))?;
+    let md=fs::symlink_metadata(source).map_err(|e|fail(source,e))?;
+    let canonical = if md.file_type().is_symlink() {
+        // An explicitly selected dangling symlink is valid backup data. Do not
+        // canonicalize its target: scanning and archiving do not follow it either.
+        fs::canonicalize(source.parent().ok_or("Quellpfad ohne übergeordneten Ordner")?).map_err(|e|fail(source,e))?.join(source.file_name().ok_or("Quellname fehlt")?)
+    } else {fs::canonicalize(source).map_err(|e| fail(source,e))?};
     let resolved = super::restore::resolve_existing_ancestor(target)?;
     if resolved.starts_with(&canonical)
         || canonical.starts_with(resolved.join("macos-backup-suite"))

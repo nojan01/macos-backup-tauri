@@ -459,3 +459,29 @@ fn archive_validation_and_restore_merge_honor_cancellation() {
     let target=d.0.join("target");assert!(merge_tree(&source,&target,true).unwrap_err().contains("abgebrochen"));assert!(!target.exists());assert!(source.exists());
     BACKUP_CANCELLED.store(false,Ordering::SeqCst);VERIFY_CANCELLED.store(false,Ordering::SeqCst);
 }
+
+#[test]
+fn preflight_reports_all_missing_roots_before_deep_scan() {
+    let d=fixture();let existing=d.0.join("Documents");fs::create_dir(&existing).unwrap();
+    // A deep scan would reject this FIFO first; shallow preflight must instead
+    // inspect the remaining roots and report both stale selections together.
+    let fifo=existing.join("pipe");let name=CString::new(fifo.as_os_str().as_bytes()).unwrap();assert_eq!(unsafe{libc::mkfifo(name.as_ptr(),0o600)},0);
+    let selected=vec![existing.to_str().unwrap().into(),"~/Library/Application Support/Code/User".into(),"~/another-missing".into()];
+    let error=validate_selected_sources(&selected,&d.0.join("destination"),&d.0).unwrap_err();
+    assert!(error.contains("Code/User"));assert!(error.contains("another-missing"));assert!(!error.contains("FIFO"));assert!(error.contains("noch keine Dateiinhalte"));
+    assert!(!d.0.join("destination").exists());
+}
+#[test]
+fn preflight_accepts_existing_roots_and_dangling_links() {
+    let d=fixture();let dir=d.0.join("Documents");fs::create_dir(&dir).unwrap();let file=d.0.join("config");fs::write(&file,b"data").unwrap();let link=d.0.join("link");symlink("absent-target",&link).unwrap();
+    let selected=vec!["~/Documents".into(),"~/config".into(),"~/link".into()];
+    validate_selected_sources(&selected,&d.0.join("destination"),&d.0).unwrap();
+    assert!(compute_snapshot(&link).is_ok());
+}
+#[test]
+fn preflight_rejects_unreadable_roots_overlap_and_duplicates() {
+    let d=fixture();let dir=d.0.join("Documents");fs::create_dir(&dir).unwrap();
+    let selected=vec!["~/Documents".into()];assert!(validate_selected_sources(&selected,&dir.join("backup"),&d.0).unwrap_err().contains("ineinander"));
+    let duplicate=vec!["~/Documents".into(),dir.to_str().unwrap().into()];assert!(validate_selected_sources(&duplicate,&d.0.join("dest"),&d.0).unwrap_err().contains("mehrfach"));
+    fs::set_permissions(&dir,fs::Permissions::from_mode(0)).unwrap();let result=validate_selected_sources(&selected,&d.0.join("dest"),&d.0);fs::set_permissions(&dir,fs::Permissions::from_mode(0o700)).unwrap();assert!(result.unwrap_err().contains("nicht lesbar"));
+}
