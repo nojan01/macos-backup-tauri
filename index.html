@@ -12,10 +12,10 @@
       <div class="header-top">
         <h1>🛡️ macOS Backup Suite <span data-app-version style="font-size:0.55em;opacity:0.6;font-weight:normal;vertical-align:middle"></span></h1>
         <div class="header-controls">
-          <button id="btn-help" class="icon-btn" title="Hilfe">❓</button>
-          <button id="btn-settings" class="icon-btn" title="Einstellungen">⚙️</button>
-          <button id="btn-language" class="icon-btn" title="Sprache wechseln">🌐</button>
-          <button id="btn-theme" class="icon-btn" title="Design wechseln">🌓</button>
+          <button id="btn-help" data-i18n-title="help" class="icon-btn" title="Hilfe">❓</button>
+          <button id="btn-settings" data-i18n-title="settings" class="icon-btn" title="Einstellungen">⚙️</button>
+          <button id="btn-language" data-i18n-title="changeLanguage" class="icon-btn" title="Sprache wechseln">🌐</button>
+          <button id="btn-theme" data-i18n-title="changeTheme" class="icon-btn" title="Design wechseln">🌓</button>
         </div>
       </div>
       <p id="status">Bereit</p>
@@ -36,14 +36,14 @@
               <select id="volume-select">
                 <option value="">Bitte wählen...</option>
               </select>
-              <button id="refresh-volumes" title="Volumes aktualisieren">🔄</button>
+              <button id="refresh-volumes" data-i18n-title="refreshVolumes" title="Volumes aktualisieren">🔄</button>
             </div>
           </div>
           <div class="form-group">
             <label>Zielverzeichnis:</label>
             <div class="input-group target-path-group">
               <span id="target-path-display" class="path-display">Nicht ausgewählt</span>
-              <button id="browse-target" title="Verzeichnis auswählen">📂</button>
+              <button id="browse-target" data-i18n-title="chooseDirectory" title="Verzeichnis auswählen">📂</button>
             </div>
           </div>
         </section>
@@ -55,7 +55,7 @@
           <div class="button-row">
             <button id="add-directory" class="btn-secondary">+ Ordner hinzufügen</button>
             <button id="add-user-directory" class="btn-secondary">👤 Benutzerordner...</button>
-            <button id="add-system-configs" class="btn-secondary" title="Wichtige Konfig-Dateien für schnelle Wiederherstellung">📦 System-Configs</button>
+            <button id="add-system-configs" data-i18n-title="systemConfigsHint" class="btn-secondary" title="Wichtige Konfig-Dateien für schnelle Wiederherstellung">📦 System-Configs</button>
             <button id="reset-directories" class="btn-secondary">↻ Zurücksetzen</button>
           </div>
         </section>
@@ -74,7 +74,8 @@
           <div class="progress-section">
             <button id="btn-cancel" class="btn-danger" style="display: none;">Abbrechen</button>
             <p id="progress-message">Bereit</p>
-            <div class="progress-bar">
+            <p id="progress-percentage" class="progress-percentage"></p>
+            <div class="progress-bar" aria-describedby="progress-message">
               <div id="progress-fill" class="progress-fill"></div>
             </div>
           </div>
@@ -112,7 +113,7 @@
     </main>
 
     <footer>
-      <p>macOS Backup Suite <span data-app-version></span> – Sichere Datensicherung für deinen Mac</p>
+      <p>macOS Backup Suite <span data-app-version></span> – <span data-i18n="footer">Sichere Datensicherung für deinen Mac</span></p>
     </footer>
   </div>
 
@@ -133,23 +134,23 @@
       </div>
       
       <div class="settings-section">
-        <h3>🍺 Software-Inventar</h3>
-        <label class="checkbox-label"><input type="checkbox" id="backup-homebrew" /><span>Homebrew-Paketliste sichern (Homebrew erforderlich)</span></label>
-        <label class="checkbox-label"><input type="checkbox" id="backup-mas" /><span>App-Store-Liste sichern (mas erforderlich)</span></label>
+        <h3>🍺 <span data-i18n="softwareInventory">Software-Inventar</span></h3>
+        <label class="checkbox-label"><input type="checkbox" id="backup-homebrew" /><span><span data-i18n="backupHomebrew">Homebrew-Paketliste sichern (Homebrew erforderlich)</span></span></label>
+        <label class="checkbox-label"><input type="checkbox" id="backup-mas" /><span><span data-i18n="backupMas">App-Store-Liste sichern (mas erforderlich)</span></span></label>
         <label class="checkbox-label">
           <input type="checkbox" id="backup-homebrew-cache" />
-          <span>Vollständigen Homebrew Download-Cache sichern</span>
+          <span><span data-i18n="backupHomebrewCache">Vollständigen Homebrew Download-Cache sichern</span></span>
         </label>
-        <p class="settings-hint">Ermöglicht Offline-Installationen beim Wiederherstellen</p>
+        <p class="settings-hint"><span data-i18n="homebrewCacheHint">Ermöglicht Offline-Installationen beim Wiederherstellen</span></p>
       </div>
       
       <div class="settings-section">
-        <h3>🧭 Safari-Einstellungen</h3>
+        <h3>🧭 <span data-i18n="safariSettings">Safari-Einstellungen</span></h3>
         <label class="checkbox-label">
           <input type="checkbox" id="backup-safari-settings" />
-          <span>Safari-Einstellungen sichern</span>
+          <span><span data-i18n="backupSafariSettings">Safari-Einstellungen sichern</span></span>
         </label>
-        <p class="settings-hint">Lesezeichen, Leseliste, Extensions, Top Sites</p>
+        <p class="settings-hint"><span data-i18n="safariSettingsHint">Lesezeichen, Leseliste, Extensions, Top Sites</span></p>
       </div>
       
       <div class="settings-section">
@@ -196,7 +197,7 @@
         <div class="restore-actions-top">
           <button id="restore-select-all" class="btn-small">Alle auswählen</button>
           <button id="restore-deselect-all" class="btn-small">Alle abwählen</button>
-          <button id="restore-quick" class="btn-small btn-quick" title="Installiert nur essentielle Pakete zuerst (git, vim, python, node, VS Code, iTerm2, etc.)">⚡ Quick-Restore</button>
+          <button id="restore-quick" data-i18n-title="quickRestoreHint" class="btn-small btn-quick" title="Installiert nur essentielle Pakete zuerst (git, vim, python, node, VS Code, iTerm2, etc.)">⚡ Quick-Restore</button>
         </div>
         
         <div id="restore-items-list" class="restore-items-list">
@@ -222,27 +223,27 @@
     <div id="test-restore-modal" class="restore-overlay" style="display: none;">
       <div class="modal-content restore-modal-content">
         <h2>🧪 Test-Restore</h2>
-        <p>Ein Element zerstörungsfrei in einen Test-Ordner extrahieren. Es werden weder bestehende Dateien überschrieben noch wird an die Originalpfade geschrieben.</p>
+        <p><span data-i18n="restoreTestDescription">Ein Element zerstörungsfrei in einen Test-Ordner extrahieren. Es werden weder bestehende Dateien überschrieben noch wird an die Originalpfade geschrieben.</span></p>
 
         <div class="form-group">
-          <label for="test-restore-item">Element aus Backup wählen:</label>
+          <label for="test-restore-item"><span data-i18n="restoreTestItem">Element aus Backup wählen:</span></label>
           <select id="test-restore-item">
-            <option value="">– Bitte wählen –</option>
+            <option value="" data-i18n="chooseItem">– Bitte wählen –</option>
           </select>
         </div>
 
         <div class="form-group">
-          <label>Zielordner für Test-Extraktion:</label>
+          <label><span data-i18n="restoreTestDestination">Zielordner für Test-Extraktion:</span></label>
           <div class="button-row">
-            <input type="text" id="test-restore-dest" readonly placeholder="(noch nicht gewählt)" style="flex:1;" />
-            <button id="test-restore-pick-dest" class="btn-secondary">📁 Ordner wählen…</button>
+            <input type="text" id="test-restore-dest" data-i18n-placeholder="notChosen" readonly placeholder="(noch nicht gewählt)" style="flex:1;" />
+            <button id="test-restore-pick-dest" class="btn-secondary"><span data-i18n="chooseFolder">📁 Ordner wählen…</span></button>
           </div>
-          <p class="hint">Im gewählten Ordner wird ein Unterordner <code>test-restore_&lt;timestamp&gt;_&lt;archiv&gt;/</code> angelegt.</p>
+          <p class="hint"><span data-i18n="restoreTestFolderHint">Im gewählten Ordner wird ein Unterordner <code>test-restore_&lt;timestamp&gt;_&lt;archiv&gt;/</code> angelegt.</span></p>
         </div>
 
         <div class="modal-buttons">
-          <button id="test-restore-cancel" class="btn-secondary">Abbrechen</button>
-          <button id="test-restore-start" class="btn-primary">🧪 Starten</button>
+          <button id="test-restore-cancel" data-i18n="cancel" class="btn-secondary">Abbrechen</button>
+          <button id="test-restore-start" class="btn-primary"><span data-i18n="start">🧪 Starten</span></button>
         </div>
       </div>
     </div>

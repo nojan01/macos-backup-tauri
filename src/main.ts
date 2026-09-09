@@ -1,3 +1,5 @@
+import { localizeMessage } from "./messages";
+import { ProgressIndicator } from "./progress-ui";
 import { renderCancelControl } from "./cancel-ui";
 import { createRestoreRow, restoreStatusKey } from "./restore-ui";
 import { getVersion } from "@tauri-apps/api/app";
@@ -103,6 +105,47 @@ interface AppLicenseEntry {
 // Translations
 const translations: Record<string, Record<string, string>> = {
   de: {
+    softwareInventory: "Software-Inventar",
+    backupHomebrew: "Homebrew-Paketliste sichern (Homebrew erforderlich)",
+    backupMas: "App-Store-Liste sichern (mas erforderlich)",
+    backupHomebrewCache: "Vollständigen Homebrew Download-Cache sichern",
+    homebrewCacheHint: "Ermöglicht Offline-Installationen beim Wiederherstellen",
+    safariSettings: "Safari-Einstellungen",
+    backupSafariSettings: "Safari-Einstellungen sichern",
+    safariSettingsHint: "Lesezeichen, Leseliste, Erweiterungen, Top Sites",
+    footer: "Sichere Datensicherung für deinen Mac",
+    changeLanguage: "Sprache wechseln",
+    changeTheme: "Design wechseln",
+    refreshVolumes: "Volumes aktualisieren",
+    chooseDirectory: "Verzeichnis auswählen",
+    quickRestoreHint: "Installiert zuerst essentielle Pakete (git, vim, python, node, VS Code, iTerm2 usw.)",
+    resumeTitle: "Backup fortsetzen?",
+    resume: "Fortsetzen",
+    startNew: "Neu starten",
+    resumePrompt: "Ein abgebrochenes Backup vom {0} wurde gefunden ({1} Einträge, {2} MB bereits gesichert).\n\nFortsetzen? (Nein = neues Backup starten)",
+    discardTitle: "Altes Backup verwerfen?",
+    discard: "Verwerfen",
+    keep: "Behalten",
+    discardPrompt: "Abgebrochenes Backup {0} verwerfen?",
+    resumeLog: "♻️ Setze Backup {0} fort ({1} Items bereits erledigt)",
+    restoreTestDescription: "Ein Element in einen Test-Ordner extrahieren. Bestehende Dateien und Originalpfade bleiben unverändert.",
+    restoreTestItem: "Element aus Backup wählen:",
+    restoreTestDestination: "Zielordner für Test-Extraktion:",
+    notChosen: "(noch nicht gewählt)",
+    chooseFolder: "Ordner wählen…",
+    restoreTestFolderHint: "Im gewählten Ordner wird ein Unterordner test-restore_<timestamp>_<archiv>/ angelegt.",
+    start: "Starten",
+    loadingItems: "– Wird geladen… –",
+    chooseItem: "– Bitte wählen –",
+    noTestItems: "⚠️ Kein test-restore-fähiges Item in diesem Backup gefunden.",
+    chooseTestDestination: "Zielordner für Test-Restore wählen",
+    selectOneItem: "⚠️ Bitte ein Element auswählen.",
+    selectDestination: "⚠️ Bitte einen Zielordner auswählen.",
+    missingBackupTarget: "⚠️ Backup oder Zielpfad fehlt.",
+    restoreTestRunning: "🧪 Test-Restore läuft...",
+    restoreTestComplete: "🧪 Test-Restore abgeschlossen",
+    restoreTestFailed: "❌ Test-Restore fehlgeschlagen",
+
     ready: "Bereit",
     backupTarget: "Backup-Ziel",
     volume: "Volume:",
@@ -144,6 +187,8 @@ const translations: Record<string, Record<string, string>> = {
     selectTargetFirst: "Bitte zuerst ein Ziel wählen",
     backupRunning: "Backup läuft...",
     startingBackup: "Starte Backup...",
+    progressUnknown: "Fortschritt wird ermittelt – Vorgang läuft",
+    progressOverall: "Gesamtfortschritt",
     backupComplete: "Backup abgeschlossen!",
     backupFailed: "Backup fehlgeschlagen!",
     backupCancelled: "Backup abgebrochen!",
@@ -292,6 +337,47 @@ const translations: Record<string, Record<string, string>> = {
     selectBackupForLicense: "Bitte wählen Sie zuerst ein Backup aus!",
   },
   en: {
+    softwareInventory: "Software inventory",
+    backupHomebrew: "Back up Homebrew package list (requires Homebrew)",
+    backupMas: "Back up App Store list (requires mas)",
+    backupHomebrewCache: "Back up the complete Homebrew download cache",
+    homebrewCacheHint: "Enables offline installations when restoring",
+    safariSettings: "Safari settings",
+    backupSafariSettings: "Back up Safari settings",
+    safariSettingsHint: "Bookmarks, Reading List, extensions, Top Sites",
+    footer: "Secure backups for your Mac",
+    changeLanguage: "Change language",
+    changeTheme: "Change theme",
+    refreshVolumes: "Refresh volumes",
+    chooseDirectory: "Choose directory",
+    quickRestoreHint: "Installs essential packages first (git, vim, python, node, VS Code, iTerm2, etc.)",
+    resumeTitle: "Resume backup?",
+    resume: "Resume",
+    startNew: "Start new",
+    resumePrompt: "An interrupted backup from {0} was found ({1} items, {2} MB already backed up).\n\nResume? (No = start a new backup)",
+    discardTitle: "Discard old backup?",
+    discard: "Discard",
+    keep: "Keep",
+    discardPrompt: "Discard interrupted backup {0}?",
+    resumeLog: "♻️ Resuming backup {0} ({1} items already completed)",
+    restoreTestDescription: "Extract one item to a test folder. Existing files and original paths remain unchanged.",
+    restoreTestItem: "Select backup item:",
+    restoreTestDestination: "Destination for test extraction:",
+    notChosen: "(not selected yet)",
+    chooseFolder: "Choose folder…",
+    restoreTestFolderHint: "A test-restore_<timestamp>_<archive>/ subfolder is created in the selected folder.",
+    start: "Start",
+    loadingItems: "– Loading… –",
+    chooseItem: "– Select an item –",
+    noTestItems: "⚠️ No item suitable for a test restore was found in this backup.",
+    chooseTestDestination: "Choose test restore destination",
+    selectOneItem: "⚠️ Please select an item.",
+    selectDestination: "⚠️ Please select a destination folder.",
+    missingBackupTarget: "⚠️ Backup or destination path is missing.",
+    restoreTestRunning: "🧪 Test restore running...",
+    restoreTestComplete: "🧪 Test restore completed",
+    restoreTestFailed: "❌ Test restore failed",
+
     ready: "Ready",
     backupTarget: "Backup Target",
     volume: "Volume:",
@@ -333,6 +419,8 @@ const translations: Record<string, Record<string, string>> = {
     selectTargetFirst: "Please select a target first",
     backupRunning: "Backup running...",
     startingBackup: "Starting backup...",
+    progressUnknown: "Determining progress – operation running",
+    progressOverall: "Overall progress",
     backupComplete: "Backup complete!",
     backupFailed: "Backup failed!",
     backupCancelled: "Backup cancelled!",
@@ -485,6 +573,10 @@ const translations: Record<string, Record<string, string>> = {
 // Current language
 let currentLanguage = "de";
 
+function tf(key: string, ...values: (string | number)[]): string {
+  return t(key).replace(/\{(\d+)\}/g, (_, n) => String(values[Number(n)]));
+}
+
 function t(key: string): string {
   return translations[currentLanguage]?.[key] || translations.de[key] || key;
 }
@@ -524,6 +616,7 @@ const restoreCancel = document.getElementById("restore-cancel") as HTMLButtonEle
 const restoreStart = document.getElementById("restore-start") as HTMLButtonElement;
 const progressMessage = document.getElementById("progress-message") as HTMLParagraphElement;
 const progressFill = document.getElementById("progress-fill") as HTMLDivElement;
+const progressIndicator = new ProgressIndicator(progressFill, progressFill.parentElement!, document.getElementById("progress-percentage")!, () => ({unknown: t("progressUnknown"), overall: t("progressOverall")}));
 const logOutput = document.getElementById("log-output") as HTMLPreElement;
 const copyLogBtn = document.getElementById("copy-log") as HTMLButtonElement;
 const saveLogBtn = document.getElementById("save-log") as HTMLButtonElement;
@@ -750,7 +843,13 @@ function applyLanguage(lang: string): void {
   currentLanguage = lang;
   config.language = lang;
   btnLanguage.textContent = lang === "de" ? "🇩🇪" : "🇬🇧";
+  document.documentElement.lang = lang;
   updateUITranslations();
+  progressIndicator.refresh();
+  setProgressMessage(rawProgress);
+  setStatusMessage(rawStatus);
+  renderLog();
+  if (settingsDialog.open) void refreshAppSettingsPreview();
 }
 
 function toggleLanguage(): void {
@@ -761,12 +860,18 @@ function toggleLanguage(): void {
 }
 
 function updateUITranslations(): void {
+  for (const attribute of ["title", "placeholder"]) {
+    document.querySelectorAll(`[data-i18n-${attribute}]`).forEach(el => {
+      el.setAttribute(attribute, t(el.getAttribute(`data-i18n-${attribute}`)!));
+    });
+  }
+
   document.querySelectorAll("[data-i18n]").forEach((el) => {
     const key = el.getAttribute("data-i18n")!;
     el.textContent = t(key);
   });
   
-  statusEl.textContent = t("ready");
+
   
   const sections = document.querySelectorAll(".section h2");
   const sectionKeys = ["backupTarget", "foldersToBackup", "actions", "existingBackups", "protocol"];
@@ -808,9 +913,32 @@ function updateUITranslations(): void {
 }
 
 // Logging
+let rawProgress = "Bereit";
+let rawStatus = "Bereit";
+const logEntries: Array<{time: Date; message: string}> = [];
+function displayMessage(message: string): string {
+  const source = currentLanguage === "en" ? "de" : "en";
+  for (const [key,value] of Object.entries(translations[source])) {
+    if (message === value) return t(key);
+  }
+  return localizeMessage(message, currentLanguage);
+}
+function setProgressMessage(message: string): void {
+  rawProgress = message;
+  progressMessage.textContent = displayMessage(message);
+}
+function setStatusMessage(message: string): void {
+  rawStatus = message;
+  statusEl.textContent = displayMessage(message);
+}
+function renderLog(): void {
+  logOutput.textContent = logEntries.map(entry => `[${entry.time.toLocaleTimeString(currentLanguage === "de" ? "de-DE" : "en-US")}] ${displayMessage(entry.message)}\n`).join("");
+  logOutput.scrollTop = logOutput.scrollHeight;
+}
 function log(message: string): void {
-  const timestamp = new Date().toLocaleTimeString(currentLanguage === "de" ? "de-DE" : "en-US");
-  logOutput.textContent += `[${timestamp}] ${message}\n`;
+  const entry = {time: new Date(), message};
+  logEntries.push(entry);
+  logOutput.appendChild(document.createTextNode(`[${entry.time.toLocaleTimeString(currentLanguage === "de" ? "de-DE" : "en-US")}] ${displayMessage(message)}\n`));
   logOutput.scrollTop = logOutput.scrollHeight;
 }
 
@@ -1231,7 +1359,7 @@ async function startBackup(): Promise<void> {
   await checkFullDiskAccess();
   if (!hasFDA) {
     log(t("fullDiskAccessMissing"));
-    statusEl.textContent = t("fullDiskAccessRequired");
+    setStatusMessage(t("fullDiskAccessRequired"));
     return;
   }
 
@@ -1253,26 +1381,24 @@ async function startBackup(): Promise<void> {
     if (resumable && resumable.length > 0) {
       const latest = resumable[0];
       const sizeMB = (latest.completed_size_bytes / (1024 * 1024)).toFixed(1);
-      const msg = `Ein abgebrochenes Backup vom ${latest.timestamp} wurde gefunden `
-        + `(${latest.completed_items} Einträge, ${sizeMB} MB bereits gesichert).\n\n`
-        + `Fortsetzen? (Nein = neues Backup starten)`;
+      const msg = tf("resumePrompt", latest.timestamp, latest.completed_items, sizeMB);
       const shouldResume = await ask(msg, {
-        title: "Backup fortsetzen?",
+        title: t("resumeTitle"),
         kind: "info",
-        okLabel: "Fortsetzen",
-        cancelLabel: "Neu starten",
+        okLabel: t("resume"),
+        cancelLabel: t("startNew"),
       });
       if (shouldResume) {
         resumeTimestamp = latest.timestamp;
-        log(`♻️ Setze Backup ${latest.timestamp} fort (${latest.completed_items} Items bereits erledigt)`);
+        log(tf("resumeLog", latest.timestamp, latest.completed_items));
       } else {
         const shouldDiscard = await ask(
-          `Abgebrochenes Backup ${latest.timestamp} verwerfen?`,
+          tf("discardPrompt", latest.timestamp),
           {
-            title: "Altes Backup verwerfen?",
+            title: t("discardTitle"),
             kind: "warning",
-            okLabel: "Verwerfen",
-            cancelLabel: "Behalten",
+            okLabel: t("discard"),
+            cancelLabel: t("keep"),
           }
         );
         if (shouldDiscard) {
@@ -1298,9 +1424,9 @@ async function startBackup(): Promise<void> {
   setOperationControls(true);
   btnBackup.disabled = true;
   btnBackup.style.display = "none";
-  statusEl.textContent = t("backupRunning");
-  progressMessage.textContent = t("startingBackup");
-  progressFill.style.width = "0%";
+  setStatusMessage(t("backupRunning"));
+  setProgressMessage(t("startingBackup"));
+  progressIndicator.reset();
   
   try {
     await invoke("create_backup", {
@@ -1310,22 +1436,22 @@ async function startBackup(): Promise<void> {
       resumeTimestamp: resumeTimestamp,
     });
     
-    if (cancelRequested) statusEl.textContent = t("backupCancelled");
+    if (cancelRequested) setStatusMessage(t("backupCancelled"));
     if (backupInProgress && !cancelRequested) {
       await sendNotification({
         title: t("backupNotification"),
         body: t("backupNotificationBody"),
       });
       
-      statusEl.textContent = t("backupComplete");
+      setStatusMessage(t("backupComplete"));
     }
     await loadBackups();
   } catch (e) {
     if (backupInProgress && !cancelRequested) {
       log(`${t("backupFailed")} ${e}`);
-      statusEl.textContent = t("backupFailed");
+      setStatusMessage(t("backupFailed"));
     } else {
-      statusEl.textContent = t("backupCancelled");
+      setStatusMessage(t("backupCancelled"));
     }
   } finally {
     backupInProgress = false;
@@ -1341,8 +1467,8 @@ async function cancelOperation(): Promise<void> {
   if (!operationInProgress || cancelRequested) return;
   cancelRequested = true;
   renderCancelControl(btnCancel, true, true, {cancel: t("cancel"), cancelling: t("cancelling")});
-  statusEl.textContent = t("cancelling");
-  progressMessage.textContent = t("cancelling");
+  setStatusMessage(t("cancelling"));
+  setProgressMessage(t("cancelling"));
   try {
     await invoke("cancel_operation");
     // Keep controls locked until the active invocation has actually returned.
@@ -1362,7 +1488,7 @@ async function cancelBackup(): Promise<void> {
 // Event listeners for progress updates from backend
 async function setupEventListeners(): Promise<void> {
   await listen<string>("backup-activity", (event) => {
-    if (!cancelRequested) progressMessage.textContent = event.payload;
+    if (operationInProgress && !cancelRequested) setProgressMessage(event.payload);
   });
   await listen<string>("backup-log", (event) => {
     log(event.payload);
@@ -1370,8 +1496,8 @@ async function setupEventListeners(): Promise<void> {
   
   await listen<{ progress: number; message: string }>("backup-progress", (event) => {
     if (cancelRequested) return;
-    progressMessage.textContent = event.payload.message;
-    progressFill.style.width = `${event.payload.progress}%`;
+    setProgressMessage(event.payload.message);
+    progressIndicator.update(event.payload.progress);
   });
 }
 
@@ -1583,6 +1709,7 @@ restoreCancel.addEventListener("click", () => {
 
 function setOperationControls(busy: boolean): void {
   if (!busy) cancelRequested = false;
+  progressIndicator.setBusy(busy);
   renderCancelControl(btnCancel, busy, cancelRequested, {cancel: t("cancel"), cancelling: t("cancelling")});
   for (const button of [btnBackup, btnRestore, btnRestoreTest, btnTestRestore, btnDeleteBackup, restoreStart, restoreQuickBtn, testRestoreStart]) {
     if (button) button.disabled = busy;
@@ -1615,9 +1742,9 @@ if (restoreQuickBtn) {
     
     restoreModal.style.display = "none";
     
-    progressFill.style.width = "0%";
+    progressIndicator.reset();
     progressFill.classList.add("animating");
-    progressMessage.textContent = `⚡ ${t("quickRestoreProgress")}`;
+    setProgressMessage(`⚡ ${t("quickRestoreProgress")}`);
     
     log(`⚡ ${t("quickRestoreStarted")}`);
     log(`   ${t("quickRestoreInstalling")}`);
@@ -1639,13 +1766,13 @@ if (restoreQuickBtn) {
       }
       
       progressFill.classList.remove("animating");
-      progressFill.style.width = "100%";
-      progressMessage.textContent = t(restoreStatusKey(result));
+      progressIndicator.update(100);
+      setProgressMessage(t(restoreStatusKey(result)));
       for (const error of result.errors) log(`❌ ${error}`);
     } catch (e) {
       log(`❌ ${t("quickRestoreError")} ${e}`);
       progressFill.classList.remove("animating");
-      progressMessage.textContent = t("quickRestoreErrorProgress");
+      setProgressMessage(t("quickRestoreErrorProgress"));
     } finally {
       endRestore();
     }
@@ -1670,9 +1797,9 @@ restoreStart.addEventListener("click", async () => {
   restoreModal.style.display = "none";
   
   // Reset progress bar and start animation
-  progressFill.style.width = "0%";
+  progressIndicator.reset();
   progressFill.classList.add("animating");
-  progressMessage.textContent = t("preparingRestore");
+  setProgressMessage(t("preparingRestore"));
   
   log(`🔄 ${t("restoring")} ${selectedItems.length} ${t("items")}...`);
   
@@ -1697,12 +1824,12 @@ restoreStart.addEventListener("click", async () => {
       }
     }
     progressFill.classList.remove("animating");
-    progressFill.style.width = "100%";
-    progressMessage.textContent = t(restoreStatusKey(result));
+    progressIndicator.update(100);
+    setProgressMessage(t(restoreStatusKey(result)));
   } catch (e) {
     log(`❌ ${t("restoreError")} ${e}`);
     progressFill.classList.remove("animating");
-    progressMessage.textContent = t("restoreErrorProgress");
+    setProgressMessage(t("restoreErrorProgress"));
   } finally {
     endRestore();
   }
@@ -1714,8 +1841,8 @@ listen("restore-log", (event: { payload: string }) => {
 
 listen("restore-progress", (event: { payload: { progress: number; message: string } }) => {
   if (cancelRequested) return;
-  if (typeof event.payload.progress === "number") progressFill.style.width = `${event.payload.progress}%`;
-  progressMessage.textContent = event.payload.message;
+  if (typeof event.payload.progress === "number") progressIndicator.update(event.payload.progress);
+  setProgressMessage(event.payload.message);
 });
 
 btnRestoreTest.addEventListener("click", async () => {
@@ -1746,9 +1873,9 @@ btnRestoreTest.addEventListener("click", async () => {
   btnRestoreTest.disabled = true;
   btnBackup.disabled = true;
   btnBackup.style.display = "none";
-  statusEl.textContent = t("verifyRunning");
-  progressMessage.textContent = t("verifyStarted");
-  progressFill.style.width = "0%";
+  setStatusMessage(t("verifyRunning"));
+  setProgressMessage(t("verifyStarted"));
+  progressIndicator.reset();
   
   log(`${t("verifyStarted")} ${timestamp}...`);
   
@@ -1764,11 +1891,11 @@ btnRestoreTest.addEventListener("click", async () => {
       timestamp: timestamp
     });
     
-    if (cancelRequested) statusEl.textContent = t("verifyCancelled");
+    if (cancelRequested) setStatusMessage(t("verifyCancelled"));
     if (verifyInProgress && !cancelRequested) {
       if (result.success) {
         log(`✅ ${result.message}`);
-        statusEl.textContent = result.message;
+        setStatusMessage(result.message);
         const option = Array.from(backupSelect.options).find(o => o.value === timestamp);
         if (option) option.textContent = `${option.dataset.label || formatTimestamp(timestamp)} [✓]`;
       } else {
@@ -1776,16 +1903,16 @@ btnRestoreTest.addEventListener("click", async () => {
         for (const failure of result.failed_files) {
           log(`  - ${failure}`);
         }
-        statusEl.textContent = result.message;
+        setStatusMessage(result.message);
       }
     }
   } catch (e) {
     if (verifyInProgress && !cancelRequested) {
       log(`${t("backupFailed")} ${e}`);
-      statusEl.textContent = t("backupFailed");
+      setStatusMessage(t("backupFailed"));
     } else {
       // Cancelled
-      statusEl.textContent = t("verifyCancelled");
+      setStatusMessage(t("verifyCancelled"));
     }
   } finally {
     verifyInProgress = false;
@@ -1794,7 +1921,7 @@ btnRestoreTest.addEventListener("click", async () => {
     btnRestoreTest.disabled = false;
     btnBackup.disabled = false;
     btnBackup.style.display = "block";
-    progressMessage.textContent = t("ready");
+    setProgressMessage(t("ready"));
   }
 });
 
@@ -2201,6 +2328,7 @@ saveLogBtn.addEventListener("click", async () => {
 });
 
 clearLogBtn.addEventListener("click", () => {
+  logEntries.length = 0;
   logOutput.textContent = "";
   log(t("logCleared"));
 });
@@ -2492,7 +2620,7 @@ async function openTestRestoreModal(): Promise<void> {
   }
 
   // Items des Backups laden
-  testRestoreItemSelect.innerHTML = '<option value="">– Wird geladen... –</option>';
+  testRestoreItemSelect.innerHTML = `<option value="">${t("loadingItems")}</option>`;
   testRestoreDestInput.value = "";
   testRestoreModal.style.display = "flex";
 
@@ -2502,7 +2630,7 @@ async function openTestRestoreModal(): Promise<void> {
       timestamp,
     });
 
-    testRestoreItemSelect.innerHTML = '<option value="">– Bitte wählen –</option>';
+    testRestoreItemSelect.innerHTML = `<option value="">${t("chooseItem")}</option>`;
     for (const it of details.items) {
       if (TEST_RESTORE_UNSUPPORTED.has(it.path)) continue;
       const opt = document.createElement("option");
@@ -2512,7 +2640,7 @@ async function openTestRestoreModal(): Promise<void> {
       testRestoreItemSelect.appendChild(opt);
     }
     if (testRestoreItemSelect.options.length <= 1) {
-      log("⚠️ Kein test-restore-fähiges Item in diesem Backup gefunden.");
+      log(t("noTestItems"));
     }
   } catch (e) {
     log(`❌ Konnte Backup-Inhalt nicht lesen: ${e}`);
@@ -2533,7 +2661,7 @@ testRestorePickDest.addEventListener("click", async () => {
     const selected = await open({
       directory: true,
       multiple: false,
-      title: "Zielordner für Test-Restore wählen",
+      title: t("chooseTestDestination"),
     });
     if (typeof selected === "string" && selected.length > 0) {
       testRestoreDestInput.value = selected;
@@ -2550,24 +2678,24 @@ testRestoreStart.addEventListener("click", async () => {
   const targetPath = getFullTargetPath();
 
   if (!itemPath) {
-    log("⚠️ Bitte ein Element auswählen.");
+    log(t("selectOneItem"));
     return;
   }
   if (!destDir) {
-    log("⚠️ Bitte einen Zielordner auswählen.");
+    log(t("selectDestination"));
     return;
   }
   if (!timestamp || !targetPath) {
-    log("⚠️ Backup oder Zielpfad fehlt.");
+    log(t("missingBackupTarget"));
     return;
   }
 
   testRestoreModal.style.display = "none";
 
   // Progress-UI vorbereiten (gleiche Bar wie Restore)
-  progressFill.style.width = "0%";
+  progressIndicator.reset();
   progressFill.classList.add("animating");
-  progressMessage.textContent = "🧪 Test-Restore läuft...";
+  setProgressMessage(t("restoreTestRunning"));
   log(`🧪 Test-Restore: ${itemPath} -> ${destDir}`);
 
   if (!beginRestore()) return;
@@ -2579,13 +2707,13 @@ testRestoreStart.addEventListener("click", async () => {
       destDir,
     });
     progressFill.classList.remove("animating");
-    progressFill.style.width = "100%";
-    progressMessage.textContent = "🧪 Test-Restore abgeschlossen";
+    progressIndicator.update(100);
+    setProgressMessage(t("restoreTestComplete"));
     log(`✅ Test-Restore OK: ${result.file_count} Dateien, ${formatBytesShort(result.bytes_extracted)}`);
     log(`   📁 Entpackt nach: ${result.extracted_path}`);
   } catch (e) {
     progressFill.classList.remove("animating");
-    progressMessage.textContent = "❌ Test-Restore fehlgeschlagen";
+    setProgressMessage(t("restoreTestFailed"));
     log(`❌ Test-Restore Fehler: ${e}`);
   } finally {
     endRestore();

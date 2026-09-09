@@ -67,27 +67,66 @@ Essentielle Tools in unter 10 Minuten:
   versteckter Dateien, `Logs`, Caches und `node_modules`. Es gibt keine stillen Ausschlüsse.
   Die frühere Umgebungsvariable `BACKUP_EXTRA_EXCLUDES` führt bei gesetztem Wert zu einer
   Fehlermeldung, damit eine alte Konfiguration keine Daten unbemerkt auslässt.
+- Verweigert macOS einen Dateizugriff bei gesperrtem Bildschirm, pausiert die
+  Sicherung mit einer sichtbaren Entsperr-Meldung. Nach dem Entsperren wird derselbe
+  Zugriff erneut versucht. Abbrechen bleibt wirksam; fehlt die Berechtigung auch
+  danach, wird ein Fehler gemeldet. Die App ändert weder Sperre noch Dateirechte.
+- Vor den vollständigen Inhaltsprüfungen werden alle ausgewählten Quellen rekursiv
+  auf Zugriff geprüft (Dateistatus, ein Byte Leseprobe, Attribute und ACLs). Probleme
+  werden gesammelt gemeldet, mit bis zu 100 konkreten Pfaden. Die Vorprüfung ist
+  abbrechbar und ersetzt weder vollständiges Einlesen noch Rückleseprüfung.
+- Wird eine Datei genau während des Einlesens ersetzt oder geändert, beginnt das
+  Einlesen dieser Datei bis zu dreimal neu. Dauerhafte Änderungen und Zugriffsfehler
+  bleiben Fehler; keine ausgewählten Dateidaten werden deswegen übersprungen.
 - Inkrementelle Vergleiche lesen SHA-256-Prüfsummen der Dateiinhalte sowie Dateityp,
   nanosekundengenaue Zeitstempel, Rechte, Eigentümer, Dateiflags, ACLs, erweiterte
   Attribute und Symlink-Ziele. Auch leere Verzeichnisse werden erfasst.
   Alte Manifeste mit ausschließlich Größe und Sekundenzeitstempel werden nicht wiederverwendet.
+- Dateiquellen werden aus einem neuen, schreibgeschützten APFS-Snapshot gesichert.
+  Vorprüfung, Archivierung, Rückleseprüfung und Abschlussprüfung lesen denselben
+  eingefrorenen Stand. Das Öffnen oder Bearbeiten der Originale während der Sicherung
+  löst deshalb keinen Archivfehler aus; auch Nutzungsattribute bleiben auf dem Stand
+  des Snapshots. Inhalts-, Attribut- und Flag-Prüfungen werden nicht abgeschwächt.
+  Die Suite verwendet `tmutil localsnapshot` und hängt den bestätigten Snapshot privat
+  mit `mount_apfs` nur lesbar ein. Beschreibbare Quellvolumes müssen APFS verwenden
+  und von Time Machine für lokale Snapshots berücksichtigt werden. Nicht unterstützte
+  Quellen und verschachtelte Volume-Einhängepunkte werden vor dem Archivieren gemeldet;
+  es gibt keinen stillen Rückfall auf einen veränderlichen Live-Stand.
+  Nach Abschluss oder Abbruch wird die private Ansicht ausgehängt. Den freigebbaren
+  lokalen Snapshot verwaltet Time Machine; bestehende Snapshots werden nicht gelöscht.
+  `source-snapshots.json` dokumentiert den Dateistand und die ursprünglichen Quellpfade.
 - Einzeldateien und Ordner werden mit macOS-System-tar im PAX-Format archiviert.
   Jedes neue oder wiederverwendete Datenarchiv wird probeweise in ein privates lokales
   Verzeichnis entpackt. Inhalte, Rechte, ACLs, erweiterte Attribute, Zeitstempel und
   Verknüpfungen werden mit der Quelle verglichen. Die Rückleseprüfung benötigt lokalen
   temporären Speicher für jeweils einen entpackten Quellordner; der Platz wird geprüft.
+- Dateiflags werden zusätzlich als versionierte Metadaten im Archiv gespeichert,
+  da System-tar unter anderem `UF_TRACKED` nicht serialisiert. Die SHA-256-Prüfsumme
+  des Archivs umfasst diese Metadaten. Normale Wiederherstellung, Test-Restore und
+  Rückleseprüfung setzen die Flags aus dem Archiv; das Original wird nicht benötigt.
+  Die Rückleseprüfung verlangt weiterhin identische Flags. Kernelverwaltete Zustände
+  wie Dateisystemkompression werden nicht durch bloßes Setzen eines Bits vorgetäuscht.
+  Unveränderlichkeits- und Append-Schutz der privaten Zwischenkopie werden für das
+  Verschieben gelöst und am endgültigen Restore-Ziel wieder gesetzt.
+  Ältere Archive bleiben lesbar. Beim manuellen Entpacken nur mit System-tar bleiben
+  dessen Einschränkungen bestehen; für die zusätzlichen Flags ist mindestens Suite v1.2.17 nötig.
 - Das von macOS beim Kopieren neu vergebene Herkunftsattribut `com.apple.provenance`
   wird weiter archiviert und bei Quelländerungen berücksichtigt. Ausschließlich beim
   Vergleich der entpackten Kopie darf es abweichen. Dateiinhalte, ACLs, Resource Forks
-  und alle übrigen erweiterten Attribute werden unverändert geprüft. Fehlermeldungen
+  und alle übrigen erweiterten Attribute werden unverändert geprüft. Auch den Wert
+  von `com.apple.quarantine` vergibt macOS beim Entpacken neu (mit anderem Zeitstempel
+  und Herkunftsprogramm); er bleibt im Archiv erhalten. Beim Rücklesen muss das
+  Quarantäneattribut weiterhin vorhanden sein, sein neu vergebener Wert darf abweichen.
+  Der Quellvergleich berücksichtigt weiterhin den vollständigen ursprünglichen Wert.
+  Fehlermeldungen
   nennen den betroffenen Pfad und das abweichende Merkmal, auch beim obersten Ordner.
 - Archivieren, Strukturprüfung, Entpacken einschließlich macOS-Dateiattributen,
   Rücklesevergleich, Prüfsummen und Aufräumen haben eigene Statusmeldungen. Eine
   sekündliche Laufzeitanzeige bleibt auch bei stillen Unterprozessen aktiv; verstrichene
   Zeit wird nicht als gemessener Datei- oder Prozentfortschritt ausgegeben.
-- Die Archivierung nutzt das bereits vollständig gelesene Quellmanifest. Redundante
+- Die Archivierung nutzt das bereits vollständig gelesene Manifest des APFS-Snapshots. Redundante
   Quellscans und der doppelte Archivdurchlauf vor derselben Rücklese-Extraktion entfallen.
-  Der vollständige Vergleich mit dem entpackten Archiv, die frische Quellprüfung danach
+  Der vollständige Vergleich mit dem entpackten Archiv, die frische Prüfung des Snapshots danach
   und die globale Abschlussprüfung bleiben erhalten.
 - Fehlende oder unlesbare Quellen, Lese-/Schreibfehler und nicht unterstützte
   Spezialdateien wie FIFOs/Gerätedateien brechen die Sicherung ab. Echte Unix-Sockets
@@ -161,7 +200,7 @@ Sicherungsliste ein.
 
 ### Download
 Laden Sie die neueste Version herunter:
-➡️ **[macOS Backup Suite v1.2.15](https://github.com/nojan01/macos-backup-tauri/releases/latest)**
+➡️ **[macOS Backup Suite v1.2.22](https://github.com/nojan01/macos-backup-tauri/releases/latest)**
 
 ### Voraussetzungen
 - macOS 12.0 oder neuer
@@ -253,6 +292,20 @@ MIT License – siehe [LICENSE](LICENSE)
 </p>
 
 
+## Software-Inventare ab 1.2.21
+
+Homebrew-Bundle-Einträge für Cargo, npm, Go, uv und krew sowie die plattformspezifischen Flatpak-/WinGet-Einträge werden als solche erkannt. Zusätzliche Pakete werden beim Restore über einen aus validierten Literalen neu erzeugten Brewfile installiert; Ruby-Code aus dem gesicherten Inventar wird nicht ausgeführt. Quell-URLs von Cargo/uv bleiben erhalten. Die Ausgabe von `mas list` wird neben älteren MAS-Brewfile-Einträgen unterstützt. Alle ausgewählten Software-Inventare werden vor Snapshot, Datei-Scan und Archivierung validiert.
+
+## Fortschrittsanzeige ab 1.2.20
+
+Während einer Vorbereitung ohne bekannte Gesamtmenge bleibt der Balken als Aktivitätsanzeige sichtbar. Sobald Prozentwerte vorliegen, werden sie als Zahl und Balken angezeigt. Phasenwechsel setzen den Fortschritt nicht zurück; bei Ende oder Abbruch stoppt die Animation.
+
+## Archivformat ab 1.2.19
+
+Metadaten werden in PAX-Headern gespeichert. Echte Dateien und Verzeichnisse mit `._` im Namen bleiben eigenständige Einträge; sie werden nicht als AppleDouble-Metadaten verbraucht. Erweiterte Attribute einschließlich Resource Forks, ACLs und Dateiflags werden weiterhin gesichert und beim Rücklesen geprüft. Ein Formatmerkmal im internen Metadateneintrag steuert das Entpacken; vorhandene Archive ohne dieses Merkmal verwenden weiterhin die bisherige AppleDouble-Wiederherstellung.
+
+Beim Fortsetzen werden vorhandene, bereits rückgelesene Archive nur übernommen, wenn das vollständige Quellmanifest zum neuen APFS-Snapshot passt und die Archiv-Prüfsumme stimmt. Veränderte Quellen und beschädigte Archive werden neu erstellt. Erfolgreiche Zwischenstände bleiben bei einem weiteren Abbruch erhalten.
+
 ## Restore-Verhalten und Tests
 
 - Ohne **Überschreiben** werden vorhandene Ordner zusammengeführt: fehlende Dateien kommen hinzu, vorhandene Dateien und Links bleiben erhalten. Mit Überschreiben werden einzelne Dateien/Links atomar ersetzt. Konflikte zwischen einer Datei und einem Verzeichnis werden als Fehler gemeldet; Verzeichnisbäume werden nicht automatisch gelöscht.
@@ -275,3 +328,13 @@ cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
 Die Rust-Tests prüfen unter anderem Archivkollisionen, SHA-256, korrupte Archive, Datei-Konflikte, Safari/Cache, Symlinks, alte Kompressionsformate und Installationsfehler. Die UI-Tests prüfen die sichere Verarbeitung von Dateinamen und die Ergebnisanzeige. Ein vollständiger macOS-Restore einschließlich Full Disk Access und echter App-Store-/Homebrew-Installationen muss zusätzlich in einem separaten Testkonto oder einer VM geprüft werden.
+
+## Sprache und platzsparende Rückleseprüfung (1.2.22)
+
+Einstellungen, Dialoge, Hilfetexte, Fußzeile und laufende Prüfmeldungen folgen der ausgewählten Sprache. Beim Sprachwechsel bleiben der laufende Status und der Prozentwert erhalten; auch das Protokoll wird mit seinen ursprünglichen Zeitpunkten neu dargestellt. Dateipfade und externe Werkzeugausgaben werden nicht übersetzt.
+
+Die automatische Archivprüfung entpackt gewöhnliche Dateiinhalte nicht mehr vollständig auf die interne SSD. Alle Bytes werden aus dem Archiv gelesen und mit SHA-256 gegen das Quellmanifest geprüft. Kleine Metadatenproben prüfen weiterhin die native Wiederherstellung von ACLs, xattrs, Dateiflags, Zeitstempeln sowie symbolischen und harten Links. Für das macOS-Kompressionsflag wird eine kleine komprimierbare Probe verwendet; der Inhaltsvergleich verwendet weiterhin den vollständigen Original-Datenstrom. Ältere AppleDouble-Metadaten bleiben lesbar.
+
+Der temporäre Metadatenstrom ist auf 512 MiB pro Archiv begrenzt; vor dem Entpacken werden zusätzlicher Platz für Dateisystemeinträge und eine Reserve von 2 GiB geprüft. Große gewöhnliche Dateien und virtuelle Festplatten benötigen daher keine zweite vollständige temporäre Kopie. Außergewöhnlich große Metadaten führen zu einer ausdrücklichen Platz-/Limitmeldung, nicht zum stillen Weglassen von Attributen. Ein vom Benutzer gestarteter **Test-Restore** schreibt weiterhin das gewählte Element vollständig in dessen Test-Zielordner.
+
+Sparse-Dateien werden als normale logische PAX-Daten gespeichert (Nullbereiche werden komprimiert) und beim Wiederherstellen wieder platzsparend mit Sparse-Dateien geschrieben.

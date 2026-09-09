@@ -573,6 +573,7 @@ fn actual_directory_root_metadata_roundtrip() {
 #[test]
 #[ignore = "manual read-only real-source probe; requires BACKUP_PROBE_SOURCE"]
 fn actual_source_backup_finalize_and_test_restore() {
+    if std::env::var("BACKUP_PROBE_WAIT_FOR_UNLOCK").as_deref() == Ok("1") { crate::protected_access::enable_real_lock_state(); }
     let source=PathBuf::from(std::env::var("BACKUP_PROBE_SOURCE").expect("Explicit source required"));
     let d=fixture();let backup=d.0.join("backup");fs::create_dir(&backup).unwrap();
     let expected=compute_snapshot(&source).unwrap();let bytes=expected.iter().map(|e|e.s).sum();
@@ -586,4 +587,397 @@ fn actual_source_backup_finalize_and_test_restore() {
     assert_eq!(restored.len(),expected.len());
     for (actual,original) in restored.iter().zip(&expected) {assert!(readback_differences(actual,original).is_empty());}
     println!("ACTUAL_SOURCE_BACKUP_AND_RESTORE passed: {} files, {} bytes",result.file_count,result.bytes_extracted);
+}
+
+#[test]
+fn access_preflight_collects_nested_denials_across_sources() {
+    let d = fixture();
+    let one = d.0.join("first"); let two = d.0.join("second");
+    fs::create_dir_all(one.join("nested")).unwrap(); fs::create_dir(&two).unwrap();
+    let blocked = [one.join("nested/unreadable"), two.join("another")];
+    for p in &blocked { fs::write(p,b"private").unwrap(); fs::set_permissions(p,fs::Permissions::from_mode(0)).unwrap(); }
+    let result = validate_source_access(&[one.to_str().unwrap().into(),two.to_str().unwrap().into()], &d.0);
+    for p in &blocked { fs::set_permissions(p,fs::Permissions::from_mode(0o600)).unwrap(); }
+    let error = result.unwrap_err();
+    for p in &blocked { assert!(error.contains(p.to_str().unwrap()),"{error}"); }
+    assert!(error.contains("2 Problem(e)"));
+    assert!(error.contains("Datei öffnen"));
+}
+
+#[test]
+fn access_preflight_preserves_links_and_runtime_socket_policy() {
+    use std::os::unix::net::UnixListener;
+    let d = fixture(); let source=d.0.join("source");fs::create_dir(&source).unwrap();
+    let locked=d.0.join("locked"); fs::write(&locked,b"private").unwrap(); fs::set_permissions(&locked,fs::Permissions::from_mode(0)).unwrap();
+    symlink(&locked,source.join("link")).unwrap();symlink("missing",source.join("dangling")).unwrap();
+    let socket=source.join("s");let _listener=UnixListener::bind(&socket).unwrap();
+    let result=validate_source_access(&[source.to_str().unwrap().into()], &d.0);
+    fs::set_permissions(&locked,fs::Permissions::from_mode(0o600)).unwrap();
+    result.unwrap();
+    assert!(validate_source_access(&[socket.to_str().unwrap().into()],&d.0).is_err());
+}
+
+#[test]
+fn source_replacement_during_read_restarts_hash_from_zero() {
+    let d=fixture();let source=d.0.join("file");let replacement=d.0.join("replacement");
+    fs::write(&source, vec![b'a'; 2*1024*1024]).unwrap();fs::write(&replacement,b"current-version").unwrap();
+    let mut replaced=false;
+    let snapshot=scan_with_activity(&source,&mut |a| {
+        if a.bytes>0 && !replaced {fs::rename(&replacement,&source).unwrap(); replaced=true;}
+    }).unwrap();
+    assert!(replaced);assert_eq!(snapshot,compute_snapshot(&source).unwrap());
+    assert_eq!(snapshot[0].hash,format!("{:x}",Sha256::digest(b"current-version")));
+    assert_eq!(snapshot[0].s,15);
+}
+
+#[test]
+fn continuous_replacement_exhausts_bounded_retries() {
+    let d=fixture();let source=d.0.join("file");fs::write(&source,b"initial").unwrap();
+    let mut replacements=0;
+    let error=scan_with_activity(&source,&mut |a| {
+        if a.bytes>0 && !a.boundary {
+            let p=d.0.join("replacement");fs::write(&p,b"updated").unwrap();fs::rename(&p,&source).unwrap();replacements+=1;
+        }
+    }).unwrap_err();
+    assert_eq!(replacements,3);assert!(error.contains("3 Versuche"));
+}
+
+#[test]
+fn entry_retries_never_retry_permission_errors_and_honor_cancel() {
+    let d=fixture();let path=d.0.join("denied");let mut attempts=0;
+    let result:Result<(),String>=retry_entry(&path,|| { attempts+=1;Err(EntryReadError::Other(access_error(&path,"Dateiinhalt lesen",std::io::Error::from_raw_os_error(libc::EPERM)))) });
+    assert_eq!(attempts,1);assert!(result.unwrap_err().contains("Dateiinhalt lesen"));
+    attempts=0;
+    let result:Result<(),String>=retry_entry(&path,|| { attempts+=1;BACKUP_CANCELLED.store(true,Ordering::SeqCst);Err(EntryReadError::Changed) });
+    BACKUP_CANCELLED.store(false,Ordering::SeqCst);
+    assert_eq!(attempts,1);assert!(result.unwrap_err().contains("abgebrochen"));
+}
+
+#[test]
+fn access_preflight_can_be_cancelled() {
+    let d=fixture();BACKUP_CANCELLED.store(true,Ordering::SeqCst);
+    let result=validate_source_access(&[d.0.to_str().unwrap().into()],&d.0);
+    BACKUP_CANCELLED.store(false,Ordering::SeqCst);assert!(result.unwrap_err().contains("abgebrochen"));
+}
+
+#[test]
+#[ignore = "manual access-only probe; requires BACKUP_PROBE_CONFIG"]
+fn actual_selected_sources_access_preflight() {
+    let config:BackupConfig=serde_json::from_slice(&fs::read(std::env::var("BACKUP_PROBE_CONFIG").unwrap()).unwrap()).unwrap();
+    validate_source_access(&config.directories,&dirs::home_dir().unwrap()).unwrap();
+    println!("ALL_SELECTED_SOURCES_ACCESS_PREFLIGHT passed");
+}
+
+#[test]
+fn quarantine_survives_roundtrip_with_os_regenerated_value() {
+    let d=fixture();let source=d.0.join("file");fs::write(&source,b"payload").unwrap();
+    xattr::set(&source,"com.apple.quarantine",b"0086;6a9f2328;com.apple.cfprefsd;").unwrap();
+    let expected=compute_snapshot(&source).unwrap();let archive=d.0.join("file.tar.gz");
+    create_verified_archive_from_snapshot(&source,&archive,true,&expected).unwrap();
+    let output=d.0.join("restored");fs::create_dir(&output).unwrap();unpack_private(&archive,&output).unwrap();
+    let actual=compute_snapshot(&output.join("file")).unwrap();
+    assert!(actual[0].xattrs.contains_key("com.apple.quarantine"));
+    assert!(readback_differences(&actual[0],&expected[0]).is_empty());
+    let mut missing=actual[0].clone();missing.xattrs.remove("com.apple.quarantine");
+    assert!(readback_differences(&missing,&expected[0]).contains(&"Erweitertes Attribut com.apple.quarantine".into()));
+    let mut source_changed=expected[0].clone();source_changed.xattrs.insert("com.apple.quarantine".into(),"changed".into());
+    assert_ne!(expected[0],source_changed);
+}
+
+#[test]
+fn final_source_check_identifies_changed_added_and_removed_paths() {
+    let d=fixture();let source=d.0.join("source");fs::create_dir(&source).unwrap();
+    fs::write(source.join("changed"),b"old").unwrap();fs::write(source.join("removed"),b"gone").unwrap();
+    let expected=compute_snapshot(&source).unwrap();
+    fs::write(source.join("changed"),b"new").unwrap();fs::remove_file(source.join("removed")).unwrap();fs::write(source.join("added"),b"new").unwrap();
+    let error=ensure_unchanged(&source,&expected).unwrap_err();
+    assert!(error.contains("changed: Dateiinhalt (SHA-256)"));
+    assert!(error.contains("removed: entfernt"));assert!(error.contains("added: neu hinzugekommen"));
+}
+
+
+#[test]
+fn tracked_document_roundtrips_with_hidden_flag_content_and_metadata() {
+    let d=fixture();let source=d.0.join("document");fs::write(&source,b"document data").unwrap();
+    xattr::set(&source,"com.example.backup",b"metadata").unwrap();
+    let path=CString::new(source.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe {libc::chflags(path.as_ptr(),libc::UF_TRACKED | libc::UF_HIDDEN)},0);
+    let expected=compute_snapshot(&source).unwrap();
+    assert_eq!(expected[0].flags,libc::UF_TRACKED | libc::UF_HIDDEN);
+    let archive=d.0.join("document.tar.gz");create_verified_archive_from_snapshot(&source,&archive,true,&expected).unwrap();
+    let output=d.0.join("restored");fs::create_dir(&output).unwrap();unpack_private(&archive,&output).unwrap();
+    let actual=compute_snapshot(&output.join("document")).unwrap();
+    assert_eq!(actual[0].flags,expected[0].flags);
+    assert_eq!(actual[0].hash,expected[0].hash);assert_eq!(actual[0].xattrs.get("com.example.backup"),expected[0].xattrs.get("com.example.backup"));
+    assert!(readback_differences(&actual[0],&expected[0]).is_empty());
+    ensure_unchanged(&source,&expected).unwrap();
+    assert_eq!(unsafe {libc::chflags(path.as_ptr(),libc::UF_HIDDEN)},0);
+    assert!(ensure_unchanged(&source,&expected).unwrap_err().contains("Dateiflags"));
+}
+
+#[test]
+fn readback_rejects_every_changed_flag_bit() {
+    let d=fixture();let source=d.0.join("file");fs::write(&source,b"data").unwrap();
+    let expected=compute_snapshot(&source).unwrap().remove(0);
+    for bit in 0..32 {
+        let mut actual=expected.clone();actual.flags ^= 1u32 << bit;
+        assert!(readback_differences(&actual,&expected).iter().any(|d|d.contains("Dateiflags")));
+    }
+}
+
+#[test]
+fn compressed_file_roundtrip_retains_content_and_compression_flag() {
+    let d=fixture();let plain=d.0.join("plain");let compressed=d.0.join("compressed");fs::write(&plain,vec![b'x';128*1024]).unwrap();
+    let output=Command::new("/usr/bin/ditto").arg("--hfsCompression").arg(&plain).arg(&compressed).output().unwrap();
+    assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+    let expected=compute_snapshot(&compressed).unwrap();assert_ne!(expected[0].flags & libc::UF_COMPRESSED,0);
+    let archive=d.0.join("compressed.tar.gz");create_verified_archive_from_snapshot(&compressed,&archive,true,&expected).unwrap();
+    verify_archive_source(&archive,"compressed",&expected).unwrap();
+    assert_eq!(fs::read(&compressed).unwrap(),fs::read(&plain).unwrap());
+}
+
+#[test]
+fn tracked_flags_survive_directory_merge_hardlinks_and_symlinks_without_live_source() {
+    let d=fixture();let source=d.0.join("tree");fs::create_dir_all(source.join("nested")).unwrap();
+    fs::write(source.join("nested/document"),b"tracked bytes").unwrap();
+    fs::hard_link(source.join("nested/document"),source.join("hardlink")).unwrap();
+    let outside=d.0.join("outside");fs::write(&outside,b"untouched").unwrap();
+    symlink(&outside,source.join("link")).unwrap();
+    for rel in ["","nested","nested/document","link"] {
+        let path=if rel.is_empty(){source.clone()}else{source.join(rel)};
+        crate::archive_flags::set(&path,libc::UF_TRACKED | libc::UF_HIDDEN).unwrap();
+    }
+    let baseline=compute_snapshot(&source).unwrap();
+    let archive=d.0.join("tree.tar.gz");create_verified_archive_from_snapshot(&source,&archive,true,&baseline).unwrap();
+    fs::remove_dir_all(&source).unwrap();
+    let target=d.0.join("restore/tree");fs::create_dir_all(target.join("nested")).unwrap();
+    staged_restore(&archive,&target,true).unwrap();
+    let restored=compute_snapshot(&target).unwrap();
+    for (actual,expected) in restored.iter().zip(&baseline) {assert!(readback_differences(actual,expected).is_empty(),"{:?}",readback_differences(actual,expected));}
+    assert_eq!(restored.len(),baseline.len());
+    assert_eq!(fs::metadata(target.join("hardlink")).unwrap().ino(),fs::metadata(target.join("nested/document")).unwrap().ino());
+    assert_eq!(compute_snapshot(&outside).unwrap()[0].flags,0);
+}
+
+#[test]
+fn internal_flags_filename_never_replaces_user_data() {
+    let d=fixture();
+    for name in [".macos-backup-suite-flags-v1",".macos-backup-suite-flags-v1-alternate",".MACOS-BACKUP-SUITE-FLAGS-V1"] {
+        let source=d.0.join(name);
+        fs::write(&source,b"macOS Backup Suite file flags v1\n{arbitrary user data}").unwrap();
+        crate::archive_flags::set(&source,libc::UF_TRACKED).unwrap();
+        let archive=d.0.join("archive");create_verified_archive(&source,&archive,true).unwrap();
+        let output=PrivateDir::temp().unwrap();unpack_private(&archive,&output.0).unwrap();
+        assert_eq!(fs::read(output.0.join(name)).unwrap(),fs::read(&source).unwrap());
+        assert_eq!(fs::read_dir(&output.0).unwrap().count(),1);
+        fs::remove_file(&source).unwrap();
+    }
+}
+
+#[test]
+fn invalid_flags_metadata_is_rejected_before_extracting_files() {
+    let d=fixture();
+    for entries in [
+        vec![("../outside",libc::UF_TRACKED)],
+        vec![("/outside",libc::UF_TRACKED)],
+        vec![("missing",libc::UF_TRACKED)],
+        vec![("",libc::UF_TRACKED),("",libc::UF_HIDDEN)],
+    ] {
+        let metadata=crate::archive_flags::write(&d.0,&crate::archive_flags::Flags {root:"file".into(),pax_metadata:false,entries:entries.into_iter().map(|(p,flags)|crate::archive_flags::Record{path:p.into(),flags}).collect()}).unwrap();
+        let source=d.0.join("file");fs::write(&source,b"payload").unwrap();
+        let archive=d.0.join("invalid.tar.gz");
+        let output=Command::new("/usr/bin/tar").current_dir(&d.0).args(["--format=pax","-czf"]).arg(&archive).arg("./file").arg(format!("@{}",metadata.display())).output().unwrap();
+        assert!(output.status.success());
+        let target=PrivateDir::temp().unwrap();
+        assert!(unpack_private(&archive,&target.0).is_err());
+        assert!(fs::read_dir(&target.0).unwrap().next().is_none());
+    }
+}
+
+#[test]
+fn missing_compression_state_is_never_faked_by_setting_its_flag() {
+    let d=fixture();let source=d.0.join("plain");fs::write(&source,b"plain data").unwrap();
+    assert!(crate::archive_flags::set(&source,libc::UF_COMPRESSED).unwrap_err().contains("Systemflags"));
+    assert_eq!(fs::read(&source).unwrap(),b"plain data");
+    assert_eq!(compute_snapshot(&source).unwrap()[0].flags,0);
+}
+
+#[test]
+fn immutable_files_and_directories_restore_with_their_protection_flags() {
+    let owned=ReadbackDir(fixture());let d=&owned.0;
+    let source=d.0.join("locked");fs::create_dir(&source).unwrap();
+    let file=source.join("document");fs::write(&file,b"protected data").unwrap();
+    crate::archive_flags::set(&file,libc::UF_IMMUTABLE | libc::UF_TRACKED).unwrap();
+    crate::archive_flags::set(&source,libc::UF_IMMUTABLE | libc::UF_HIDDEN).unwrap();
+    let expected=compute_snapshot(&source).unwrap();
+    let archive=d.0.join("locked.tar.gz");create_verified_archive_from_snapshot(&source,&archive,true,&expected).unwrap();
+    for existing in [false,true] {
+        let target=d.0.join(if existing {"merged/locked"}else{"fresh/locked"});
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        if existing {fs::create_dir(&target).unwrap();}
+        staged_restore(&archive,&target,true).unwrap();
+        let restored=compute_snapshot(&target).unwrap();
+        assert_eq!(restored.len(),expected.len());
+        for (a,b) in restored.iter().zip(&expected) {assert!(readback_differences(a,b).is_empty(),"{:?}",readback_differences(a,b));}
+    }
+}
+
+#[test]
+fn incremental_reuse_ignores_only_the_snapshot_mount_device_number() {
+    let d=fixture();let source=d.0.join("file");fs::write(&source,b"data").unwrap();
+    let a=compute_snapshot(&source).unwrap();let mut b=a.clone();b[0].dev+=1;
+    assert!(same_source_version(&a,&b));assert_ne!(a,b);
+    b[0].ino+=1;assert!(!same_source_version(&a,&b));b[0].ino-=1;
+    b[0].xattrs.insert("com.apple.lastuseddate#PS".into(),"changed".into());assert!(!same_source_version(&a,&b));
+}
+
+#[test]
+#[ignore = "manual APFS integration; creates a purgeable Time Machine snapshot"]
+fn frozen_backup_survives_live_content_and_usage_attribute_changes() {
+    let d=fixture();let source=d.0.join("document");fs::write(&source,b"original content").unwrap();
+    xattr::set(&source,"com.apple.lastuseddate#PS",&[1u8;16]).unwrap();
+    let frozen=crate::frozen_sources::FrozenSources::capture(&[source.clone()]).unwrap();
+    let stable=frozen.get(&source).unwrap();let baseline=compute_snapshot(&stable).unwrap();
+    // Reproduce opening/editing a document while its backup is still running.
+    fs::write(&source,b"edited while backing up").unwrap();
+    xattr::set(&source,"com.apple.lastuseddate#PS",&[2u8;16]).unwrap();
+    xattr::set(&source,"com.apple.quarantine",b"0086;6a9f2328;com.apple.cfprefsd;").unwrap();
+    assert!(fs::OpenOptions::new().write(true).open(&stable).is_err());
+    let archive=d.0.join("document.tar.gz");create_verified_archive_from_snapshot(&stable,&archive,true,&baseline).unwrap();
+    let output=PrivateDir::temp().unwrap();unpack_private(&archive,&output.0).unwrap();
+    let restored=compute_snapshot(&output.0.join("document")).unwrap();
+    assert!(readback_differences(&restored[0],&baseline[0]).is_empty());
+    assert_eq!(fs::read(output.0.join("document")).unwrap(),b"original content");
+    assert_eq!(fs::read(&source).unwrap(),b"edited while backing up");
+    assert!(!restored[0].xattrs.contains_key("com.apple.quarantine"));
+    drop(frozen);assert!(!stable.exists(),"snapshot view did not unmount");
+    println!("FROZEN_BACKUP_LIVE_CHANGES passed: content and both usage attributes preserved at snapshot time");
+}
+
+#[test]
+#[ignore = "manual real-source APFS backup + finalize + restore; requires BACKUP_PROBE_SOURCE"]
+fn actual_frozen_source_backup_finalize_and_test_restore() {
+    let source=PathBuf::from(std::env::var("BACKUP_PROBE_SOURCE").expect("Explicit source required"));
+    let frozen=crate::frozen_sources::FrozenSources::capture(&[source.clone()]).unwrap();
+    let stable=frozen.get(&source).unwrap();
+    let d=fixture();let backup=d.0.join("backup");fs::create_dir(&backup).unwrap();
+    println!("SNAPSHOT_READY {}",frozen.snapshot);
+    let expected=compute_snapshot(&stable).unwrap();let bytes=expected.iter().map(|e|e.s).sum();
+    println!("SOURCE_SCANNED {} entries, {} bytes",expected.len(),bytes);
+    let name=archive_name_for(&source,"tar.gz");let archive=backup.join(&name);
+    create_verified_archive_from_snapshot(&stable,&archive,true,&expected).unwrap();
+    println!("ARCHIVE_CREATED_AND_READBACK_VERIFIED");
+    let meta=BackupMetadata {timestamp:"20260908-140000".into(),items:vec![BackupItem {path:source.to_str().unwrap().into(),archive:name,hash:hash_file(&archive).unwrap(),archive_size_bytes:fs::metadata(&archive).unwrap().len(),source_size_bytes:bytes}],hash_algorithm:"sha256".into(),total_source_size_bytes:bytes,start_time:String::new(),end_time:String::new(),duration_seconds:0};
+    finish_backup(&backup,&meta,&[(stable.clone(),expected.clone())]).unwrap();
+    let destination=d.0.join("restore");fs::create_dir(&destination).unwrap();
+    let result=test_restore_to(&backup,source.to_str().unwrap(),&destination).unwrap();
+    let restored=compute_snapshot(&Path::new(&result.extracted_path).join(source.file_name().unwrap())).unwrap();
+    assert_eq!(restored.len(),expected.len());
+    for (a,b) in restored.iter().zip(&expected) {assert!(readback_differences(a,b).is_empty(),"{}: {:?}",b.p,readback_differences(a,b));}
+    drop(frozen);assert!(!stable.exists());
+    println!("ACTUAL_FROZEN_BACKUP_AND_RESTORE passed: {} files, {} bytes",result.file_count,result.bytes_extracted);
+}
+
+#[test]
+fn literal_appledouble_names_and_resource_forks_survive_backup_and_merge() {
+    let d=fixture();let source=d.0.join("tree");fs::create_dir_all(source.join("._directory")).unwrap();
+    for (name,bytes) in [("image",b"image data".as_slice()),("._image",b"independent sidecar"),("._orphan",b"no sibling"),("._directory/file",b"nested data")] {
+        fs::write(source.join(name),bytes).unwrap();
+        xattr::set(source.join(name),"com.example.independent",name.as_bytes()).unwrap();
+    }
+    xattr::set(source.join("image"),"com.apple.ResourceFork",b"resource fork must not replace sidecar").unwrap();
+    xattr::set(source.join("._image"),"com.apple.ResourceFork",b"sidecar has its own resource fork").unwrap();
+    fs::hard_link(source.join("._image"),source.join("hardlink")).unwrap();
+    symlink("._image",source.join("._symlink")).unwrap();
+    crate::archive_flags::set(&source.join("._image"),libc::UF_TRACKED | libc::UF_HIDDEN).unwrap();
+    let result=Command::new("/bin/chmod").args(["+a","everyone allow read,readattr,readextattr,readsecurity"]).arg(source.join("._image")).output().unwrap();
+    assert!(result.status.success());
+    let expected=compute_snapshot(&source).unwrap();let archive=d.0.join("tree.tar.gz");
+    create_verified_archive_from_snapshot(&source,&archive,true,&expected).unwrap();
+    fs::remove_dir_all(&source).unwrap();
+    let target=d.0.join("restored/tree");fs::create_dir_all(&target).unwrap();
+    staged_restore(&archive,&target,true).unwrap();
+    let actual=compute_snapshot(&target).unwrap();assert_eq!(actual.len(),expected.len());
+    for (a,b) in actual.iter().zip(&expected) {assert!(readback_differences(a,b).is_empty(),"{} {:?}",b.p,readback_differences(a,b));}
+    assert_eq!(fs::metadata(target.join("hardlink")).unwrap().ino(),fs::metadata(target.join("._image")).unwrap().ino());
+}
+
+#[test]
+fn literal_appledouble_root_and_metadata_companion_are_user_files() {
+    let d=fixture();
+    for name in ["._document","._.macos-backup-suite-flags-v1","._.macos-backup-suite-flags-v1-alternate"] {
+        let source=d.0.join(name);fs::write(&source,b"literal user file").unwrap();
+        let expected=compute_snapshot(&source).unwrap();let archive=d.0.join("archive");
+        create_verified_archive_from_snapshot(&source,&archive,true,&expected).unwrap();
+        let target=d.0.join("out").join(name);fs::create_dir_all(target.parent().unwrap()).unwrap();
+        staged_restore(&archive,&target,true).unwrap();
+        assert_eq!(fs::read(&target).unwrap(),b"literal user file");
+    }
+}
+
+#[test]
+fn legacy_appledouble_archive_retains_native_metadata_restore() {
+    let d=fixture();let source=d.0.join("legacy");fs::write(&source,b"legacy bytes").unwrap();
+    xattr::set(&source,"com.apple.ResourceFork",b"legacy resource fork").unwrap();
+    let baseline=compute_snapshot(&source).unwrap();let archive=d.0.join("legacy.tar.gz");
+    let metadata=crate::archive_flags::write(&d.0,&crate::archive_flags::Flags{root:"legacy".into(),pax_metadata:false,entries:Vec::new()}).unwrap();
+    let result=Command::new("/usr/bin/tar").current_dir(&d.0).args(["--format=pax","-czf"]).arg(&archive).arg("./legacy").arg(format!("@{}",metadata.display())).output().unwrap();
+    assert!(result.status.success());verify_archive_source(&archive,"legacy",&baseline).unwrap();
+    let old:crate::archive_flags::Flags=serde_json::from_str(r#"{"root":"legacy","entries":[]}"#).unwrap();assert!(!old.pax_metadata);
+}
+
+#[test]
+fn missing_readback_entries_report_exact_paths() {
+    let d=fixture();let source=d.0.join("tree");fs::create_dir(&source).unwrap();fs::write(source.join("present"),b"data").unwrap();
+    let archive=d.0.join("archive");create_verified_archive(&source,&archive,true).unwrap();
+    fs::write(source.join("._missing"),b"missing").unwrap();
+    let error=verify_archive_source(&archive,"tree",&compute_snapshot(&source).unwrap()).unwrap_err();
+    assert!(error.contains("._missing"));assert!(error.contains("fehlend"));
+}
+
+#[test]
+fn resume_reuses_only_unchanged_sources_and_verified_archives() {
+    let d=fixture();let source=d.0.join("source");fs::write(&source,b"original").unwrap();
+    let backup=d.0.join("backup");let inventory=d.0.join("inventory");fs::create_dir(&backup).unwrap();
+    let name="source.tar.gz";let archive=backup.join(name);let initial=compute_snapshot(&source).unwrap();
+    create_verified_archive_from_snapshot(&source,&archive,true,&initial).unwrap();
+    save_manifest(&inventory,name,&initial).unwrap();
+    let item=BackupItem{path:"source".into(),archive:name.into(),hash:hash_file(&archive).unwrap(),archive_size_bytes:fs::metadata(&archive).unwrap().len(),source_size_bytes:8};
+    let items=vec![item];let mut current=initial.clone();current[0].dev+=1;
+    assert!(verified_resume_item(&backup,&inventory,"source",name,&current,&items).unwrap().is_some());
+    current[0].xattrs.insert("com.example.changed".into(),"value".into());
+    assert!(verified_resume_item(&backup,&inventory,"source",name,&current,&items).unwrap().is_none());
+    fs::write(&source,b"modified").unwrap();set_times(&source,initial[0].m,initial[0].mn);
+    assert!(verified_resume_item(&backup,&inventory,"source",name,&compute_snapshot(&source).unwrap(),&items).unwrap().is_none());
+    let mut bytes=fs::read(&archive).unwrap();bytes[20]^=1;fs::write(&archive,bytes).unwrap();
+    assert!(verified_resume_item(&backup,&inventory,"source",name,&initial,&items).unwrap().is_none());
+    fs::remove_file(manifest_path_for(&inventory,name)).unwrap();
+    assert!(resume_candidate(&inventory,"source",name,&initial,&items).is_none());
+}
+
+#[test]
+#[ignore = "manual configured source list; requires BACKUP_PROBE_SOURCES_JSON"]
+fn remaining_frozen_sources_backup_and_restore() {
+    let sources:Vec<PathBuf>=serde_json::from_slice(&fs::read(std::env::var("BACKUP_PROBE_SOURCES_JSON").unwrap()).unwrap()).unwrap();
+    let frozen=crate::frozen_sources::FrozenSources::capture(&sources).unwrap();
+    let d=fixture();let backup=d.0.join("backup");fs::create_dir(&backup).unwrap();let mut items=Vec::new();let mut guards=Vec::new();
+    for source in &sources {
+        let stable=frozen.get(source).unwrap();let expected=compute_snapshot(&stable).unwrap();
+        println!("PROBE_SOURCE {} entries={} bytes={}",source.display(),expected.len(),expected.iter().map(|e|e.s).sum::<u64>());
+        let name=archive_name_for(source,"tar.zst");let archive=backup.join(&name);
+        create_verified_archive_from_snapshot(&stable,&archive,false,&expected).unwrap();
+        items.push(BackupItem{path:source.to_str().unwrap().into(),archive:name,hash:hash_file(&archive).unwrap(),archive_size_bytes:fs::metadata(&archive).unwrap().len(),source_size_bytes:expected.iter().map(|e|e.s).sum()});
+        guards.push((stable,expected));println!("PROBE_READBACK_PASSED {}",source.display());
+    }
+    let meta=BackupMetadata{timestamp:"20260908-182000".into(),total_source_size_bytes:items.iter().map(|e|e.source_size_bytes).sum(),items,hash_algorithm:"sha256".into(),start_time:String::new(),end_time:String::new(),duration_seconds:0};
+    finish_backup(&backup,&meta,&guards).unwrap();
+    let output=d.0.join("restore");fs::create_dir(&output).unwrap();
+    for (source,(_,expected)) in sources.iter().zip(&guards) {
+        let restored=test_restore_to(&backup,source.to_str().unwrap(),&output).unwrap();
+        let actual=compute_snapshot(&Path::new(&restored.extracted_path).join(source.file_name().unwrap())).unwrap();
+        assert_eq!(actual.len(),expected.len());
+        for(a,b)in actual.iter().zip(expected) {assert!(readback_differences(a,b).is_empty(),"{} {:?}",b.p,readback_differences(a,b));}
+        println!("PROBE_RESTORE_PASSED {}",source.display());
+    }
+    println!("ALL_REMAINING_SOURCES_PASSED {}",sources.len());
 }

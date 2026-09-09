@@ -984,3 +984,18 @@ footer {
   max-height: 90vh;
   overflow-y: auto;
 }
+
+/* Unknown totals must remain visible even when the overall value is still zero. */
+.progress-fill.indeterminate {
+  transition: none;
+  animation: progress-indeterminate 1.4s ease-in-out infinite;
+}
+@keyframes progress-indeterminate {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(330%); }
+}
+.progress-percentage { min-height: 1em; }
+@media (prefers-reduced-motion: reduce) {
+  .progress-fill.indeterminate { animation: none; transform: translateX(105%); }
+  .progress-fill.animating { animation: none; }
+}

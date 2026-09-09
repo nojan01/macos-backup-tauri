@@ -90,7 +90,7 @@ pub(super) fn verify_item(backup: &Path, item: &BackupItem) -> Result<(), String
     Ok(())
 }
 
-struct ArchiveInput {
+pub(super) struct ArchiveInput {
     reader: Box<dyn Read>,
     child: Option<std::process::Child>,
     progress: crate::work_progress::Bytes,
@@ -104,6 +104,15 @@ impl Read for ArchiveInput {
         let n=self.reader.read(b)?;
         self.progress.add(n);
         Ok(n)
+    }
+}
+impl ArchiveInput {
+    pub(super) fn finish(&mut self) -> Result<(), String> {
+        io::copy(self, &mut io::sink()).map_err(|e| format!("Corrupt archive: {e}"))?;
+        if let Some(child) = self.child.as_mut() {
+            if !child.wait().map_err(|e|e.to_string())?.success() { return Err("Decompression failed".into()); }
+        }
+        Ok(())
     }
 }
 impl Drop for ArchiveInput {
@@ -126,7 +135,7 @@ fn compression(archive: &Path) -> Result<bool, String> {
         Err("Unsupported or corrupt archive compression".into())
     }
 }
-fn open_archive(archive: &Path) -> Result<ArchiveInput, String> {
+pub(super) fn open_archive(archive: &Path) -> Result<ArchiveInput, String> {
     if compression(archive)? {
         let zstd = get_zstd_path().ok_or("zstd required to read this backup")?;
         let mut child = Command::new(zstd)
@@ -151,7 +160,7 @@ fn open_archive(archive: &Path) -> Result<ArchiveInput, String> {
         })
     }
 }
-fn relative_path(path: &Path) -> Result<PathBuf, String> {
+pub(super) fn relative_path(path: &Path) -> Result<PathBuf, String> {
     let mut result = PathBuf::new();
     for c in path.components() {
         match c {
@@ -164,10 +173,14 @@ fn relative_path(path: &Path) -> Result<PathBuf, String> {
 }
 /// Read actual tar headers, not a newline-delimited listing (filenames may contain newlines).
 pub(super) fn archive_index(archive: &Path) -> Result<BTreeSet<PathBuf>, String> {
+    Ok(inspect_archive(archive)?.0)
+}
+pub(super) fn inspect_archive(archive: &Path) -> Result<(BTreeSet<PathBuf>, Option<(PathBuf, crate::archive_flags::Flags)>), String> {
     let _phase=crate::work_progress::Phase::enter("Archivstruktur und Kompression prüfen");
     let mut input = open_archive(archive)?;
     let mut entries = BTreeMap::new();
     let mut hardlinks = Vec::new();
+    let mut flags = None;
     let mut normalized_names = BTreeSet::new();
     {
         let mut tar = tar::Archive::new(&mut input);
@@ -200,6 +213,9 @@ pub(super) fn archive_index(archive: &Path) -> Result<BTreeSet<PathBuf>, String>
                     .map_err(|e| e.to_string())?
                     .ok_or("Missing hardlink target")?;
                 hardlinks.push((path.clone(), relative_path(&link)?));
+            }
+            if let Some(records) = crate::archive_flags::read(&path, &mut entry)? {
+                if flags.replace((path.clone(),records)).is_some() { return Err("Mehrfache Dateiflag-Metadaten".into()); }
             }
             io::copy(&mut entry, &mut io::sink()).map_err(|e| format!("Corrupt archive: {e}"))?;
         }
@@ -236,7 +252,15 @@ pub(super) fn archive_index(archive: &Path) -> Result<BTreeSet<PathBuf>, String>
     if entries.is_empty() {
         return Err("Archive contains no items".into());
     }
-    Ok(entries.keys().cloned().collect())
+    if let Some((path, records)) = &flags {
+        entries.remove(path);
+        let companion = crate::archive_flags::companion(path);
+        if let Some(kind) = (!records.pax_metadata).then(|| entries.remove(&companion)).flatten() {
+            if !kind.is_file() { return Err("Ungültiger Metadaten-Begleiteintrag".into()); }
+        }
+        crate::archive_flags::validate(records, &entries)?;
+    }
+    Ok((entries.keys().cloned().collect(), flags))
 }
 fn normalized_path(path: &Path) -> String {
     path.to_string_lossy()
@@ -291,7 +315,7 @@ pub(super) fn unpack_private(archive: &Path, target: &Path) -> Result<(), String
 // Validate structure and expected root in a single full archive traversal. This
 // entry point always performs validation; callers cannot bypass it with a flag.
 pub(super) fn unpack_private_with_root(archive: &Path, target: &Path, root: Option<&std::ffi::OsStr>) -> Result<(), String> {
-    let index=archive_index(archive)?;
+    let (index, flags)=inspect_archive(archive)?;
     if let Some(root)=root {require_root(&index,root)?;}
     let _phase=crate::work_progress::Phase::enter("Archiv entpacken / macOS-Dateiattribute und Rechte setzen");
     let md = fs::symlink_metadata(target).map_err(|e| e.to_string())?;
@@ -315,11 +339,28 @@ pub(super) fn unpack_private_with_root(archive: &Path, target: &Path, root: Opti
     } else {
         cmd.arg("-xzpf");
     }
-    cmd.arg(&archive).arg("--no-same-owner").current_dir(target);
+    cmd.arg(&archive).args(["--no-same-owner", "-S"]).current_dir(target);
+    if flags.as_ref().is_some_and(|(_,records)|records.pax_metadata) {
+        // Disable both AppleDouble name interpretation and copyfile unpacking.
+        // Keep PAX xattrs, ACLs, compression flags and permissions enabled.
+        cmd.args(["--options=!mac-ext", "--no-mac-metadata", "--xattrs", "--acls", "--fflags"]);
+    }
     // Large archives can spend substantial time restoring per-file macOS
     // metadata. Match the creation deadline; cancellation remains available.
     let output = run_with_timeout(cmd, std::time::Duration::from_secs(24 * 3600))?;
     require_success("Archive extraction", &output)?;
+    if let Some((path, records)) = flags {
+        fs::remove_file(target.join(&path)).map_err(|e|e.to_string())?;
+        let companion = target.join(crate::archive_flags::companion(&path));
+        if !records.pax_metadata {
+            match fs::remove_file(companion) {
+                Ok(()) => (),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => (),
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        crate::archive_flags::apply(target, &records)?;
+    }
     Ok(())
 }
 
@@ -429,9 +470,15 @@ pub(super) fn merge_tree(
     overwrite: bool,
 ) -> Result<MergeResult, String> {
     if BACKUP_CANCELLED.load(Ordering::SeqCst) || VERIFY_CANCELLED.load(Ordering::SeqCst) {return Err("Vorgang abgebrochen".into());}
+    use std::os::macos::fs::MetadataExt;
     let src = fs::symlink_metadata(source).map_err(|e| e.to_string())?;
+    let flags = src.st_flags();
+    let movable_flags = flags & !(libc::UF_IMMUTABLE | libc::UF_APPEND);
     if let Some(dst) = destination_metadata(target)? {
         if src.is_dir() && dst.is_dir() && !dst.file_type().is_symlink() {
+            // Relax only the private staging copy while moving its children.
+            // Destination protection is restored after all data and times.
+            crate::archive_flags::set(source,movable_flags)?;
             let mut result = MergeResult::default();
             for e in fs::read_dir(source).map_err(|e| e.to_string())? {
                 let e = e.map_err(|e| e.to_string())?;
@@ -450,6 +497,7 @@ pub(super) fn merge_tree(
                 fs::File::open(target)
                     .and_then(|f| f.set_times(times))
                     .map_err(|e| e.to_string())?;
+                crate::archive_flags::set(target,flags)?;
             }
             return Ok(result);
         }
@@ -465,7 +513,9 @@ pub(super) fn merge_tree(
     }
     // Source is staged on the destination filesystem: rename preserves metadata and
     // atomically replaces a leaf, including dangling symlinks, without following it.
+    crate::archive_flags::set(source,movable_flags)?;
     fs::rename(source, target).map_err(|e| format!("Cannot restore {}: {e}", target.display()))?;
+    crate::archive_flags::set(target,flags)?;
     Ok(MergeResult {
         restored: 1,
         skipped: 0,
@@ -554,6 +604,7 @@ pub(super) fn read_inventory(archive: &Path, name: &str) -> Result<String, Strin
 pub(super) struct BrewEntry {
     pub kind: String,
     pub name: String,
+    pub options: BTreeMap<String, String>,
 }
 /// Treat Brewfile as data; never evaluate Ruby or shell content from a backup.
 pub(super) fn brew_entries(content: &str) -> Result<Vec<BrewEntry>, String> {
@@ -569,7 +620,7 @@ pub(super) fn brew_entries(content: &str) -> Result<Vec<BrewEntry>, String> {
         if kind == "mas" || kind == "vscode" {
             continue;
         } // separate restore items
-        if !["brew", "cask", "tap"].contains(&kind) {
+        if !["brew", "cask", "tap", "cargo", "go", "npm", "uv", "krew", "flatpak", "winget"].contains(&kind) {
             return Err(format!("Unsupported Brewfile entry: {kind}"));
         }
         let rest = rest.trim();
@@ -595,13 +646,50 @@ pub(super) fn brew_entries(content: &str) -> Result<Vec<BrewEntry>, String> {
         if !suffix.is_empty() && !suffix.starts_with(',') && !suffix.starts_with('#') {
             return Err("Unsupported Brewfile syntax".into());
         }
-        entries.push(BrewEntry {
-            kind: kind.into(),
-            name: name.into(),
-        });
+        let mut options = BTreeMap::new();
+        if !["brew", "cask", "tap"].contains(&kind) {
+            let mut remaining = suffix;
+            while !remaining.is_empty() && !remaining.starts_with('#') {
+                remaining = remaining.strip_prefix(',').ok_or("Invalid Bundle options")?.trim();
+                let (key, value) = remaining.split_once(':').ok_or("Invalid Bundle option")?;
+                let key = key.trim();
+                let allowed = match kind {
+                    "cargo" | "uv" => key == "source",
+                    "flatpak" => ["remote", "url"].contains(&key),
+                    "winget" => ["id", "source"].contains(&key),
+                    _ => false,
+                };
+                if !allowed { return Err(format!("Unsupported {kind} option: {key}")); }
+                let value = value.trim_start();
+                let (parsed, rest) = if let Some(tail) = value.strip_prefix('\'') {
+                    let end = tail.find('\'').ok_or("Unterminated Bundle option")?;
+                    if tail[..end].contains('\\') { return Err("Escaped single-quoted options are unsupported".into()); }
+                    (tail[..end].to_string(), &tail[end+1..])
+                } else {
+                    let mut stream = serde_json::Deserializer::from_str(value).into_iter::<String>();
+                    let parsed = stream.next().ok_or("Missing Bundle option value")?.map_err(|e|e.to_string())?;
+                    (parsed, &value[stream.byte_offset()..])
+                };
+                if parsed.is_empty() || parsed.chars().any(char::is_control) || options.insert(key.into(),parsed).is_some() {
+                    return Err("Invalid or duplicate Bundle option".into());
+                }
+                remaining = rest.trim();
+            }
+        }
+        entries.push(BrewEntry { kind: kind.into(), name: name.into(), options });
     }
     Ok(entries)
 }
+// Only generated literal data is passed to brew bundle; never the raw backup's Ruby.
+pub(super) fn extension_brewfile(entries: &[&BrewEntry]) -> String {
+    fn quote(value: &str) -> String { format!("'{}'",value.replace('\\',"\\\\").replace('\'',"\\'")) }
+    entries.iter().map(|entry| {
+        let mut line = format!("{} {}",entry.kind,quote(&entry.name));
+        for (key,value) in &entry.options { line.push_str(&format!(", {key}: {}",quote(value))); }
+        line.push('\n'); line
+    }).collect()
+}
+
 pub(super) fn mas_ids(content: &str) -> Result<Vec<String>, String> {
     let mut ids = BTreeSet::new();
     for line in content.lines().filter(|l| !l.trim().is_empty()) {
@@ -609,6 +697,7 @@ pub(super) fn mas_ids(content: &str) -> Result<Vec<String>, String> {
         let id = line
             .strip_prefix("mas ")
             .and_then(|l| l.rsplit_once("id:").map(|(_, id)| id.trim()))
+            .or_else(|| line.split_once(char::is_whitespace).map(|(id,_)|id))
             .ok_or("Invalid MAS inventory line")?;
         if id.is_empty()
             || id.len() > 20
@@ -869,7 +958,12 @@ pub(super) fn install_brew_entries(
 ) -> Result<usize, String> {
     let mut count = 0;
     let mut errors = Vec::new();
+    let mut extensions = Vec::new();
     for entry in entries {
+        if !["tap", "brew", "cask"].contains(&entry.kind.as_str()) {
+            extensions.push(entry);
+            continue;
+        }
         let mut cmd = Command::new(brew);
         if entry.kind == "tap" {
             cmd.arg("tap");
@@ -916,6 +1010,18 @@ pub(super) fn install_brew_entries(
             Ok(()) => count += 1,
             Err(e) => errors.push(e),
         }
+    }
+    if !extensions.is_empty() {
+        let stage = PrivateDir::temp()?;
+        let brewfile = stage.0.join("Brewfile");
+        fs::write(&brewfile, extension_brewfile(&extensions)).map_err(|e|e.to_string())?;
+        let mut cmd = Command::new(brew);
+        cmd.args(["bundle", "install", "--file"]).arg(&brewfile)
+            .arg(if reinstall {"--upgrade"} else {"--no-upgrade"})
+            .env("HOMEBREW_NO_AUTO_UPDATE", "1");
+        let outcome = run_streamed(cmd,std::time::Duration::from_secs(7200),window,"restore-log","🍺 ",1)
+            .and_then(|o|require_success("Homebrew Bundle packages",&o));
+        match outcome { Ok(()) => count += extensions.len(), Err(e) => errors.push(e) }
     }
     if errors.is_empty() {
         Ok(count)

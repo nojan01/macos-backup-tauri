@@ -1,6 +1,9 @@
+mod protected_access;
 mod work_progress;
 mod app_settings;
 mod backup;
+mod archive_flags;
+mod frozen_sources;
 use backup::*;
 mod restore;
 use restore::*;
@@ -1012,7 +1015,7 @@ fn get_brew_packages() -> Result<String, String> {
         .ok_or_else(|| "Homebrew not found. Please install Homebrew: https://brew.sh".to_string())?;
 
     let mut cmd = Command::new(&brew_path);
-    cmd.args(["bundle", "dump", "--file=-"]);
+    cmd.args(["bundle", "dump", "--file=-"]).env("HOMEBREW_NO_AUTO_UPDATE", "1");
     let output = run_with_timeout(cmd, std::time::Duration::from_secs(120))?;
 
     if output.status.success() {
@@ -1429,6 +1432,31 @@ fn create_backup_impl(
         let _ = window.emit("backup-log", format!("App-Einstellungen: {path}"));
     }
     validate_selected_sources(&directories, target, &home_settings)?;
+    let expand_source = |dir: &str| -> PathBuf {
+        if dir == "~" {home_settings.clone()} else if let Some(rel)=dir.strip_prefix("~/") {home_settings.join(rel)} else {PathBuf::from(dir)}
+    };
+    let original_sources: Vec<PathBuf> = directories.iter().map(|d|expand_source(d)).collect();
+    let cache_source = if config.backup_homebrew_cache { frozen_sources::existing(frozen_sources::homebrew_cache_paths(&home_settings))?.into_iter().next() } else {None};
+    let safari_sources: Vec<PathBuf> = if config.backup_safari_settings {frozen_sources::existing(frozen_sources::safari_paths(&home_settings))?} else {Vec::new()};
+    let mut all_sources=original_sources.clone();
+    all_sources.extend(cache_source.iter().cloned());all_sources.extend(safari_sources.iter().cloned());
+    for path in &all_sources {validate_source_target(path,target)?;}
+    let brew_inventory = if config.backup_homebrew { Some(get_brew_packages()?) } else { None };
+    let mas_inventory = if config.backup_mas { Some(get_mas_apps()?) } else { None };
+    let vscode_inventory = if config.backup_vscode_settings { match get_vscode_extensions() {
+        Ok(items) => Some(items.join("\n")),
+        Err(e) if e=="VS Code not installed" => {let _ = window.emit("backup-log", e); None},
+        Err(e) => return Err(e),
+    }} else { None };
+    // Validate every selected software inventory before scanning or archiving
+    // user files, so a new package-manager format cannot fail hours later.
+    if let Some(content)=&brew_inventory {brew_entries(content)?;}
+    if let Some(content)=&mas_inventory {mas_ids(content)?;}
+    if let Some(content)=&vscode_inventory {extension_ids(content)?;}
+    let frozen=frozen_sources::FrozenSources::capture(&all_sources)?;
+    let frozen_directories: Vec<String> = all_sources.iter().map(|p|frozen.get(p).map(|p|p.to_string_lossy().into_owned())).collect::<Result<_,_>>()?;
+    validate_source_access(&frozen_directories, &home_settings)?;
+    let _=window.emit("backup-log",format!("Konsistenter Dateistand: {}. Geöffnete und weiter bearbeitete Originaldateien beeinflussen dieses Backup nicht.",frozen.snapshot));
     let suite_root = target.join("macos-backup-suite");
 
     // --- Resume-Modus: bestehenden Backup-Ordner wiederverwenden ---
@@ -1479,7 +1507,6 @@ fn create_backup_impl(
     } else {
         None
     };
-    let home_pre = dirs::home_dir().unwrap_or_default();
     let mut estimated_source_bytes: u64 = 0;
     let mut estimated_new_bytes: u64 = 0;
     let pre_total = directories.len().max(1);
@@ -1489,13 +1516,8 @@ fn create_backup_impl(
     let mut cached_snapshots: Vec<Option<Vec<ManifestEntry>>> = vec![None; directories.len()];
 
     for (pre_i, dir) in directories.iter().enumerate() {
-        let expanded = if dir.starts_with("~/") {
-            home_pre.join(&dir[2..])
-        } else if dir == "~" {
-            home_pre.clone()
-        } else {
-            PathBuf::from(dir)
-        };
+        let original=&original_sources[pre_i];
+        let expanded=frozen.get(original)?;
         trace(&format!("scan[{}/{}] {}", pre_i + 1, pre_total, dir));
         let _ = window.emit(
             "backup-progress",
@@ -1520,10 +1542,10 @@ fn create_backup_impl(
         let mut will_reuse = false;
         if let (Some(snap), Some((prev_ts, prev_meta))) = (snap_opt.as_ref(), previous.as_ref()) {
             let archive_ext = if is_zstd_available() { "tar.zst" } else { "tar.gz" };
-            let archive_name = archive_name_for(&expanded, archive_ext);
+            let archive_name = archive_name_for(original, archive_ext);
             let prev_inventory = suite_root.join("inventories").join(prev_ts);
             if let Some(prev_snapshot) = load_manifest(&prev_inventory, &archive_name) {
-                if &prev_snapshot == snap
+                if same_source_version(&prev_snapshot, snap)
                     && prev_meta.items.iter().any(|it| it.path == *dir && it.archive == archive_name)
                     && suite_root.join("data").join(prev_ts).join(&archive_name).exists()
                 {
@@ -1532,6 +1554,13 @@ fn create_backup_impl(
             }
         }
 
+        if let Some(snap)=snap_opt.as_ref() {
+            let ext=if expanded.is_file() || !is_zstd_available() {"tar.gz"} else {"tar.zst"};
+            let name=archive_name_for(original,ext);
+            if let Some(item)=resume_candidate(&inventory_root,dir,&name,snap,&resumed_items) {
+                will_reuse |= backup_root.join(&item.archive).is_file();
+            }
+        }
         cached_snapshots[pre_i] = snap_opt;
         let dt = t0.elapsed().as_secs_f32();
         trace(&format!("  -> {} bytes in {:.2}s (reuse={})", added, dt, will_reuse));
@@ -1541,17 +1570,13 @@ fn create_backup_impl(
         }
     }
     trace(&format!("pre-flight scan done, total {} bytes", estimated_source_bytes));
-    let largest_source = cached_snapshots.iter().flatten().map(|s| s.iter().map(|e|e.s).sum::<u64>()).max().unwrap_or(0);
+
     if estimated_source_bytes > 0 {
         let free_gb = get_free_space_gb(Path::new(&target_path));
-        // Reserve room for both archive and extracted readback verification.
+        // File contents are verified as a stream; only bounded metadata probes use temporary space.
         let estimated_gb = (estimated_new_bytes as f64) / (1024.0 * 1024.0 * 1024.0);
-        require_free_space(&std::env::temp_dir(),largest_source.saturating_add(largest_source/10))?;
-        let same_volume = {
-            use std::os::unix::fs::MetadataExt;
-            fs::metadata(&target_path).map_err(|e|e.to_string())?.dev() == fs::metadata(std::env::temp_dir()).map_err(|e|e.to_string())?.dev()
-        };
-        let required_gb = (estimated_new_bytes as f64 * 1.1 + if same_volume {largest_source as f64 * 1.1} else {0.0}) / (1024.0 * 1024.0 * 1024.0); // 10% margin
+        backup::readback_space_preflight()?;
+        let required_gb = estimated_new_bytes as f64 * 1.1 / (1024.0 * 1024.0 * 1024.0);
         let _ = window.emit(
             "backup-log",
             format!(
@@ -1579,7 +1604,10 @@ fn create_backup_impl(
         fs::create_dir(&backup_root).map_err(|e| format!("Cannot create a new backup (timestamp already used?): {e}"))?;
     }
     fs::create_dir_all(&inventory_root).map_err(|e| e.to_string())?;
-    atomic_write(&resume_state_path(&backup_root), b"")?;
+    atomic_write(&backup_root.join("source-snapshots.json"), &serde_json::to_vec_pretty(&frozen.report()).map_err(|e|e.to_string())?)?;
+    // Keep successful checkpoints across another interruption. Every candidate
+    // is checked against the new frozen source and its archive before reuse.
+    if !is_resume {atomic_write(&resume_state_path(&backup_root), b"")?;}
     trace("dirs created");
     
     let _ = window.emit("backup-log", format!("=== Backup started: {} ===", start_time_str));
@@ -1588,26 +1616,16 @@ fn create_backup_impl(
         "message": "Initialisiere Backup..."
     }));
     
-    let _ = window.emit("backup-log", "Vollständige Sicherung ohne versteckte Ausschlüsse; Rückleseprüfung benötigt zusätzlichen temporären Speicher.");
-    let brew_inventory = if config.backup_homebrew { Some(get_brew_packages()?) } else { None };
-    let mas_inventory = if config.backup_mas { Some(get_mas_apps()?) } else { None };
-    let vscode_inventory = if config.backup_vscode_settings { match get_vscode_extensions() {
-        Ok(items) => Some(items.join("\n")),
-        Err(e) if e=="VS Code not installed" => {let _ = window.emit("backup-log", e); None},
-        Err(e) => return Err(e),
-    }} else { None };
+    let _ = window.emit("backup-log", "Dateiinhalte werden vollständig im Datenstrom geprüft; nur Dateiattribute benötigen begrenzten temporären Speicher.");
     let manual=get_manual_apps()?.join("\n");
     atomic_write(&inventory_root.join("manual_apps.txt"),manual.as_bytes())?;
 
-    let home = dirs::home_dir().unwrap_or_default();
     let mut extra_source_guards: Vec<(PathBuf,Vec<ManifestEntry>)> = Vec::new();
     let mut items = Vec::new();
     let total = directories.len();
     trace(&format!("main loop begin, incremental={} total={}", incremental, total));
 
-    // Resume rebuilds every selected source; previous completed checkpoints are
-    // hints only and must never hide changes made since interruption.
-    if is_resume { let _ = window.emit("backup-log", format!("Resume: {} frühere Einträge werden anhand der aktuellen Quellen neu geprüft und gesichert", resumed_items.len())); }
+    if is_resume { let _ = window.emit("backup-log", format!("Fortsetzung: {} vorhandene Archive werden mit dem aktuellen Snapshot und ihrer Prüfsumme verglichen; veränderte Quellen werden neu gesichert.", resumed_items.len())); }
     // Inkrementelles Backup: vorheriges Backup ermitteln (Timestamp + Metadata),
     // um Manifeste vergleichen und Archive per Hardlink wiederverwenden zu können.
     trace(&format!("previous backup found={}", previous.is_some()));
@@ -1636,14 +1654,9 @@ fn create_backup_impl(
             return Err("Backup was cancelled".to_string());
         }
 
-        let expanded = if dir.starts_with("~/") {
-            home.join(&dir[2..])
-        } else if dir == "~" {
-            home.clone()
-        } else {
-            PathBuf::from(dir)
-        };
-        
+        let original=&original_sources[i];
+        let expanded=frozen.get(original)?;
+
         fs::symlink_metadata(&expanded).map_err(|e| format!("{}: {}", expanded.display(),e))?;
         
         let is_file = expanded.is_file();
@@ -1657,7 +1670,7 @@ fn create_backup_impl(
         // Endung muss zum tatsächlichen Kompressor passen, sonst schlägt die
         // zstd-Vorprüfung beim Verify/Restore unnötig fehl.
         let archive_ext = if !is_file && is_zstd_available() { "tar.zst" } else { "tar.gz" };
-        let archive_name = archive_name_for(&expanded, archive_ext);
+        let archive_name = archive_name_for(original, archive_ext);
         let archive_path = backup_root.join(&archive_name);
         
         let _ = window.emit("backup-log", format!("Archiving {} ...", dir));
@@ -1667,12 +1680,19 @@ fn create_backup_impl(
             "message": format!("Archiving {}...", name)
         }));
         
-        // The preflight already read every byte. Archive exactly that baseline,
-        // verify the extracted data against it, then re-read the source to detect
-        // changes. Do not add another identical full scan immediately beforehand.
+        // Preflight, tar, readback and final guards all read the same immutable
+        // APFS view. Changes to the live source cannot invalidate this baseline.
         let current_snapshot = cached_snapshots[i].as_ref().ok_or("Quellmanifest fehlt")?.clone();
         let source_size: u64 = current_snapshot.iter().map(|e| e.s).sum();
         trace(&format!("  compute_snapshot done ({} entries)", current_snapshot.len()));
+
+        if let Some(item)=verified_resume_item(&backup_root,&inventory_root,dir,&archive_name,&current_snapshot,&resumed_items)? {
+            save_manifest(&inventory_root,&archive_name,&current_snapshot)?;
+            let _=window.emit("backup-log",format!("✅ Fortgesetzt: {} unverändert, bereits rückgelesenes Archiv mit SHA-256 bestätigt",dir));
+            append_resume_entry(&backup_root,&item)?;
+            items.push(item);
+            continue;
+        }
 
         let mut reused_from_prev: Option<(String, String, u64)> = None; // (prev_ts, prev_hash, prev_archive_size)
         if let Some((prev_ts, prev_meta)) = &previous {
@@ -1680,7 +1700,7 @@ fn create_backup_impl(
                 .join("inventories")
                 .join(prev_ts);
             if let Some(prev_snapshot) = load_manifest(&prev_inventory, &archive_name) {
-                if prev_snapshot == current_snapshot {
+                if same_source_version(&prev_snapshot, &current_snapshot) {
                     // Finde passenden Eintrag in vorheriger Metadata (gleicher Pfad + Archiv-Name)
                     if let Some(prev_item) = prev_meta
                         .items
@@ -1797,21 +1817,8 @@ fn create_backup_impl(
         trace("archiving homebrew-cache");
         let _ = window.emit("backup-log", "Checking Homebrew cache...");
         
-        // Homebrew cache locations
-        let cache_paths = [
-            PathBuf::from("/opt/homebrew/var/homebrew/cache"),
-            PathBuf::from("/usr/local/var/homebrew/cache"),
-            dirs::home_dir().unwrap_or_default().join("Library/Caches/Homebrew"),
-        ];
+        let cache_path=cache_source.as_ref().map(|p|frozen.get(p)).transpose()?;
 
-        let mut cache_path: Option<PathBuf> = None;
-        for path in &cache_paths {
-            if path.exists() {
-                cache_path = Some(path.clone());
-                break;
-            }
-        }
-        
         if let Some(cache_dir) = cache_path {
             validate_source_target(&cache_dir, Path::new(&target_path))?;
             let cache_manifest=compute_snapshot(&cache_dir)?;
@@ -1849,28 +1856,8 @@ fn create_backup_impl(
         trace("archiving safari-settings");
         let _ = window.emit("backup-log", "Backing up Safari settings...");
         
-        let home = dirs::home_dir().unwrap_or_default();
-        let safari_paths = vec![
-            // Safari Bookmarks
-            home.join("Library/Safari/Bookmarks.plist"),
-            // Safari History (optional, can be large)
-            // home.join("Library/Safari/History.db"),
-            // Safari Reading List
-            home.join("Library/Safari/ReadingListArchives"),
-            // Safari Extensions
-            home.join("Library/Safari/Extensions"),
-            // Safari Preferences
-            home.join("Library/Preferences/com.apple.Safari.plist"),
-            // Safari Sandbox data (contains tabs, etc.)
-            home.join("Library/Containers/com.apple.Safari/Data/Library/Preferences"),
-            // Safari Favorites icons
-            home.join("Library/Safari/Favicon Cache"),
-            // Top Sites
-            home.join("Library/Safari/TopSites.plist"),
-            // Last Session
-            home.join("Library/Safari/LastSession.plist"),
-        ];
-        
+        let safari_paths: Vec<PathBuf> = safari_sources.iter().map(|p|frozen.get(p)).collect::<Result<_,_>>()?;
+
         let safari_stage = PrivateDir::temp()?;
         let temp_safari_dir = safari_stage.0.join("safari_backup");
         fs::create_dir(&temp_safari_dir).map_err(|e| e.to_string())?;
@@ -1928,10 +1915,9 @@ fn create_backup_impl(
         let _ = fs::remove_dir_all(&temp_safari_dir);
     }
 
-    let _ = window.emit("backup-log", "Abschlussprüfung: alle Quellen und Archive werden erneut geprüft …");
-    for (i,dir) in directories.iter().enumerate() {
-        let source=if dir=="~" {home.clone()} else if let Some(rel)=dir.strip_prefix("~/") {home.join(rel)} else {PathBuf::from(dir)};
-        extra_source_guards.push((source,cached_snapshots[i].clone().ok_or("Quellmanifest fehlt")?));
+    let _ = window.emit("backup-log", "Abschlussprüfung: eingefrorener Sicherungsstand und Archive werden erneut geprüft …");
+    for (i,source) in original_sources.iter().enumerate() {
+        extra_source_guards.push((frozen.get(source)?,cached_snapshots[i].clone().ok_or("Quellmanifest fehlt")?));
     }
 
     let end = Local::now();
@@ -2976,7 +2962,7 @@ fn dry_run_backup(
     let available_bytes: u64 = (free_gb * 1024.0 * 1024.0 * 1024.0) as u64;
     // Grobe Schätzung: zstd ~2.5x Kompressionsrate → halber Platz reicht meist
     let estimated_archive_bytes = total_bytes.saturating_add(total_bytes / 10);
-    let required_bytes = estimated_archive_bytes.saturating_add(total_bytes);
+    let required_bytes = estimated_archive_bytes;
 
     Ok(serde_json::json!({
         "target_path": target_path,
