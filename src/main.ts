@@ -1456,6 +1456,9 @@ async function startBackup(): Promise<void> {
   } finally {
     backupInProgress = false;
     operationInProgress = false;
+    // The invocation has returned, including cleanup. Replace the pending
+    // activity text with the same terminal outcome shown in the header.
+    setProgressMessage(rawStatus);
     setOperationControls(false);
     btnBackup.disabled = false;
     btnBackup.style.display = "block";
@@ -1495,7 +1498,8 @@ async function setupEventListeners(): Promise<void> {
   });
   
   await listen<{ progress: number; message: string }>("backup-progress", (event) => {
-    if (cancelRequested) return;
+    // Queued events must not overwrite the completed/cancelled outcome.
+    if (!operationInProgress || cancelRequested) return;
     setProgressMessage(event.payload.message);
     progressIndicator.update(event.payload.progress);
   });
