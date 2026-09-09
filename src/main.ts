@@ -22,6 +22,8 @@ interface BackupConfig {
   theme: string;
   backup_homebrew_cache: boolean;
   backup_safari_settings: boolean;
+  backup_chrome_settings: boolean;
+  backup_firefox_settings: boolean;
   backup_vscode_settings: boolean;
   backup_chatgpt_settings: boolean;
   backup_codex_settings: boolean;
@@ -113,6 +115,11 @@ const translations: Record<string, Record<string, string>> = {
     safariSettings: "Safari-Einstellungen",
     backupSafariSettings: "Safari-Einstellungen sichern",
     safariSettingsHint: "Lesezeichen, Leseliste, Erweiterungen, Top Sites",
+    browserSettings: "Browser-Einstellungen",
+    backupChromeSettings: "Chrome-Profile sichern",
+    chromeSettingsHint: "Einstellungen, Lesezeichen und Erweiterungen aller lokalen Profile",
+    backupFirefoxSettings: "Firefox-Profile sichern",
+    firefoxSettingsHint: "Einstellungen, Lesezeichen und Erweiterungen aller lokalen Profile",
     footer: "Sichere Datensicherung für deinen Mac",
     changeLanguage: "Sprache wechseln",
     changeTheme: "Design wechseln",
@@ -345,6 +352,11 @@ const translations: Record<string, Record<string, string>> = {
     safariSettings: "Safari settings",
     backupSafariSettings: "Back up Safari settings",
     safariSettingsHint: "Bookmarks, Reading List, extensions, Top Sites",
+    browserSettings: "Browser settings",
+    backupChromeSettings: "Back up Chrome profiles",
+    chromeSettingsHint: "Settings, bookmarks and extensions from all local profiles",
+    backupFirefoxSettings: "Back up Firefox profiles",
+    firefoxSettingsHint: "Settings, bookmarks and extensions from all local profiles",
     footer: "Secure backups for your Mac",
     changeLanguage: "Change language",
     changeTheme: "Change theme",
@@ -634,6 +646,8 @@ const backupHomebrewCheckbox = document.getElementById("backup-homebrew") as HTM
 const backupMasCheckbox = document.getElementById("backup-mas") as HTMLInputElement;
 const backupHomebrewCacheCheckbox = document.getElementById("backup-homebrew-cache") as HTMLInputElement;
 const backupSafariSettingsCheckbox = document.getElementById("backup-safari-settings") as HTMLInputElement;
+const backupChromeSettingsCheckbox = document.getElementById("backup-chrome-settings") as HTMLInputElement;
+const backupFirefoxSettingsCheckbox = document.getElementById("backup-firefox-settings") as HTMLInputElement;
 const appSettingsControls = ["vscode", "chatgpt", "codex"].map(id => ({
   id,
   key: `backup_${id}_settings` as "backup_vscode_settings" | "backup_chatgpt_settings" | "backup_codex_settings",
@@ -687,6 +701,8 @@ let config: BackupConfig = {
   theme: "auto",
   backup_homebrew_cache: false,
   backup_safari_settings: false,
+  backup_chrome_settings: false,
+  backup_firefox_settings: false,
   backup_vscode_settings: true,
   backup_chatgpt_settings: true,
   backup_codex_settings: true,
@@ -2350,6 +2366,12 @@ btnSettings.addEventListener("click", () => {
   if (backupSafariSettingsCheckbox) {
     backupSafariSettingsCheckbox.checked = config.backup_safari_settings || false;
   }
+  if (backupChromeSettingsCheckbox) {
+    backupChromeSettingsCheckbox.checked = config.backup_chrome_settings || false;
+  }
+  if (backupFirefoxSettingsCheckbox) {
+    backupFirefoxSettingsCheckbox.checked = config.backup_firefox_settings || false;
+  }
   for (const control of appSettingsControls) control.checkbox.checked = config[control.key];
   settingsDialog.showModal();
   void refreshAppSettingsPreview();
@@ -2366,6 +2388,8 @@ settingsSaveBtn.addEventListener("click", async () => {
     backup_mas: backupMasCheckbox.checked,
     backup_homebrew_cache: backupHomebrewCacheCheckbox.checked,
     backup_safari_settings: backupSafariSettingsCheckbox.checked,
+    backup_chrome_settings: backupChromeSettingsCheckbox.checked,
+    backup_firefox_settings: backupFirefoxSettingsCheckbox.checked,
   };
   for (const control of appSettingsControls) next[control.key] = control.checkbox.checked;
   settingsSaveBtn.disabled = true;

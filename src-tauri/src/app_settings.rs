@@ -42,6 +42,27 @@ const CODEX: &[&str] = &[
     "Library/Application Support/Codex/browser-sidebar-page-states.json",
     "Library/Application Support/OpenAI/Codex/NativeMessagingHosts",
 ];
+const CHROME_ROOT: &str = "Library/Application Support/Google/Chrome";
+const FIREFOX_ROOT: &str = "Library/Application Support/Firefox";
+const CHROME_PROFILE_FILES: &[&str] = &[
+    "Preferences",
+    "Secure Preferences",
+    "Bookmarks",
+    "Extensions",
+];
+const FIREFOX_PROFILE_FILES: &[&str] = &[
+    "prefs.js",
+    "user.js",
+    "extensions",
+    "extensions.json",
+    "extension-preferences.json",
+    "browser-extension-data",
+    "extension-store",
+    "containers.json",
+    "search.json.mozlz4",
+    "places.sqlite",
+    "bookmarkbackups",
+];
 
 fn exists(path: &Path) -> Result<bool, String> {
     match fs::symlink_metadata(path) {
@@ -64,6 +85,76 @@ fn entries(path: &Path) -> Result<Vec<PathBuf>, String> {
         .collect::<Result<Vec<_>, _>>()?;
     result.sort();
     Ok(result)
+}
+
+fn relative_source(home: &Path, path: &Path) -> Result<String, String> {
+    Ok(format!(
+        "~/{}",
+        path.strip_prefix(home)
+            .map_err(|_| format!("Einstellungspfad liegt außerhalb des Benutzerordners: {}", path.display()))?
+            .to_str()
+            .ok_or("Ungültiger Konfigurationspfad")?
+    ))
+}
+
+fn browser_profile_paths(
+    home: &Path,
+    profile_root: &Path,
+    profile_names: impl Fn(&str) -> bool,
+    files: &[&str],
+) -> Result<Vec<String>, String> {
+    let mut paths = Vec::new();
+    for profile in entries(profile_root)? {
+        let Some(name) = profile.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !fs::symlink_metadata(&profile).is_ok_and(|metadata| metadata.is_dir())
+            || !profile_names(name)
+        {
+            continue;
+        }
+        for file in files {
+            let path = profile.join(file);
+            if exists(&path)? {
+                paths.push(relative_source(home, &path)?);
+            }
+        }
+    }
+    Ok(paths)
+}
+
+fn chrome_paths(home: &Path) -> Result<Vec<String>, String> {
+    let root = home.join(CHROME_ROOT);
+    let mut paths = Vec::new();
+    let local_state = root.join("Local State");
+    if exists(&local_state)? {
+        paths.push(relative_source(home, &local_state)?);
+    }
+    paths.extend(browser_profile_paths(
+        home,
+        &root,
+        |name| name == "Default" || name.starts_with("Profile "),
+        CHROME_PROFILE_FILES,
+    )?);
+    Ok(paths)
+}
+
+fn firefox_paths(home: &Path) -> Result<Vec<String>, String> {
+    let root = home.join(FIREFOX_ROOT);
+    let mut paths = Vec::new();
+    for file in ["profiles.ini", "installs.ini"] {
+        let path = root.join(file);
+        if exists(&path)? {
+            paths.push(relative_source(home, &path)?);
+        }
+    }
+    paths.extend(browser_profile_paths(
+        home,
+        &root.join("Profiles"),
+        |_| true,
+        FIREFOX_PROFILE_FILES,
+    )?);
+    Ok(paths)
 }
 
 pub(crate) fn discover(home: &Path, config: &BackupConfig) -> Result<Vec<SettingsSources>, String> {
@@ -122,6 +213,20 @@ pub(crate) fn discover(home: &Path, config: &BackupConfig) -> Result<Vec<Setting
             }
         }
         groups.push(SettingsSources { id, name, paths });
+    }
+    if config.backup_chrome_settings {
+        groups.push(SettingsSources {
+            id: "chrome",
+            name: "Google Chrome",
+            paths: chrome_paths(home)?,
+        });
+    }
+    if config.backup_firefox_settings {
+        groups.push(SettingsSources {
+            id: "firefox",
+            name: "Firefox",
+            paths: firefox_paths(home)?,
+        });
     }
     Ok(groups)
 }
@@ -192,6 +297,8 @@ mod tests {
             config.backup_vscode_settings
                 && config.backup_chatgpt_settings
                 && config.backup_codex_settings
+                && !config.backup_chrome_settings
+                && !config.backup_firefox_settings
         );
         config.backup_vscode_settings = false;
         config.backup_chatgpt_settings = false;
@@ -246,6 +353,46 @@ mod tests {
             append_sources(&mut sources, &discover(&home.0, &config).unwrap(), &home.0).is_empty()
         );
         assert_eq!(sources, vec!["~/.codex"]);
+    }
+    #[test]
+    fn browser_profiles_are_opt_in_and_never_add_caches() {
+        let home = fixture();
+        for rel in [
+            "Library/Application Support/Google/Chrome/Local State",
+            "Library/Application Support/Google/Chrome/Default/Preferences",
+            "Library/Application Support/Google/Chrome/Default/Extensions/example/data",
+            "Library/Application Support/Google/Chrome/Default/Cache/ignored",
+            "Library/Application Support/Google/Chrome/Profile 1/Bookmarks",
+            "Library/Application Support/Firefox/profiles.ini",
+            "Library/Application Support/Firefox/Profiles/abc.default/prefs.js",
+            "Library/Application Support/Firefox/Profiles/abc.default/extensions.json",
+            "Library/Application Support/Firefox/Profiles/abc.default/cache2/ignored",
+        ] {
+            put(&home.0, rel, b"data");
+        }
+        assert!(discover(&home.0, &BackupConfig::default())
+            .unwrap()
+            .iter()
+            .all(|group| group.id != "chrome" && group.id != "firefox"));
+
+        let config = BackupConfig {
+            backup_chrome_settings: true,
+            backup_firefox_settings: true,
+            ..BackupConfig::default()
+        };
+        let groups = discover(&home.0, &config).unwrap();
+        let chrome = groups.iter().find(|group| group.id == "chrome").unwrap();
+        assert!(chrome.paths.contains(&"~/Library/Application Support/Google/Chrome/Local State".into()));
+        assert!(chrome.paths.contains(&"~/Library/Application Support/Google/Chrome/Default/Preferences".into()));
+        assert!(chrome.paths.contains(&"~/Library/Application Support/Google/Chrome/Default/Extensions".into()));
+        assert!(chrome.paths.contains(&"~/Library/Application Support/Google/Chrome/Profile 1/Bookmarks".into()));
+        assert!(chrome.paths.iter().all(|path| !path.contains("Cache")));
+
+        let firefox = groups.iter().find(|group| group.id == "firefox").unwrap();
+        assert!(firefox.paths.contains(&"~/Library/Application Support/Firefox/profiles.ini".into()));
+        assert!(firefox.paths.contains(&"~/Library/Application Support/Firefox/Profiles/abc.default/prefs.js".into()));
+        assert!(firefox.paths.contains(&"~/Library/Application Support/Firefox/Profiles/abc.default/extensions.json".into()));
+        assert!(firefox.paths.iter().all(|path| !path.contains("cache2")));
     }
     #[test]
     fn shared_settings_and_absolute_manual_ancestors_are_not_added_twice() {

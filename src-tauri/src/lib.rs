@@ -95,6 +95,10 @@ pub struct BackupConfig {
     pub backup_homebrew_cache: bool,
     #[serde(default)]
     pub backup_safari_settings: bool,
+    #[serde(default)]
+    pub backup_chrome_settings: bool,
+    #[serde(default)]
+    pub backup_firefox_settings: bool,
     #[serde(default = "default_app_settings")]
     pub backup_vscode_settings: bool,
     #[serde(default = "default_app_settings")]
@@ -120,6 +124,8 @@ impl Default for BackupConfig {
             theme: default_theme(),
             backup_homebrew_cache: false,
             backup_safari_settings: false,
+            backup_chrome_settings: false,
+            backup_firefox_settings: false,
             backup_vscode_settings: true,
             backup_chatgpt_settings: true,
             backup_codex_settings: true,
