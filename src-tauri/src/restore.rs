@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::Component;
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::AtomicU64;
 use unicode_normalization::UnicodeNormalization;
 
@@ -186,6 +187,13 @@ pub(super) fn inspect_archive(archive: &Path) -> Result<(BTreeSet<PathBuf>, Opti
         let mut tar = tar::Archive::new(&mut input);
         for entry in tar.entries().map_err(|e| e.to_string())? {
             let mut entry = entry.map_err(|e| e.to_string())?;
+            // Validate every PAX record before trusting path/link/size overrides.
+            // The tar crate's path accessors silently skip invalid extensions.
+            if let Some(extensions) = entry.pax_extensions().map_err(|e| e.to_string())? {
+                for extension in extensions {
+                    extension.map_err(|e| format!("Invalid archive PAX metadata: {e}"))?;
+                }
+            }
             let path = relative_path(&entry.path().map_err(|e| e.to_string())?)?;
             let kind = entry.header().entry_type();
             if !(kind.is_file() || kind.is_dir() || kind.is_symlink() || kind.is_hard_link()) {
@@ -1073,15 +1081,51 @@ pub(super) fn install_extensions(
     }
 }
 static ACTIVE_DISK_OPERATION: AtomicBool = AtomicBool::new(false);
-pub(super) struct OperationGuard;
+
+/// Holds an idle-system-sleep assertion while a disk operation is running.
+/// `-i` intentionally leaves display sleep enabled. `-w` ties the helper to
+/// this app's PID, so it also exits if the app terminates unexpectedly.
+struct SleepInhibitor {
+    child: Child,
+}
+impl SleepInhibitor {
+    fn start() -> Result<Self, String> {
+        let child = Command::new("/usr/bin/caffeinate")
+            .args(["-i", "-w"])
+            .arg(std::process::id().to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("Ruhezustand konnte nicht verhindert werden: {e}"))?;
+        Ok(Self { child })
+    }
+}
+impl Drop for SleepInhibitor {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+pub(super) struct OperationGuard {
+    _sleep_inhibitor: SleepInhibitor,
+}
 impl OperationGuard {
     pub fn acquire() -> Result<Self, String> {
         ACTIVE_DISK_OPERATION
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .map_err(|_| "Another backup, restore or verification is already running")?;
+        let sleep_inhibitor = match SleepInhibitor::start() {
+            Ok(inhibitor) => inhibitor,
+            Err(error) => {
+                ACTIVE_DISK_OPERATION.store(false, Ordering::SeqCst);
+                return Err(error);
+            }
+        };
         BACKUP_CANCELLED.store(false, Ordering::SeqCst);
         VERIFY_CANCELLED.store(false, Ordering::SeqCst);
-        Ok(Self)
+        Ok(Self { _sleep_inhibitor: sleep_inhibitor })
     }
 }
 impl Drop for OperationGuard {

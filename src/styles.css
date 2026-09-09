@@ -53,9 +53,13 @@ body {
 
 .two-column-layout {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 20px;
   margin-bottom: 20px;
+}
+
+.two-column-layout > .section {
+  min-width: 0;
 }
 
 .column {
@@ -332,6 +336,13 @@ header h1 {
 
 .progress-section {
   margin-top: 16px;
+}
+
+/* Reserve a stable status area; even an unbroken path stays inside its column. */
+#progress-message {
+  height: 6em;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
 }
 
 #btn-cancel {

@@ -545,7 +545,7 @@ pub(super) fn verify_archive_source(
     expected: &[ManifestEntry],
 ) -> Result<(), String> {
     let owned = ReadbackDir(PrivateDir::temp()?);
-    let actual = readback::verify_contents_and_metadata(archive, root_name, &owned.0 .0)?;
+    let actual = readback::verify_contents_and_metadata(archive, root_name, expected, &owned.0 .0)?;
     if actual.len() != expected.len() {
         let wanted: std::collections::BTreeSet<_> = expected.iter().map(|e|e.p.as_str()).collect();
         let found: std::collections::BTreeSet<_> = actual.iter().map(|e|e.p.as_str()).collect();
