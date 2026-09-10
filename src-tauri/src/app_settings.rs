@@ -91,7 +91,10 @@ fn relative_source(home: &Path, path: &Path) -> Result<String, String> {
     Ok(format!(
         "~/{}",
         path.strip_prefix(home)
-            .map_err(|_| format!("Einstellungspfad liegt außerhalb des Benutzerordners: {}", path.display()))?
+            .map_err(|_| format!(
+                "Einstellungspfad liegt außerhalb des Benutzerordners: {}",
+                path.display()
+            ))?
             .to_str()
             .ok_or("Ungültiger Konfigurationspfad")?
     ))
@@ -382,16 +385,30 @@ mod tests {
         };
         let groups = discover(&home.0, &config).unwrap();
         let chrome = groups.iter().find(|group| group.id == "chrome").unwrap();
-        assert!(chrome.paths.contains(&"~/Library/Application Support/Google/Chrome/Local State".into()));
-        assert!(chrome.paths.contains(&"~/Library/Application Support/Google/Chrome/Default/Preferences".into()));
-        assert!(chrome.paths.contains(&"~/Library/Application Support/Google/Chrome/Default/Extensions".into()));
-        assert!(chrome.paths.contains(&"~/Library/Application Support/Google/Chrome/Profile 1/Bookmarks".into()));
+        assert!(chrome
+            .paths
+            .contains(&"~/Library/Application Support/Google/Chrome/Local State".into()));
+        assert!(chrome
+            .paths
+            .contains(&"~/Library/Application Support/Google/Chrome/Default/Preferences".into()));
+        assert!(chrome
+            .paths
+            .contains(&"~/Library/Application Support/Google/Chrome/Default/Extensions".into()));
+        assert!(chrome
+            .paths
+            .contains(&"~/Library/Application Support/Google/Chrome/Profile 1/Bookmarks".into()));
         assert!(chrome.paths.iter().all(|path| !path.contains("Cache")));
 
         let firefox = groups.iter().find(|group| group.id == "firefox").unwrap();
-        assert!(firefox.paths.contains(&"~/Library/Application Support/Firefox/profiles.ini".into()));
-        assert!(firefox.paths.contains(&"~/Library/Application Support/Firefox/Profiles/abc.default/prefs.js".into()));
-        assert!(firefox.paths.contains(&"~/Library/Application Support/Firefox/Profiles/abc.default/extensions.json".into()));
+        assert!(firefox
+            .paths
+            .contains(&"~/Library/Application Support/Firefox/profiles.ini".into()));
+        assert!(firefox.paths.contains(
+            &"~/Library/Application Support/Firefox/Profiles/abc.default/prefs.js".into()
+        ));
+        assert!(firefox.paths.contains(
+            &"~/Library/Application Support/Firefox/Profiles/abc.default/extensions.json".into()
+        ));
         assert!(firefox.paths.iter().all(|path| !path.contains("cache2")));
     }
     #[test]

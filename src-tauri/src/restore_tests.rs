@@ -24,6 +24,8 @@ impl Fixture {
     }
     fn metadata(&self, items: Vec<BackupItem>) {
         let m = BackupMetadata {
+            profile_id: "standard".into(),
+            profile_name: "Standard".into(),
             timestamp: "20260907-120000".into(),
             items,
             hash_algorithm: "sha256".into(),
@@ -652,47 +654,127 @@ fn timeout_also_cleans_up_children_holding_output_pipes() {
 #[test]
 fn brew_bundle_extensions_preserve_types_and_source_options() {
     let entries=brew_entries("cargo \"cargo-audit\"\ncargo \"tauri-cli\"\nnpm \"corepack\"\nnpm \"@scope/tool\"\ngo \"example.org/cli\"\nuv \"tool\", source: \"git+https://example.org/tool.git\"\nkrew \"ctx\"\nflatpak \"org.example.App\", remote: \"flathub\", url: \"https://example.org/repo\"\nwinget \"Tool\", id: \"Vendor.Tool\", source: \"winget\"").unwrap();
-    assert_eq!(entries.len(),9);assert_eq!(entries[0].kind,"cargo");assert_eq!(entries[2].kind,"npm");
-    assert_eq!(entries[5].options["source"],"git+https://example.org/tool.git");
-    for input in ["cargo \"--help\"","cargo \"x\"; system('id')","cargo \"x\", source: system('id')","cargo \"x\", source: \"https://example.org\"; system('id')","npm \"x\", source: \"bad\"","cargo \"x\", source: \"a\", source: \"b\""] { assert!(brew_entries(input).is_err(),"{input}"); }
+    assert_eq!(entries.len(), 9);
+    assert_eq!(entries[0].kind, "cargo");
+    assert_eq!(entries[2].kind, "npm");
+    assert_eq!(
+        entries[5].options["source"],
+        "git+https://example.org/tool.git"
+    );
+    for input in [
+        "cargo \"--help\"",
+        "cargo \"x\"; system('id')",
+        "cargo \"x\", source: system('id')",
+        "cargo \"x\", source: \"https://example.org\"; system('id')",
+        "npm \"x\", source: \"bad\"",
+        "cargo \"x\", source: \"a\", source: \"b\"",
+    ] {
+        assert!(brew_entries(input).is_err(), "{input}");
+    }
 }
 
 #[test]
 fn brew_extensions_use_generated_bundle_data_and_propagate_failure() {
-    let f=Fixture::new();let captured=f.root.join("captured");let args=f.root.join("arguments");
+    let f = Fixture::new();
+    let captured = f.root.join("captured");
+    let args = f.root.join("arguments");
     let script=f.file("fake-brew",format!("#!/bin/sh\nif [ \"$1\" = list ]; then exit 1; fi\nprintf '%s\\n' \"$@\" >> '{}'\nif [ \"$1\" = bundle ]; then /bin/cat \"$4\" > '{}'; fi\n",args.display(),captured.display()).as_bytes());
-    fs::set_permissions(&script,fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
     let entries=brew_entries("brew \"node\"\ncargo \"cargo-audit\"\ncargo \"bat\", source: \"https://example.org/bat.git?tag=v1\"\nnpm \"corepack\"").unwrap();
-    assert_eq!(install_brew_entries(script.to_str().unwrap(),&entries,false,None).unwrap(),4);
-    let content=fs::read_to_string(&captured).unwrap();assert!(content.contains("cargo 'cargo-audit'"));assert!(content.contains("source: 'https://example.org/bat.git?tag=v1'"));assert!(content.contains("npm 'corepack'"));assert!(!content.contains("brew 'node'"));
-    let arguments=fs::read_to_string(&args).unwrap();assert!(arguments.contains("--no-upgrade"));assert!(!arguments.contains("--formula\ncargo-audit"));
-    fs::write(&script,b"#!/bin/sh\nexit 42\n").unwrap();
-    assert!(install_brew_entries(script.to_str().unwrap(),&entries[1..],false,None).unwrap_err().contains("Homebrew Bundle packages"));
+    assert_eq!(
+        install_brew_entries(script.to_str().unwrap(), &entries, false, None).unwrap(),
+        4
+    );
+    let content = fs::read_to_string(&captured).unwrap();
+    assert!(content.contains("cargo 'cargo-audit'"));
+    assert!(content.contains("source: 'https://example.org/bat.git?tag=v1'"));
+    assert!(content.contains("npm 'corepack'"));
+    assert!(!content.contains("brew 'node'"));
+    let arguments = fs::read_to_string(&args).unwrap();
+    assert!(arguments.contains("--no-upgrade"));
+    assert!(!arguments.contains("--formula\ncargo-audit"));
+    fs::write(&script, b"#!/bin/sh\nexit 42\n").unwrap();
+    assert!(
+        install_brew_entries(script.to_str().unwrap(), &entries[1..], false, None)
+            .unwrap_err()
+            .contains("Homebrew Bundle packages")
+    );
 }
 
 #[test]
 fn mas_inventory_accepts_native_list_and_legacy_brewfile_formats() {
-    assert_eq!(mas_ids("123456 App Name (1.2.3)\n987654\tOther App (2.0)\n").unwrap(),vec!["123456","987654"]);
-    assert_eq!(mas_ids("mas \"App Name\", id: 123456\n").unwrap(),vec!["123456"]);
-    for line in ["error: no access","--help App","0 Invalid App","123;id App"] {assert!(mas_ids(line).is_err());}
+    assert_eq!(
+        mas_ids("123456 App Name (1.2.3)\n987654\tOther App (2.0)\n").unwrap(),
+        vec!["123456", "987654"]
+    );
+    assert_eq!(
+        mas_ids("mas \"App Name\", id: 123456\n").unwrap(),
+        vec!["123456"]
+    );
+    for line in [
+        "error: no access",
+        "--help App",
+        "0 Invalid App",
+        "123;id App",
+    ] {
+        assert!(mas_ids(line).is_err());
+    }
 }
 
 #[test]
 #[ignore = "manual real software-inventory roundtrip; requires BACKUP_BREW_PROBE_DIR"]
 fn actual_software_inventories_backup_and_restore_plan() {
-    let root=PathBuf::from(std::env::var("BACKUP_BREW_PROBE_DIR").unwrap());let f=Fixture::new();
-    let brew=fs::read_to_string(root.join("Brewfile")).unwrap();let mas=fs::read_to_string(root.join("mas.txt")).unwrap();
-    let parsed=brew_entries(&brew).unwrap();assert!(parsed.iter().any(|e|e.kind=="cargo"));assert!(parsed.iter().any(|e|e.kind=="npm"));assert!(!mas_ids(&mas).unwrap().is_empty());
-    fs::write(root.join("restore-Brewfile"),extension_brewfile(&parsed.iter().filter(|e|!["tap","brew","cask"].contains(&e.kind.as_str())).collect::<Vec<_>>())).unwrap();
-    let mut items=Vec::new();
-    for (label,name,text) in [("homebrew-packages","homebrew_packages.txt",brew),("mas-apps","mas_apps.txt",mas)] {
-        let source=f.file(&format!("source/{name}"),text.as_bytes());let archive=f.backup.join(format!("{label}.tar.gz"));create_file_archive(&source,name,&archive).unwrap();
-        assert_eq!(read_inventory(&archive,name).unwrap(),text);
-        items.push(BackupItem{path:label.into(),archive:archive.file_name().unwrap().to_str().unwrap().into(),hash:hash_file(&archive).unwrap(),archive_size_bytes:fs::metadata(&archive).unwrap().len(),source_size_bytes:text.len() as u64});
+    let root = PathBuf::from(std::env::var("BACKUP_BREW_PROBE_DIR").unwrap());
+    let f = Fixture::new();
+    let brew = fs::read_to_string(root.join("Brewfile")).unwrap();
+    let mas = fs::read_to_string(root.join("mas.txt")).unwrap();
+    let parsed = brew_entries(&brew).unwrap();
+    assert!(parsed.iter().any(|e| e.kind == "cargo"));
+    assert!(parsed.iter().any(|e| e.kind == "npm"));
+    assert!(!mas_ids(&mas).unwrap().is_empty());
+    fs::write(
+        root.join("restore-Brewfile"),
+        extension_brewfile(
+            &parsed
+                .iter()
+                .filter(|e| !["tap", "brew", "cask"].contains(&e.kind.as_str()))
+                .collect::<Vec<_>>(),
+        ),
+    )
+    .unwrap();
+    let mut items = Vec::new();
+    for (label, name, text) in [
+        ("homebrew-packages", "homebrew_packages.txt", brew),
+        ("mas-apps", "mas_apps.txt", mas),
+    ] {
+        let source = f.file(&format!("source/{name}"), text.as_bytes());
+        let archive = f.backup.join(format!("{label}.tar.gz"));
+        create_file_archive(&source, name, &archive).unwrap();
+        assert_eq!(read_inventory(&archive, name).unwrap(), text);
+        items.push(BackupItem {
+            path: label.into(),
+            archive: archive.file_name().unwrap().to_str().unwrap().into(),
+            hash: hash_file(&archive).unwrap(),
+            archive_size_bytes: fs::metadata(&archive).unwrap().len(),
+            source_size_bytes: text.len() as u64,
+        });
     }
-    f.metadata(items);let meta=load_backup_metadata(&f.backup.join("metadata.json")).unwrap();
-    preflight_restore(&f.backup,&meta,&["homebrew-packages".into(),"mas-apps".into()]).unwrap();
-    let fake=f.file("fake-brew",b"#!/bin/sh\nif [ \"$1\" = list ]; then exit 1; fi\nexit 0\n");fs::set_permissions(&fake,fs::Permissions::from_mode(0o700)).unwrap();
-    assert_eq!(install_brew_entries(fake.to_str().unwrap(),&parsed,false,None).unwrap(),parsed.len());
+    f.metadata(items);
+    let meta = load_backup_metadata(&f.backup.join("metadata.json")).unwrap();
+    preflight_restore(
+        &f.backup,
+        &meta,
+        &["homebrew-packages".into(), "mas-apps".into()],
+    )
+    .unwrap();
+    let fake = f.file(
+        "fake-brew",
+        b"#!/bin/sh\nif [ \"$1\" = list ]; then exit 1; fi\nexit 0\n",
+    );
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+        install_brew_entries(fake.to_str().unwrap(), &parsed, false, None).unwrap(),
+        parsed.len()
+    );
     println!("ACTUAL_SOFTWARE_INVENTORIES_PASSED: {} Homebrew/Bundle entries plus MAS inventory, archive roundtrip and restore preflight; no packages installed",parsed.len());
 }

@@ -12,6 +12,8 @@ import { sendNotification } from "@tauri-apps/plugin-notification";
 
 // Types
 interface BackupConfig {
+  profile_id: string;
+  profile_name: string;
   target_volume: string;
   target_directory: string;
   directories: string[];
@@ -31,8 +33,16 @@ interface BackupConfig {
 
 }
 
+interface ProfileSummary {
+  id: string;
+  name: string;
+  active: boolean;
+}
+
 interface BackupItem {
   timestamp: string;
+  profile_id: string;
+  profile_name: string;
   hash_verified: boolean;
   metadata_valid: boolean;
 }
@@ -108,6 +118,17 @@ interface AppLicenseEntry {
 // Translations
 const translations: Record<string, Record<string, string>> = {
   de: {
+    backupProfile: "Backup-Profil:",
+    newProfile: "Neues Profil",
+    duplicateProfile: "Duplizieren",
+    renameProfile: "Umbenennen",
+    deleteProfile: "Löschen",
+    newProfilePrompt: "Name für das neue Backup-Profil:",
+    duplicateProfilePrompt: "Name für die Kopie des Backup-Profils:",
+    renameProfilePrompt: "Neuer Name für das Backup-Profil:",
+    deleteProfilePrompt: "Profil „{0}“ löschen? Bereits vorhandene Backups auf dem Ziel bleiben erhalten.",
+    profileCreated: "Backup-Profil erstellt:",
+    profileSelected: "Backup-Profil ausgewählt:",
     softwareInventory: "Software-Inventar",
     backupHomebrew: "Homebrew-Paketliste sichern (Homebrew erforderlich)",
     backupMas: "App-Store-Liste sichern (mas erforderlich)",
@@ -348,6 +369,17 @@ const translations: Record<string, Record<string, string>> = {
     selectBackupForLicense: "Bitte wählen Sie zuerst ein Backup aus!",
   },
   en: {
+    backupProfile: "Backup profile:",
+    newProfile: "New profile",
+    duplicateProfile: "Duplicate",
+    renameProfile: "Rename",
+    deleteProfile: "Delete",
+    newProfilePrompt: "Name for the new backup profile:",
+    duplicateProfilePrompt: "Name for the copied backup profile:",
+    renameProfilePrompt: "New name for the backup profile:",
+    deleteProfilePrompt: "Delete profile “{0}”? Existing backups on the target remain unchanged.",
+    profileCreated: "Backup profile created:",
+    profileSelected: "Backup profile selected:",
     softwareInventory: "Software inventory",
     backupHomebrew: "Back up Homebrew package list (requires Homebrew)",
     backupMas: "Back up App Store list (requires mas)",
@@ -644,6 +676,11 @@ const statusEl = document.getElementById("status") as HTMLParagraphElement;
 const btnSettings = document.getElementById("btn-settings") as HTMLButtonElement;
 const btnLanguage = document.getElementById("btn-language") as HTMLButtonElement;
 const btnTheme = document.getElementById("btn-theme") as HTMLButtonElement;
+const profileSelect = document.getElementById("profile-select") as HTMLSelectElement;
+const profileNewBtn = document.getElementById("profile-new") as HTMLButtonElement;
+const profileDuplicateBtn = document.getElementById("profile-duplicate") as HTMLButtonElement;
+const profileRenameBtn = document.getElementById("profile-rename") as HTMLButtonElement;
+const profileDeleteBtn = document.getElementById("profile-delete") as HTMLButtonElement;
 const settingsDialog = document.getElementById("settings-dialog") as HTMLDialogElement;
 const defaultDirectoriesList = document.getElementById("default-directories-list") as HTMLUListElement;
 const addDefaultDirectoryBtn = document.getElementById("add-default-directory") as HTMLButtonElement;
@@ -699,6 +736,8 @@ const btnHelp = document.getElementById("btn-help") as HTMLButtonElement;
 
 // State
 let config: BackupConfig = {
+  profile_id: "standard",
+  profile_name: "Standard",
   target_volume: "",
   target_directory: "",
   directories: [],
@@ -1003,6 +1042,115 @@ async function saveConfig(): Promise<void> {
   }
 }
 
+function setProfileControlsDisabled(disabled: boolean): void {
+  profileSelect.disabled = disabled;
+  profileNewBtn.disabled = disabled;
+  profileDuplicateBtn.disabled = disabled;
+  profileRenameBtn.disabled = disabled;
+  profileDeleteBtn.disabled = disabled || profileSelect.options.length <= 1;
+}
+
+async function loadProfiles(): Promise<void> {
+  const profiles = await invoke<ProfileSummary[]>("list_profiles");
+  profileSelect.replaceChildren();
+  for (const profile of profiles) {
+    const option = document.createElement("option");
+    option.value = profile.id;
+    option.textContent = profile.name;
+    profileSelect.appendChild(option);
+  }
+  profileSelect.value = config.profile_id;
+  profileDeleteBtn.disabled = profiles.length <= 1;
+}
+
+async function activateProfile(profileId: string): Promise<void> {
+  if (operationInProgress || profileId === config.profile_id) return;
+  setProfileControlsDisabled(true);
+  try {
+    config = await invoke<BackupConfig>("select_profile", { profileId });
+    applyLanguage(config.language);
+    applyTheme(config.theme);
+    updateDirectoriesList();
+    updateTargetPathDisplay();
+    updateVolumeSelect();
+    await loadProfiles();
+    await loadBackups();
+    log(`${t("profileSelected")} ${config.profile_name}`);
+  } catch (error) {
+    log(`${t("saveError")} ${error}`);
+    profileSelect.value = config.profile_id;
+  } finally {
+    setProfileControlsDisabled(false);
+    await loadProfiles();
+  }
+}
+
+profileSelect.addEventListener("change", () => { void activateProfile(profileSelect.value); });
+
+async function addProfile(copyCurrent: boolean): Promise<void> {
+  if (operationInProgress) return;
+  const promptText = copyCurrent ? t("duplicateProfilePrompt") : t("newProfilePrompt");
+  const name = window.prompt(promptText, copyCurrent ? `${config.profile_name} 2` : "");
+  if (name === null) return;
+  setProfileControlsDisabled(true);
+  try {
+    config = await invoke<BackupConfig>("create_profile", { name, copyCurrent });
+    applyLanguage(config.language);
+    applyTheme(config.theme);
+    updateDirectoriesList();
+    updateTargetPathDisplay();
+    updateVolumeSelect();
+    await loadProfiles();
+    await loadBackups();
+    log(`${t("profileCreated")} ${config.profile_name}`);
+  } catch (error) {
+    log(`${t("saveError")} ${error}`);
+  } finally {
+    setProfileControlsDisabled(false);
+    await loadProfiles();
+  }
+}
+
+profileNewBtn.addEventListener("click", () => { void addProfile(false); });
+profileDuplicateBtn.addEventListener("click", () => { void addProfile(true); });
+
+profileRenameBtn.addEventListener("click", async () => {
+  if (operationInProgress) return;
+  const name = window.prompt(t("renameProfilePrompt"), config.profile_name);
+  if (name === null) return;
+  try {
+    await invoke("rename_profile", { profileId: config.profile_id, name });
+    config.profile_name = name.trim();
+    await loadProfiles();
+  } catch (error) {
+    log(`${t("saveError")} ${error}`);
+  }
+});
+
+profileDeleteBtn.addEventListener("click", async () => {
+  if (operationInProgress) return;
+  const profiles = await invoke<ProfileSummary[]>("list_profiles");
+  if (profiles.length <= 1) return;
+  const confirmed = await ask(tf("deleteProfilePrompt", config.profile_name), { title: t("deleteProfile"), kind: "warning" });
+  if (!confirmed) return;
+  const next = profiles.find(profile => profile.id !== config.profile_id);
+  if (!next) return;
+  try {
+    await invoke("select_profile", { profileId: next.id });
+    await invoke("delete_profile", { profileId: config.profile_id });
+    config = await invoke<BackupConfig>("load_config");
+    applyLanguage(config.language);
+    applyTheme(config.theme);
+    updateDirectoriesList();
+    updateTargetPathDisplay();
+    updateVolumeSelect();
+    await loadProfiles();
+    await loadBackups();
+  } catch (error) {
+    log(`${t("saveError")} ${error}`);
+  }
+});
+
 // Update target path display
 function updateTargetPathDisplay(): void {
   const fullPath = getFullTargetPath();
@@ -1019,6 +1167,10 @@ function getFullTargetPath(): string {
     return `${config.target_volume}/${config.target_directory}`;
   }
   return config.target_volume;
+}
+
+function selectedBackupProfileId(): string {
+  return backupSelect.selectedOptions[0]?.dataset.profileId || config.profile_id;
 }
 
 // Update volume select with current volumes
@@ -1100,9 +1252,10 @@ async function loadBackups(): Promise<void> {
     for (const backup of backups) {
       const option = document.createElement("option");
       option.value = backup.timestamp;
+      option.dataset.profileId = backup.profile_id;
       const verified = backup.metadata_valid ? t("backupNotVerified") : t("backupInvalid");
       const formatted = formatTimestamp(backup.timestamp);
-      option.textContent = `${formatted} [${verified}]`;
+      option.textContent = `[${backup.profile_name}] ${formatted} [${verified}]`;
       option.dataset.label = formatted;
       backupSelect.appendChild(option);
     }
@@ -1402,7 +1555,7 @@ async function startBackup(): Promise<void> {
       completed_items: number;
       completed_size_bytes: number;
       completed_paths: string[];
-    }>>("list_resumable_backups", { targetPath });
+    }>>("list_resumable_backups", { targetPath, profileId: config.profile_id });
     if (resumable && resumable.length > 0) {
       const latest = resumable[0];
       const sizeMB = (latest.completed_size_bytes / (1024 * 1024)).toFixed(1);
@@ -1428,7 +1581,7 @@ async function startBackup(): Promise<void> {
         );
         if (shouldDiscard) {
           try {
-            await invoke("discard_resumable_backup", { targetPath, timestamp: latest.timestamp });
+            await invoke("discard_resumable_backup", { targetPath, timestamp: latest.timestamp, profileId: config.profile_id });
             log(`🗑 Verworfen: ${latest.timestamp}`);
           } catch (err) {
             log(`Fehler beim Verwerfen: ${err}`);
@@ -1459,6 +1612,7 @@ async function startBackup(): Promise<void> {
       directories: config.directories,
       incremental: true,
       resumeTimestamp: resumeTimestamp,
+      profileId: config.profile_id,
     });
     
     if (cancelRequested) setStatusMessage(t("backupCancelled"));
@@ -1672,6 +1826,7 @@ btnRestore.addEventListener("click", async () => {
     const details = await invoke<BackupDetails>("list_backup_files", {
       targetPath: targetPath,
       timestamp: timestamp,
+      profileId: selectedBackupProfileId(),
     });
     showRestoreModal(details);
   } catch (e) {
@@ -1746,6 +1901,7 @@ function setOperationControls(busy: boolean): void {
   backupSelect.disabled = busy;
   volumeSelect.disabled = busy;
   browseTargetBtn.disabled = busy;
+  setProfileControlsDisabled(busy);
 }
 function beginRestore(): boolean {
   if (operationInProgress) { log(t("operationBusy")); return false; }
@@ -1783,6 +1939,7 @@ if (restoreQuickBtn) {
       const result = await invoke<RestoreResult>("quick_restore_essentials", {
         targetPath: targetPath,
         timestamp: timestamp,
+        profileId: selectedBackupProfileId(),
       });
       
       log(`${result.error_count > 0 ? "❌" : "✅"} ${t(restoreStatusKey(result))}`);
@@ -1839,6 +1996,7 @@ restoreStart.addEventListener("click", async () => {
       timestamp: timestamp,
       items: selectedItems,
       overwrite: overwrite,
+      profileId: selectedBackupProfileId(),
     });
     
     log(`${result.error_count > 0 ? "❌" : "✅"} ${t(restoreStatusKey(result))}:`);
@@ -1917,7 +2075,8 @@ btnRestoreTest.addEventListener("click", async () => {
       message: string;
     }>("verify_backup_parallel", {
       targetPath: targetPath,
-      timestamp: timestamp
+      timestamp: timestamp,
+      profileId: selectedBackupProfileId(),
     });
     
     if (cancelRequested) setStatusMessage(t("verifyCancelled"));
@@ -1989,7 +2148,8 @@ showFilesBtn.addEventListener("click", async () => {
     
     const details: BackupDetails = await invoke("list_backup_files", {
       targetPath: fullPath,
-      timestamp: timestamp
+      timestamp: timestamp,
+      profileId: selectedBackupProfileId(),
     });
     
     const formatBytes = (bytes: number): string => {
@@ -2045,7 +2205,8 @@ showManualAppsBtn.addEventListener("click", async () => {
   try {
     const manualApps: string[] = await invoke("get_manual_apps_from_backup", {
       targetPath: fullPath,
-      timestamp: timestamp
+      timestamp: timestamp,
+      profileId: selectedBackupProfileId(),
     });
     
     log("");
@@ -2221,7 +2382,8 @@ licenseSaveBtn.addEventListener("click", async () => {
     await invoke("save_license_data", {
       targetPath: fullPath,
       timestamp: currentLicenseTimestamp,
-      data: dataToSave
+      data: dataToSave,
+      profileId: selectedBackupProfileId(),
     });
     log(`✅ ${t("licenseSaved")} (${dataToSave.length} Apps)`);
     licenseDialog.close();
@@ -2283,8 +2445,8 @@ showLicenseDataBtn.addEventListener("click", async () => {
   try {
     // Load manual apps list and existing license data in parallel
     const [manualApps, licenseData] = await Promise.all([
-      invoke("get_manual_apps_from_backup", { targetPath: fullPath, timestamp }) as Promise<string[]>,
-      invoke("load_license_data", { targetPath: fullPath, timestamp }) as Promise<AppLicenseEntry[]>
+      invoke("get_manual_apps_from_backup", { targetPath: fullPath, timestamp, profileId: selectedBackupProfileId() }) as Promise<string[]>,
+      invoke("load_license_data", { targetPath: fullPath, timestamp, profileId: selectedBackupProfileId() }) as Promise<AppLicenseEntry[]>
     ]);
     
     openLicenseModal(manualApps, licenseData, timestamp, false);
@@ -2323,6 +2485,7 @@ btnDeleteBackup.addEventListener("click", async () => {
     await invoke("delete_backup", {
       targetPath: targetPath,
       timestamp: selectedBackup,
+      profileId: selectedBackupProfileId(),
     });
     log(`✅ ${t("backupDeleted")}: ${formatTimestamp(selectedBackup)}`);
     await loadBackups();
@@ -2464,6 +2627,7 @@ async function init(): Promise<void> {
   log(t("started"));
   await setupEventListeners();
   await loadConfig();
+  await loadProfiles();
   await loadVolumes();
   await loadBackups();
   await checkFullDiskAccess();
@@ -2669,6 +2833,7 @@ async function openTestRestoreModal(): Promise<void> {
     const details: TestRestoreBackupDetails = await invoke("list_backup_files", {
       targetPath,
       timestamp,
+      profileId: selectedBackupProfileId(),
     });
 
     testRestoreItemSelect.innerHTML = `<option value="">${t("chooseItem")}</option>`;
@@ -2746,6 +2911,7 @@ testRestoreStart.addEventListener("click", async () => {
       timestamp,
       itemPath,
       destDir,
+      profileId: selectedBackupProfileId(),
     });
     progressFill.classList.remove("animating");
     progressIndicator.update(100);

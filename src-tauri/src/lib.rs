@@ -1,30 +1,30 @@
+mod app_settings;
+mod archive_flags;
+mod backup;
+mod frozen_sources;
 mod protected_access;
 mod work_progress;
-mod app_settings;
-mod backup;
-mod archive_flags;
-mod frozen_sources;
 use backup::*;
 mod restore;
 use restore::*;
 
-use tauri::Emitter;
-use tauri::menu::{Menu, MenuItem, Submenu, PredefinedMenuItem, AboutMetadata};
-use tauri::{Manager, AppHandle};
 use chrono::Local;
-use serde::{Deserialize, Serialize};
-use std::fs;
-use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use sha2::{Sha256, Digest};
 #[cfg(test)]
 use flate2::write::GzEncoder;
 #[cfg(test)]
 use flate2::Compression;
-use walkdir::WalkDir;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::fs;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::OnceLock;
+use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::Emitter;
+use tauri::{AppHandle, Manager};
+use walkdir::WalkDir;
 
 static BACKUP_CANCELLED: AtomicBool = AtomicBool::new(false);
 static VERIFY_CANCELLED: AtomicBool = AtomicBool::new(false);
@@ -35,27 +35,29 @@ static ZSTD_PATH: OnceLock<Option<String>> = OnceLock::new();
 
 /// Find and cache the zstd binary path
 fn get_zstd_path() -> Option<&'static str> {
-    ZSTD_PATH.get_or_init(|| {
-        let candidates = [
-            "/opt/homebrew/bin/zstd",  // Apple Silicon
-            "/usr/local/bin/zstd",      // Intel Mac
-        ];
-        for candidate in candidates {
-            if Path::new(candidate).exists() {
-                return Some(candidate.to_string());
-            }
-        }
-        // Fallback: which zstd
-        if let Ok(output) = Command::new("/usr/bin/which").arg("zstd").output() {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    return Some(path);
+    ZSTD_PATH
+        .get_or_init(|| {
+            let candidates = [
+                "/opt/homebrew/bin/zstd", // Apple Silicon
+                "/usr/local/bin/zstd",    // Intel Mac
+            ];
+            for candidate in candidates {
+                if Path::new(candidate).exists() {
+                    return Some(candidate.to_string());
                 }
             }
-        }
-        None
-    }).as_deref()
+            // Fallback: which zstd
+            if let Ok(output) = Command::new("/usr/bin/which").arg("zstd").output() {
+                if output.status.success() {
+                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !path.is_empty() {
+                        return Some(path);
+                    }
+                }
+            }
+            None
+        })
+        .as_deref()
 }
 
 /// Check if zstd is available (cached)
@@ -76,10 +78,16 @@ fn default_theme() -> String {
     "auto".to_string()
 }
 
-fn default_app_settings() -> bool { true }
+fn default_app_settings() -> bool {
+    true
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct BackupConfig {
+    #[serde(default = "default_profile_id")]
+    pub profile_id: String,
+    #[serde(default = "default_profile_name")]
+    pub profile_name: String,
     pub target_volume: String,
     pub target_directory: String,
     pub directories: Vec<String>,
@@ -107,18 +115,16 @@ pub struct BackupConfig {
     pub backup_chatgpt_settings: bool,
     #[serde(default = "default_app_settings")]
     pub backup_codex_settings: bool,
-
 }
 
 impl Default for BackupConfig {
     fn default() -> Self {
         Self {
+            profile_id: default_profile_id(),
+            profile_name: default_profile_name(),
             target_volume: String::new(),
             target_directory: String::new(),
-            directories: vec![
-                "~/Documents".to_string(),
-                "~/Desktop".to_string(),
-            ],
+            directories: vec!["~/Documents".to_string(), "~/Desktop".to_string()],
             backup_homebrew: true,
             backup_mas: true,
             default_directories: Vec::new(),
@@ -132,9 +138,37 @@ impl Default for BackupConfig {
             backup_vscode_settings: true,
             backup_chatgpt_settings: true,
             backup_codex_settings: true,
-
         }
     }
+}
+
+fn default_profile_id() -> String {
+    "standard".to_string()
+}
+fn default_profile_name() -> String {
+    "Standard".to_string()
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ProfileStore {
+    version: u32,
+    active_profile_id: String,
+    profiles: Vec<BackupConfig>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProfileSummary {
+    id: String,
+    name: String,
+    active: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ProfileManifest {
+    schema_version: u32,
+    profile_id: String,
+    profile_name: String,
+    created_at: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -149,6 +183,10 @@ pub struct BackupItem {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BackupMetadata {
+    #[serde(default)]
+    pub profile_id: String,
+    #[serde(default)]
+    pub profile_name: String,
     pub timestamp: String,
     pub items: Vec<BackupItem>,
     pub hash_algorithm: String,
@@ -161,7 +199,9 @@ pub struct BackupMetadata {
 /// Validate a parsed `BackupMetadata` to reject unsafe values that could
 /// escape the intended backup directory or cause unexpected shell behaviour.
 fn validate_backup_metadata(meta: &BackupMetadata) -> Result<(), String> {
-    if !meta.hash_algorithm.eq_ignore_ascii_case("sha256") { return Err("Unsupported backup hash algorithm".into()); }
+    if !meta.hash_algorithm.eq_ignore_ascii_case("sha256") {
+        return Err("Unsupported backup hash algorithm".into());
+    }
     let mut archives = std::collections::HashSet::new();
     let mut paths = std::collections::HashSet::new();
     for item in &meta.items {
@@ -169,7 +209,9 @@ fn validate_backup_metadata(meta: &BackupMetadata) -> Result<(), String> {
             return Err(format!("Invalid SHA-256 for {}", item.path));
         }
         if !archives.insert(item.archive.to_lowercase()) || !paths.insert(&item.path) {
-            return Err("Ambiguous backup: duplicate source or archive names; create a new backup".into());
+            return Err(
+                "Ambiguous backup: duplicate source or archive names; create a new backup".into(),
+            );
         }
         validate_component(&item.archive)?;
         let archive = &item.archive;
@@ -193,7 +235,10 @@ fn validate_backup_metadata(meta: &BackupMetadata) -> Result<(), String> {
         }
         for seg in path.split('/') {
             if seg == ".." {
-                return Err(format!("Path traversal detected in metadata path: {:?}", path));
+                return Err(format!(
+                    "Path traversal detected in metadata path: {:?}",
+                    path
+                ));
             }
         }
     }
@@ -204,10 +249,10 @@ fn validate_backup_metadata(meta: &BackupMetadata) -> Result<(), String> {
 /// instead of calling `serde_json::from_str` directly, so untrusted backups
 /// cannot bypass validation.
 fn load_backup_metadata(metadata_path: &Path) -> Result<BackupMetadata, String> {
-    let content = fs::read_to_string(metadata_path)
-        .map_err(|e| format!("Error reading metadata: {}", e))?;
-    let meta: BackupMetadata = serde_json::from_str(&content)
-        .map_err(|e| format!("Error parsing metadata: {}", e))?;
+    let content =
+        fs::read_to_string(metadata_path).map_err(|e| format!("Error reading metadata: {}", e))?;
+    let meta: BackupMetadata =
+        serde_json::from_str(&content).map_err(|e| format!("Error parsing metadata: {}", e))?;
     validate_backup_metadata(&meta)?;
     Ok(meta)
 }
@@ -231,6 +276,8 @@ pub struct Volume {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BackupListItem {
     pub timestamp: String,
+    pub profile_id: String,
+    pub profile_name: String,
     pub hash_verified: bool,
     pub metadata_valid: bool,
 }
@@ -319,12 +366,161 @@ fn get_config_path() -> PathBuf {
     home.join(".macos_backup_suite").join("config.json")
 }
 
+fn validate_profile_id(profile_id: &str) -> Result<(), String> {
+    if profile_id.is_empty()
+        || profile_id.len() > 96
+        || !profile_id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return Err("Ungültige Profilkennung".into());
+    }
+    Ok(())
+}
+
+fn validate_profile_name(name: &str) -> Result<(), String> {
+    if name.trim().is_empty() || name.trim().chars().count() > 80 {
+        return Err("Profilname muss zwischen 1 und 80 Zeichen lang sein".into());
+    }
+    Ok(())
+}
+
+fn normalize_profile(config: &mut BackupConfig) -> Result<(), String> {
+    if config.profile_id.is_empty() {
+        config.profile_id = default_profile_id();
+    }
+    if config.profile_name.trim().is_empty() {
+        config.profile_name = default_profile_name();
+    }
+    validate_profile_id(&config.profile_id)?;
+    validate_profile_name(&config.profile_name)
+}
+
+fn save_profile_store(store: &ProfileStore) -> Result<(), String> {
+    let path = get_config_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    atomic_write(
+        &path,
+        &serde_json::to_vec_pretty(store).map_err(|e| e.to_string())?,
+    )
+}
+
+fn load_profile_store() -> Result<ProfileStore, String> {
+    let path = get_config_path();
+    if !path.exists() {
+        let config = BackupConfig::default();
+        return Ok(ProfileStore {
+            version: 1,
+            active_profile_id: config.profile_id.clone(),
+            profiles: vec![config],
+        });
+    }
+    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let value: serde_json::Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    if value.get("profiles").is_none() {
+        let mut legacy: BackupConfig = serde_json::from_value(value).map_err(|e| e.to_string())?;
+        normalize_profile(&mut legacy)?;
+        let store = ProfileStore {
+            version: 1,
+            active_profile_id: legacy.profile_id.clone(),
+            profiles: vec![legacy],
+        };
+        save_profile_store(&store)?;
+        return Ok(store);
+    }
+    let mut store: ProfileStore = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    if store.version != 1 || store.profiles.is_empty() {
+        return Err("Ungültige Profilkonfiguration".into());
+    }
+    for profile in &mut store.profiles {
+        normalize_profile(profile)?;
+    }
+    if !store
+        .profiles
+        .iter()
+        .any(|p| p.profile_id == store.active_profile_id)
+    {
+        return Err("Aktives Backup-Profil fehlt".into());
+    }
+    Ok(store)
+}
+
+fn profile_root(target_path: &str, profile_id: &str) -> Result<PathBuf, String> {
+    validate_profile_id(profile_id)?;
+    let suite = PathBuf::from(target_path).join("macos-backup-suite");
+    if profile_id == "standard" {
+        Ok(suite)
+    } else {
+        Ok(suite.join("profiles").join(profile_id))
+    }
+}
+
+fn ensure_profile_manifest(root: &Path, config: &BackupConfig) -> Result<(), String> {
+    validate_profile_id(&config.profile_id)?;
+    validate_profile_name(&config.profile_name)?;
+    let manifest = root.join("profile.json");
+    if manifest.exists() {
+        let existing: ProfileManifest =
+            serde_json::from_slice(&fs::read(&manifest).map_err(|e| e.to_string())?)
+                .map_err(|e| format!("Ungültiges Profilmanifest: {e}"))?;
+        if existing.schema_version != 1 || existing.profile_id != config.profile_id {
+            return Err("Das Backup-Ziel gehört zu einem anderen Profil".into());
+        }
+        return Ok(());
+    }
+    fs::create_dir_all(root).map_err(|e| e.to_string())?;
+    let manifest = ProfileManifest {
+        schema_version: 1,
+        profile_id: config.profile_id.clone(),
+        profile_name: config.profile_name.clone(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    atomic_write(
+        &root.join("profile.json"),
+        &serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?,
+    )
+}
+
+fn validate_backup_profile(metadata: &BackupMetadata, profile_id: &str) -> Result<(), String> {
+    validate_profile_id(profile_id)?;
+    if metadata.profile_id.is_empty() && profile_id == "standard" {
+        return Ok(());
+    }
+    if metadata.profile_id == profile_id {
+        Ok(())
+    } else {
+        Err("Dieses Backup gehört zu einem anderen Profil".into())
+    }
+}
+
+fn backup_profile_roots(target_path: &str) -> Result<Vec<(String, String, PathBuf)>, String> {
+    let suite = PathBuf::from(target_path).join("macos-backup-suite");
+    let mut roots = vec![("standard".to_string(), "Standard".to_string(), suite.clone())];
+    let profiles_dir = suite.join("profiles");
+    if !profiles_dir.is_dir() { return Ok(roots); }
+    for entry in fs::read_dir(profiles_dir).map_err(|e| e.to_string())?.flatten() {
+        let root = entry.path();
+        if !root.is_dir() { continue; }
+        let Some(id) = entry.file_name().to_str().map(str::to_string) else { continue; };
+        if validate_profile_id(&id).is_err() { continue; }
+        let manifest_path = root.join("profile.json");
+        let Ok(bytes) = fs::read(&manifest_path) else { continue; };
+        let Ok(manifest) = serde_json::from_slice::<ProfileManifest>(&bytes) else { continue; };
+        if manifest.schema_version == 1 && manifest.profile_id == id && validate_profile_name(&manifest.profile_name).is_ok() {
+            roots.push((manifest.profile_id, manifest.profile_name, root));
+        }
+    }
+    Ok(roots)
+}
+
 // Get free space in GB for a path
 fn get_free_space_gb(path: &Path) -> f64 {
     let output = Command::new("df")
         .args(["-k", &path.to_string_lossy()])
         .output();
-    
+
     if let Ok(output) = output {
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -346,7 +542,7 @@ fn is_time_machine_volume(path: &Path) -> bool {
     let tm_marker1 = path.join(".timemachine");
     let tm_marker2 = path.join("Backups.backupdb");
     let tm_marker3 = path.join(".com.apple.timemachine.supported");
-    
+
     tm_marker1.exists() || tm_marker2.exists() || tm_marker3.exists()
 }
 
@@ -366,7 +562,7 @@ fn check_readable(path: &Path) -> bool {
     if !path.exists() {
         return false;
     }
-    
+
     if path.is_file() {
         fs::File::open(path).is_ok()
     } else {
@@ -376,60 +572,178 @@ fn check_readable(path: &Path) -> bool {
 
 #[tauri::command]
 fn load_config() -> Result<BackupConfig, String> {
-    let path = get_config_path();
-    if !path.exists() {
-        return Ok(BackupConfig::default());
-    }
-    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&content).map_err(|e| e.to_string())
+    let store = load_profile_store()?;
+    store
+        .profiles
+        .into_iter()
+        .find(|p| p.profile_id == store.active_profile_id)
+        .ok_or_else(|| "Aktives Backup-Profil fehlt".into())
 }
 
 #[tauri::command]
 fn save_config(config: BackupConfig) -> Result<(), String> {
-    let path = get_config_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let mut config = config;
+    normalize_profile(&mut config)?;
+    let mut store = load_profile_store()?;
+    let current = store
+        .profiles
+        .iter_mut()
+        .find(|p| p.profile_id == config.profile_id)
+        .ok_or_else(|| "Backup-Profil nicht gefunden".to_string())?;
+    *current = config;
+    save_profile_store(&store)
+}
+
+#[tauri::command]
+fn list_profiles() -> Result<Vec<ProfileSummary>, String> {
+    let store = load_profile_store()?;
+    Ok(store
+        .profiles
+        .iter()
+        .map(|p| ProfileSummary {
+            id: p.profile_id.clone(),
+            name: p.profile_name.clone(),
+            active: p.profile_id == store.active_profile_id,
+        })
+        .collect())
+}
+
+#[tauri::command]
+fn select_profile(profile_id: String) -> Result<BackupConfig, String> {
+    validate_profile_id(&profile_id)?;
+    let mut store = load_profile_store()?;
+    let profile = store
+        .profiles
+        .iter()
+        .find(|p| p.profile_id == profile_id)
+        .cloned()
+        .ok_or_else(|| "Backup-Profil nicht gefunden".to_string())?;
+    store.active_profile_id = profile_id;
+    save_profile_store(&store)?;
+    Ok(profile)
+}
+
+fn new_profile_id(store: &ProfileStore) -> String {
+    let stem = format!(
+        "profil-{}-{}",
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+        std::process::id()
+    );
+    let mut candidate = stem.clone();
+    let mut suffix = 2;
+    while store.profiles.iter().any(|p| p.profile_id == candidate) {
+        candidate = format!("{stem}-{suffix}");
+        suffix += 1;
     }
-    let content = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-    atomic_write(&path, content.as_bytes())
+    candidate
+}
+
+#[tauri::command]
+fn create_profile(name: String, copy_current: bool) -> Result<BackupConfig, String> {
+    validate_profile_name(&name)?;
+    let mut store = load_profile_store()?;
+    if store
+        .profiles
+        .iter()
+        .any(|p| p.profile_name.eq_ignore_ascii_case(name.trim()))
+    {
+        return Err("Ein Profil mit diesem Namen existiert bereits".into());
+    }
+    let mut profile = if copy_current {
+        store
+            .profiles
+            .iter()
+            .find(|p| p.profile_id == store.active_profile_id)
+            .cloned()
+            .ok_or_else(|| "Aktives Backup-Profil fehlt".to_string())?
+    } else {
+        BackupConfig::default()
+    };
+    profile.profile_id = new_profile_id(&store);
+    profile.profile_name = name.trim().to_string();
+    store.active_profile_id = profile.profile_id.clone();
+    store.profiles.push(profile.clone());
+    save_profile_store(&store)?;
+    Ok(profile)
+}
+
+#[tauri::command]
+fn rename_profile(profile_id: String, name: String) -> Result<(), String> {
+    validate_profile_id(&profile_id)?;
+    validate_profile_name(&name)?;
+    let mut store = load_profile_store()?;
+    if store
+        .profiles
+        .iter()
+        .any(|p| p.profile_id != profile_id && p.profile_name.eq_ignore_ascii_case(name.trim()))
+    {
+        return Err("Ein Profil mit diesem Namen existiert bereits".into());
+    }
+    let profile = store
+        .profiles
+        .iter_mut()
+        .find(|p| p.profile_id == profile_id)
+        .ok_or_else(|| "Backup-Profil nicht gefunden".to_string())?;
+    profile.profile_name = name.trim().to_string();
+    save_profile_store(&store)
+}
+
+#[tauri::command]
+fn delete_profile(profile_id: String) -> Result<(), String> {
+    validate_profile_id(&profile_id)?;
+    let mut store = load_profile_store()?;
+    if store.profiles.len() <= 1 {
+        return Err("Das letzte Backup-Profil kann nicht gelöscht werden".into());
+    }
+    if store.active_profile_id == profile_id {
+        return Err("Aktives Backup-Profil kann nicht gelöscht werden".into());
+    }
+    let before = store.profiles.len();
+    store.profiles.retain(|p| p.profile_id != profile_id);
+    if store.profiles.len() == before {
+        return Err("Backup-Profil nicht gefunden".into());
+    }
+    // Nur die lokale Konfiguration wird gelöscht. Bereits erstellte Backups bleiben unverändert erhalten.
+    save_profile_store(&store)
 }
 
 #[tauri::command]
 fn get_external_volumes() -> Result<Vec<Volume>, String> {
     let volumes_path = Path::new("/Volumes");
     let mut volumes = Vec::new();
-    
+
     if let Ok(entries) = fs::read_dir(volumes_path) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                let name = path.file_name()
+                let name = path
+                    .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "Unknown".to_string());
-                
+
                 if name == "Macintosh HD" || name == "Macintosh HD - Data" {
                     continue;
                 }
-                
+
                 if is_time_machine_volume(&path) {
                     continue;
                 }
-                
+
                 let path_str = path.to_string_lossy().to_string();
                 let available = path.exists() && path.read_dir().is_ok();
                 let writable = is_writable(&path);
                 let free_space_gb = get_free_space_gb(&path);
-                
+
                 if !writable {
                     continue;
                 }
-                
-                let is_internal = name.starts_with("com.apple") 
-                    || name == "Recovery" 
+
+                let is_internal = name.starts_with("com.apple")
+                    || name == "Recovery"
                     || name == "Preboot"
                     || name == "VM"
                     || name == "Update";
-                
+
                 volumes.push(Volume {
                     name,
                     path: path_str,
@@ -465,9 +779,13 @@ fn detect_backup_volume() -> Result<Option<DetectedBackupVolume>, String> {
                     let data_dir = suite_root.join("data");
                     let mut backup_count = 0;
                     if let Ok(entries) = fs::read_dir(&data_dir) {
-                        backup_count = entries.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()).count();
+                        backup_count = entries
+                            .filter_map(|e| e.ok())
+                            .filter(|e| e.path().is_dir())
+                            .count();
                     }
-                    let latest = fs::read_to_string(suite_root.join("latest.json")).ok()
+                    let latest = fs::read_to_string(suite_root.join("latest.json"))
+                        .ok()
                         .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
                         .and_then(|v| v["latest"].as_str().map(|s| s.to_string()));
                     return Ok(Some(DetectedBackupVolume {
@@ -486,23 +804,36 @@ fn detect_backup_volume() -> Result<Option<DetectedBackupVolume>, String> {
     if let Ok(entries) = fs::read_dir(volumes_path) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_dir() { continue; }
-            let name = path.file_name()
+            if !path.is_dir() {
+                continue;
+            }
+            let name = path
+                .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
             // Skip system volumes
-            if name == "Macintosh HD" || name == "Macintosh HD - Data" { continue; }
-            if is_time_machine_volume(&path) { continue; }
+            if name == "Macintosh HD" || name == "Macintosh HD - Data" {
+                continue;
+            }
+            if is_time_machine_volume(&path) {
+                continue;
+            }
 
             let suite_root = path.join("macos-backup-suite");
             if suite_root.exists() && suite_root.is_dir() {
                 let data_dir = suite_root.join("data");
                 let mut backup_count = 0;
                 if let Ok(entries) = fs::read_dir(&data_dir) {
-                    backup_count = entries.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()).count();
+                    backup_count = entries
+                        .filter_map(|e| e.ok())
+                        .filter(|e| e.path().is_dir())
+                        .count();
                 }
-                if backup_count == 0 { continue; }
-                let latest = fs::read_to_string(suite_root.join("latest.json")).ok()
+                if backup_count == 0 {
+                    continue;
+                }
+                let latest = fs::read_to_string(suite_root.join("latest.json"))
+                    .ok()
                     .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
                     .and_then(|v| v["latest"].as_str().map(|s| s.to_string()));
                 return Ok(Some(DetectedBackupVolume {
@@ -525,26 +856,27 @@ fn list_user_folders() -> Result<Vec<UserFolder>, String> {
     let current_user = dirs::home_dir()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
         .unwrap_or_default();
-    
+
     let mut user_folders = Vec::new();
-    
+
     if let Ok(entries) = fs::read_dir(users_path) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                let name = path.file_name()
+                let name = path
+                    .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
-                
+
                 // Skip system folders
                 if name == "Shared" || name.starts_with('.') || name == "Guest" {
                     continue;
                 }
-                
+
                 let path_str = path.to_string_lossy().to_string();
                 let is_current = name == current_user;
                 let readable = check_readable(&path);
-                
+
                 user_folders.push(UserFolder {
                     name,
                     path: path_str,
@@ -554,7 +886,7 @@ fn list_user_folders() -> Result<Vec<UserFolder>, String> {
             }
         }
     }
-    
+
     // Sort: current user first, then alphabetically
     user_folders.sort_by(|a, b| {
         if a.is_current_user && !b.is_current_user {
@@ -565,7 +897,7 @@ fn list_user_folders() -> Result<Vec<UserFolder>, String> {
             a.name.cmp(&b.name)
         }
     });
-    
+
     Ok(user_folders)
 }
 
@@ -573,7 +905,7 @@ fn list_user_folders() -> Result<Vec<UserFolder>, String> {
 #[tauri::command]
 fn check_read_permission(path: String) -> Result<PermissionCheckResult, String> {
     let path_buf = PathBuf::from(&path);
-    
+
     // Expand ~ to home directory
     let expanded = if path.starts_with("~/") {
         let home = dirs::home_dir().unwrap_or_default();
@@ -583,7 +915,7 @@ fn check_read_permission(path: String) -> Result<PermissionCheckResult, String> 
     } else {
         path_buf
     };
-    
+
     if !expanded.exists() {
         return Ok(PermissionCheckResult {
             path,
@@ -591,7 +923,7 @@ fn check_read_permission(path: String) -> Result<PermissionCheckResult, String> 
             error_message: Some("Path does not exist".to_string()),
         });
     }
-    
+
     let readable = if expanded.is_file() {
         match fs::File::open(&expanded) {
             Ok(_) => true,
@@ -615,7 +947,7 @@ fn check_read_permission(path: String) -> Result<PermissionCheckResult, String> 
             }
         }
     };
-    
+
     Ok(PermissionCheckResult {
         path,
         readable,
@@ -628,15 +960,15 @@ fn check_read_permission(path: String) -> Result<PermissionCheckResult, String> 
 fn check_full_disk_access() -> Result<FullDiskAccessStatus, String> {
     // The TCC.db file is the most reliable FDA test - it always exists and requires FDA
     let tcc_db_path = "/Library/Application Support/com.apple.TCC/TCC.db";
-    
+
     let mut test_paths: Vec<String> = vec![tcc_db_path.to_string()];
     let mut inaccessible: Vec<String> = Vec::new();
-    
+
     // Test 1: Try to actually READ from TCC.db - opening is not enough!
     // Without FDA, opening may succeed but reading will fail
     let tcc_path = Path::new(tcc_db_path);
     let tcc_exists = tcc_path.exists();
-    
+
     let can_access_tcc = if tcc_exists {
         // We must try to read, not just open - macOS allows open but blocks read without FDA.
         // 100 Bytes = SQLite-Header; echte Daten, die TCC ohne FDA zuverlässig blockiert.
@@ -651,37 +983,40 @@ fn check_full_disk_access() -> Result<FullDiskAccessStatus, String> {
                     Err(_) => false,
                 }
             }
-            Err(_) => {
-                false
-            }
+            Err(_) => false,
         }
     } else {
         // If TCC.db does not exist, try the directory
         fs::read_dir("/Library/Application Support/com.apple.TCC").is_ok()
     };
-    
+
     if !can_access_tcc {
         inaccessible.push(tcc_db_path.to_string());
     }
-    
+
     // Test 2: Try to access another user Library folder (if other users exist)
     let current_user = dirs::home_dir()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
         .unwrap_or_default();
-    
+
     if let Ok(entries) = fs::read_dir("/Users") {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                let name = path.file_name()
+                let name = path
+                    .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
-                
-                if name != current_user && name != "Shared" && !name.starts_with('.') && name != "Guest" {
+
+                if name != current_user
+                    && name != "Shared"
+                    && !name.starts_with('.')
+                    && name != "Guest"
+                {
                     let library_path = path.join("Library");
                     let library_str = library_path.to_string_lossy().to_string();
                     test_paths.push(library_str.clone());
-                    
+
                     if library_path.exists() && fs::read_dir(&library_path).is_err() {
                         inaccessible.push(library_str);
                     }
@@ -815,7 +1150,12 @@ fn save_window_state(width: u32, height: u32, x: i32, y: i32) -> Result<(), Stri
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let state = WindowState { width, height, x, y };
+    let state = WindowState {
+        width,
+        height,
+        x,
+        y,
+    };
     let content = serde_json::to_string_pretty(&state).map_err(|e| e.to_string())?;
     fs::write(&path, content).map_err(|e| e.to_string())?;
     Ok(())
@@ -825,21 +1165,18 @@ fn save_window_state(width: u32, height: u32, x: i32, y: i32) -> Result<(), Stri
 fn find_brew_path() -> Option<String> {
     // Prüfe zuerst die bekannten Homebrew-Installationspfade
     let candidates = [
-        "/opt/homebrew/bin/brew",  // Apple Silicon
-        "/usr/local/bin/brew",      // Intel Mac
+        "/opt/homebrew/bin/brew", // Apple Silicon
+        "/usr/local/bin/brew",    // Intel Mac
     ];
-    
+
     for candidate in candidates {
         if std::path::Path::new(candidate).exists() {
             return Some(candidate.to_string());
         }
     }
-    
+
     // Fallback: which brew (funktioniert nur wenn PATH korrekt ist)
-    if let Ok(output) = Command::new("/usr/bin/which")
-        .arg("brew")
-        .output()
-    {
+    if let Ok(output) = Command::new("/usr/bin/which").arg("brew").output() {
         if output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !path.is_empty() {
@@ -847,26 +1184,23 @@ fn find_brew_path() -> Option<String> {
             }
         }
     }
-    
+
     None
 }
 
 /// Finde einen Befehl in Homebrew-Pfaden (für mas, etc.)
 fn find_homebrew_command(name: &str) -> Option<String> {
     let homebrew_dirs = ["/opt/homebrew/bin", "/usr/local/bin"];
-    
+
     for dir in homebrew_dirs {
         let path = format!("{}/{}", dir, name);
         if std::path::Path::new(&path).exists() {
             return Some(path);
         }
     }
-    
+
     // Fallback
-    if let Ok(output) = Command::new("/usr/bin/which")
-        .arg(name)
-        .output()
-    {
+    if let Ok(output) = Command::new("/usr/bin/which").arg(name).output() {
         if output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !path.is_empty() {
@@ -874,7 +1208,7 @@ fn find_homebrew_command(name: &str) -> Option<String> {
             }
         }
     }
-    
+
     None
 }
 
@@ -971,7 +1305,9 @@ fn run_streamed(
     let deadline = std::time::Instant::now() + timeout;
     let mut status = None;
     let failure = loop {
-        if BACKUP_CANCELLED.load(Ordering::SeqCst) || VERIFY_CANCELLED.load(Ordering::SeqCst) { break Some("Vorgang abgebrochen".into()); }
+        if BACKUP_CANCELLED.load(Ordering::SeqCst) || VERIFY_CANCELLED.load(Ordering::SeqCst) {
+            break Some("Vorgang abgebrochen".into());
+        }
         if status.is_none() {
             match child.try_wait() {
                 Ok(s) => status = s,
@@ -1020,11 +1356,13 @@ fn run_streamed(
 #[tauri::command]
 fn get_brew_packages() -> Result<String, String> {
     let _phase = work_progress::Phase::enter("Software-Inventar erfassen");
-    let brew_path = find_brew_path()
-        .ok_or_else(|| "Homebrew not found. Please install Homebrew: https://brew.sh".to_string())?;
+    let brew_path = find_brew_path().ok_or_else(|| {
+        "Homebrew not found. Please install Homebrew: https://brew.sh".to_string()
+    })?;
 
     let mut cmd = Command::new(&brew_path);
-    cmd.args(["bundle", "dump", "--file=-"]).env("HOMEBREW_NO_AUTO_UPDATE", "1");
+    cmd.args(["bundle", "dump", "--file=-"])
+        .env("HOMEBREW_NO_AUTO_UPDATE", "1");
     let output = run_with_timeout(cmd, std::time::Duration::from_secs(120))?;
 
     if output.status.success() {
@@ -1056,7 +1394,7 @@ fn get_manual_apps() -> Result<Vec<String>, String> {
     // Hole alle Apps aus /Applications
     let apps_dir = PathBuf::from("/Applications");
     let mut all_apps: Vec<String> = Vec::new();
-    
+
     if let Ok(entries) = fs::read_dir(&apps_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -1067,28 +1405,22 @@ fn get_manual_apps() -> Result<Vec<String>, String> {
             }
         }
     }
-    
+
     // Hole Homebrew Cask Apps
     let mut cask_apps: Vec<String> = Vec::new();
     if let Some(brew_path) = find_brew_path() {
-        if let Ok(output) = Command::new(&brew_path)
-            .args(["list", "--cask"])
-            .output()
-        {
+        if let Ok(output) = Command::new(&brew_path).args(["list", "--cask"]).output() {
             let cask_list = String::from_utf8_lossy(&output.stdout);
             for line in cask_list.lines() {
                 cask_apps.push(line.trim().to_lowercase());
             }
         }
     }
-    
+
     // Hole MAS Apps
     let mut mas_apps: Vec<String> = Vec::new();
     if let Some(mas_path) = find_homebrew_command("mas") {
-        if let Ok(output) = Command::new(&mas_path)
-            .arg("list")
-            .output()
-        {
+        if let Ok(output) = Command::new(&mas_path).arg("list").output() {
             let mas_list = String::from_utf8_lossy(&output.stdout);
             for line in mas_list.lines() {
                 // Format: "123456  App Name  (1.0)"
@@ -1102,7 +1434,7 @@ fn get_manual_apps() -> Result<Vec<String>, String> {
             }
         }
     }
-    
+
     // Filtere: behalte nur Apps die weder in Cask noch in MAS sind
     let manual_apps: Vec<String> = all_apps
         .into_iter()
@@ -1110,18 +1442,19 @@ fn get_manual_apps() -> Result<Vec<String>, String> {
             let app_lower = app.to_lowercase();
             // Prüfe ob App in Cask-Liste ist (oft ähnliche Namen)
             let in_cask = cask_apps.iter().any(|c| {
-                app_lower.contains(c) || c.contains(&app_lower) ||
-                app_lower.replace(" ", "-") == *c ||
-                app_lower.replace(" ", "") == c.replace("-", "")
+                app_lower.contains(c)
+                    || c.contains(&app_lower)
+                    || app_lower.replace(" ", "-") == *c
+                    || app_lower.replace(" ", "") == c.replace("-", "")
             });
             // Prüfe ob App in MAS-Liste ist
-            let in_mas = mas_apps.iter().any(|m| {
-                app_lower == *m || app_lower.contains(m) || m.contains(&app_lower)
-            });
+            let in_mas = mas_apps
+                .iter()
+                .any(|m| app_lower == *m || app_lower.contains(m) || m.contains(&app_lower));
             !in_cask && !in_mas
         })
         .collect();
-    
+
     Ok(manual_apps)
 }
 
@@ -1134,11 +1467,12 @@ fn get_vscode_extensions() -> Result<Vec<String>, String> {
         "/usr/local/bin/code",
         "/opt/homebrew/bin/code",
     ];
-    
-    let code_path = possible_paths.iter()
+
+    let code_path = possible_paths
+        .iter()
         .find(|p| std::path::Path::new(p).exists())
         .map(|s| s.to_string());
-    
+
     // Alternativ: which code
     let code_cmd = code_path.or_else(|| {
         Command::new("which")
@@ -1149,38 +1483,48 @@ fn get_vscode_extensions() -> Result<Vec<String>, String> {
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .filter(|s| !s.is_empty())
     });
-    
+
     let code_cmd = match code_cmd {
         Some(c) => c,
         None => return Err("VS Code not installed".to_string()),
     };
-    
+
     let mut cmd = Command::new(&code_cmd);
     cmd.arg("--list-extensions");
     let output = run_with_timeout(cmd, std::time::Duration::from_secs(30))
         .map_err(|e| format!("Error fetching extensions: {}", e))?;
-    
+
     if !output.status.success() {
         return Err("Could not retrieve VS Code extensions".to_string());
     }
-    
+
     let extensions: Vec<String> = String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    
+
     Ok(extensions)
 }
 
 fn manifest_path_for(inventory_root: &Path, archive_name: &str) -> PathBuf {
-    inventory_root.join("manifests").join(format!("{}.json", archive_name))
+    inventory_root
+        .join("manifests")
+        .join(format!("{}.json", archive_name))
 }
 
-fn save_manifest(inventory_root: &Path, archive_name: &str, entries: &[ManifestEntry]) -> Result<(), String> {
+fn save_manifest(
+    inventory_root: &Path,
+    archive_name: &str,
+    entries: &[ManifestEntry],
+) -> Result<(), String> {
     let path = manifest_path_for(inventory_root, archive_name);
-    fs::create_dir_all(path.parent().ok_or("Missing manifest parent")?).map_err(|e| e.to_string())?;
-    atomic_write(&path, &serde_json::to_vec(entries).map_err(|e| e.to_string())?)
+    fs::create_dir_all(path.parent().ok_or("Missing manifest parent")?)
+        .map_err(|e| e.to_string())?;
+    atomic_write(
+        &path,
+        &serde_json::to_vec(entries).map_err(|e| e.to_string())?,
+    )
 }
 
 fn load_manifest(inventory_root: &Path, archive_name: &str) -> Option<Vec<ManifestEntry>> {
@@ -1201,17 +1545,22 @@ fn resume_state_path(backup_root: &Path) -> PathBuf {
 }
 
 fn append_resume_entry(backup_root: &Path, item: &BackupItem) -> Result<(), String> {
-    let mut entries=load_resume_entries(backup_root);
+    let mut entries = load_resume_entries(backup_root);
     entries.retain(|old| old.path != item.path);
     entries.push(item.clone());
-    let mut bytes=Vec::new();
-    for entry in entries { bytes.extend(serde_json::to_vec(&entry).map_err(|e| e.to_string())?); bytes.push(b'\n'); }
+    let mut bytes = Vec::new();
+    for entry in entries {
+        bytes.extend(serde_json::to_vec(&entry).map_err(|e| e.to_string())?);
+        bytes.push(b'\n');
+    }
     atomic_write(&resume_state_path(backup_root), &bytes)
 }
 
 fn load_resume_entries(backup_root: &Path) -> Vec<BackupItem> {
     let path = resume_state_path(backup_root);
-    let Ok(content) = fs::read_to_string(&path) else { return Vec::new(); };
+    let Ok(content) = fs::read_to_string(&path) else {
+        return Vec::new();
+    };
     content
         .lines()
         .filter(|l| !l.trim().is_empty())
@@ -1235,8 +1584,11 @@ pub struct ResumableBackup {
 /// Listet alle unvollständigen Backups (kein `metadata.json`, aber
 /// `.resume-state.jsonl` vorhanden) im gegebenen Ziel-Pfad.
 #[tauri::command]
-fn list_resumable_backups(target_path: String) -> Result<Vec<ResumableBackup>, String> {
-    let suite_root = PathBuf::from(&target_path).join("macos-backup-suite");
+fn list_resumable_backups(
+    target_path: String,
+    profile_id: String,
+) -> Result<Vec<ResumableBackup>, String> {
+    let suite_root = profile_root(&target_path, &profile_id)?;
     let data_root = suite_root.join("data");
     if !data_root.exists() {
         return Ok(Vec::new());
@@ -1278,18 +1630,24 @@ fn list_resumable_backups(target_path: String) -> Result<Vec<ResumableBackup>, S
 /// Verwirft ein unvollständiges Backup (löscht Daten- und Inventory-Ordner).
 /// Abgeschlossene Backups (mit `metadata.json`) werden nicht angetastet.
 #[tauri::command]
-fn discard_resumable_backup(target_path: String, timestamp: String) -> Result<(), String> {
+fn discard_resumable_backup(
+    target_path: String,
+    timestamp: String,
+    profile_id: String,
+) -> Result<(), String> {
     validate_component(&timestamp)?;
     let _guard = OperationGuard::acquire()?;
     // Pfad-Traversal-Schutz: Timestamp darf keine Separator enthalten
     if timestamp.contains('/') || timestamp.contains("..") || timestamp.is_empty() {
         return Err("Ungültiger Timestamp".to_string());
     }
-    let suite_root = PathBuf::from(&target_path).join("macos-backup-suite");
+    let suite_root = profile_root(&target_path, &profile_id)?;
     let data_dir = suite_root.join("data").join(&timestamp);
     if data_dir.exists() {
         if load_backup_metadata(&data_dir.join("metadata.json")).is_ok() {
-            return Err("Backup ist bereits abgeschlossen und kann nicht verworfen werden".to_string());
+            return Err(
+                "Backup ist bereits abgeschlossen und kann nicht verworfen werden".to_string(),
+            );
         }
         fs::remove_dir_all(&data_dir).map_err(|e| format!("Daten-Ordner: {}", e))?;
     }
@@ -1337,27 +1695,30 @@ fn hash_file(path: &Path) -> Result<String, String> {
         hasher.update(&buffer[..bytes_read]);
         progress.add(bytes_read);
     }
-    
+
     Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn create_tar_gz(source: &Path, target: &Path) -> Result<(), String> {
-    create_verified_archive(source,target,false)
+    create_verified_archive(source, target, false)
 }
 
 fn create_file_archive(source: &Path, entry_name: &str, target: &Path) -> Result<(), String> {
     validate_component(entry_name)?;
     if source.file_name().and_then(|s| s.to_str()) == Some(entry_name) {
-        return create_verified_archive(source,target,true);
+        return create_verified_archive(source, target, true);
     }
-    let expected=compute_snapshot(source)?;
-    let stage=PrivateDir::new(target.parent().ok_or("Missing parent")?,".alias")?;
-    let alias=stage.0.join(entry_name);
-    let mut cmd=Command::new("/usr/bin/ditto");
+    let expected = compute_snapshot(source)?;
+    let stage = PrivateDir::new(target.parent().ok_or("Missing parent")?, ".alias")?;
+    let alias = stage.0.join(entry_name);
+    let mut cmd = Command::new("/usr/bin/ditto");
     cmd.arg(source).arg(&alias);
-    require_success("Copy inventory",&run_with_timeout(cmd,std::time::Duration::from_secs(3600))?)?;
-    ensure_unchanged(source,&expected)?;
-    create_verified_archive(&alias,target,true)
+    require_success(
+        "Copy inventory",
+        &run_with_timeout(cmd, std::time::Duration::from_secs(3600))?,
+    )?;
+    ensure_unchanged(source, &expected)?;
+    create_verified_archive(&alias, target, true)
 }
 
 #[tauri::command]
@@ -1367,9 +1728,17 @@ async fn create_backup(
     window: tauri::Window,
     incremental: Option<bool>,
     resume_timestamp: Option<String>,
+    profile_id: String,
 ) -> Result<BackupMetadata, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        create_backup_impl(target_path, directories, window, incremental, resume_timestamp)
+        create_backup_impl(
+            target_path,
+            directories,
+            window,
+            incremental,
+            resume_timestamp,
+            profile_id,
+        )
     })
     .await
     .map_err(|e| format!("Backup task join error: {}", e))?
@@ -1381,8 +1750,12 @@ fn create_backup_impl(
     window: tauri::Window,
     incremental: Option<bool>,
     resume_timestamp: Option<String>,
+    profile_id: String,
 ) -> Result<BackupMetadata, String> {
     let config = load_config()?;
+    if config.profile_id != profile_id {
+        return Err("Aktives Backup-Profil wurde geändert; bitte erneut starten".into());
+    }
     let _guard = OperationGuard::acquire_backup(config.keep_session_unlocked_during_backup)?;
     let _progress = BackupProgress::attach(window.clone());
     // Debug-Trace-Closure (No-op in Release-Builds). Für Diagnose kann hier
@@ -1390,7 +1763,9 @@ fn create_backup_impl(
     let trace = |_msg: &str| {};
     trace(&format!(
         "ENTRY target='{}' dirs={} resume={:?}",
-        target_path, directories.len(), resume_timestamp
+        target_path,
+        directories.len(),
+        resume_timestamp
     ));
     for (i, d) in directories.iter().enumerate() {
         trace(&format!("  dir[{}] = {}", i, d));
@@ -1398,7 +1773,9 @@ fn create_backup_impl(
 
     let mut seen_sources = std::collections::HashSet::new();
     for dir in &directories {
-        if !seen_sources.insert(dir) { return Err(format!("Duplicate backup source: {dir}")); }
+        if !seen_sources.insert(dir) {
+            return Err(format!("Duplicate backup source: {dir}"));
+        }
     }
     let incremental = incremental.unwrap_or(true);
     let start = Local::now();
@@ -1418,8 +1795,12 @@ fn create_backup_impl(
     let emit_r2 = window.emit("backup-log", "Starte Backup-Vorbereitung...");
     trace(&format!("first log emit: {:?}", emit_r2));
 
-    let target=Path::new(&target_path);
-    if !target.is_absolute() || !fs::metadata(target).map_err(|e|format!("Backup-Ziel nicht erreichbar: {e}"))?.is_dir() {
+    let target = Path::new(&target_path);
+    if !target.is_absolute()
+        || !fs::metadata(target)
+            .map_err(|e| format!("Backup-Ziel nicht erreichbar: {e}"))?
+            .is_dir()
+    {
         return Err("Backup-Ziel muss ein vorhandenes absolutes Verzeichnis sein".into());
     }
     let _ = window.emit("backup-progress",serde_json::json!({"progress":0,"message":"Prüfe Verfügbarkeit aller ausgewählten Quellen …"}));
@@ -1442,31 +1823,75 @@ fn create_backup_impl(
     }
     validate_selected_sources(&directories, target, &home_settings)?;
     let expand_source = |dir: &str| -> PathBuf {
-        if dir == "~" {home_settings.clone()} else if let Some(rel)=dir.strip_prefix("~/") {home_settings.join(rel)} else {PathBuf::from(dir)}
+        if dir == "~" {
+            home_settings.clone()
+        } else if let Some(rel) = dir.strip_prefix("~/") {
+            home_settings.join(rel)
+        } else {
+            PathBuf::from(dir)
+        }
     };
-    let original_sources: Vec<PathBuf> = directories.iter().map(|d|expand_source(d)).collect();
-    let cache_source = if config.backup_homebrew_cache { frozen_sources::existing(frozen_sources::homebrew_cache_paths(&home_settings))?.into_iter().next() } else {None};
-    let safari_sources: Vec<PathBuf> = if config.backup_safari_settings {frozen_sources::existing(frozen_sources::safari_paths(&home_settings))?} else {Vec::new()};
-    let mut all_sources=original_sources.clone();
-    all_sources.extend(cache_source.iter().cloned());all_sources.extend(safari_sources.iter().cloned());
-    for path in &all_sources {validate_source_target(path,target)?;}
-    let brew_inventory = if config.backup_homebrew { Some(get_brew_packages()?) } else { None };
-    let mas_inventory = if config.backup_mas { Some(get_mas_apps()?) } else { None };
-    let vscode_inventory = if config.backup_vscode_settings { match get_vscode_extensions() {
-        Ok(items) => Some(items.join("\n")),
-        Err(e) if e=="VS Code not installed" => {let _ = window.emit("backup-log", e); None},
-        Err(e) => return Err(e),
-    }} else { None };
+    let original_sources: Vec<PathBuf> = directories.iter().map(|d| expand_source(d)).collect();
+    let cache_source = if config.backup_homebrew_cache {
+        frozen_sources::existing(frozen_sources::homebrew_cache_paths(&home_settings))?
+            .into_iter()
+            .next()
+    } else {
+        None
+    };
+    let safari_sources: Vec<PathBuf> = if config.backup_safari_settings {
+        frozen_sources::existing(frozen_sources::safari_paths(&home_settings))?
+    } else {
+        Vec::new()
+    };
+    let mut all_sources = original_sources.clone();
+    all_sources.extend(cache_source.iter().cloned());
+    all_sources.extend(safari_sources.iter().cloned());
+    for path in &all_sources {
+        validate_source_target(path, target)?;
+    }
+    let brew_inventory = if config.backup_homebrew {
+        Some(get_brew_packages()?)
+    } else {
+        None
+    };
+    let mas_inventory = if config.backup_mas {
+        Some(get_mas_apps()?)
+    } else {
+        None
+    };
+    let vscode_inventory = if config.backup_vscode_settings {
+        match get_vscode_extensions() {
+            Ok(items) => Some(items.join("\n")),
+            Err(e) if e == "VS Code not installed" => {
+                let _ = window.emit("backup-log", e);
+                None
+            }
+            Err(e) => return Err(e),
+        }
+    } else {
+        None
+    };
     // Validate every selected software inventory before scanning or archiving
     // user files, so a new package-manager format cannot fail hours later.
-    if let Some(content)=&brew_inventory {brew_entries(content)?;}
-    if let Some(content)=&mas_inventory {mas_ids(content)?;}
-    if let Some(content)=&vscode_inventory {extension_ids(content)?;}
-    let frozen=frozen_sources::FrozenSources::capture(&all_sources)?;
-    let frozen_directories: Vec<String> = all_sources.iter().map(|p|frozen.get(p).map(|p|p.to_string_lossy().into_owned())).collect::<Result<_,_>>()?;
+    if let Some(content) = &brew_inventory {
+        brew_entries(content)?;
+    }
+    if let Some(content) = &mas_inventory {
+        mas_ids(content)?;
+    }
+    if let Some(content) = &vscode_inventory {
+        extension_ids(content)?;
+    }
+    let frozen = frozen_sources::FrozenSources::capture(&all_sources)?;
+    let frozen_directories: Vec<String> = all_sources
+        .iter()
+        .map(|p| frozen.get(p).map(|p| p.to_string_lossy().into_owned()))
+        .collect::<Result<_, _>>()?;
     validate_source_access(&frozen_directories, &home_settings)?;
     let _=window.emit("backup-log",format!("Konsistenter Dateistand: {}. Geöffnete und weiter bearbeitete Originaldateien beeinflussen dieses Backup nicht.",frozen.snapshot));
-    let suite_root = target.join("macos-backup-suite");
+    let suite_root = profile_root(&target_path, &config.profile_id)?;
+    ensure_profile_manifest(&suite_root, &config)?;
 
     // --- Resume-Modus: bestehenden Backup-Ordner wiederverwenden ---
     let (timestamp, is_resume, resumed_items) = if let Some(ref ts) = resume_timestamp {
@@ -1525,8 +1950,8 @@ fn create_backup_impl(
     let mut cached_snapshots: Vec<Option<Vec<ManifestEntry>>> = vec![None; directories.len()];
 
     for (pre_i, dir) in directories.iter().enumerate() {
-        let original=&original_sources[pre_i];
-        let expanded=frozen.get(original)?;
+        let original = &original_sources[pre_i];
+        let expanded = frozen.get(original)?;
         trace(&format!("scan[{}/{}] {}", pre_i + 1, pre_total, dir));
         let _ = window.emit(
             "backup-progress",
@@ -1535,7 +1960,12 @@ fn create_backup_impl(
                 "message": format!("Scanne {} ({}/{})", dir, pre_i + 1, pre_total)
             }),
         );
-        if !expanded.is_absolute() || expanded.file_name().is_none() || expanded.components().any(|c| matches!(c,std::path::Component::ParentDir)) {
+        if !expanded.is_absolute()
+            || expanded.file_name().is_none()
+            || expanded
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
             return Err(format!("Ungültiger Backup-Quellpfad: {dir}"));
         }
         validate_source_target(&expanded, Path::new(&target_path))?;
@@ -1550,35 +1980,57 @@ fn create_backup_impl(
         // Solche Einträge fließen daher NICHT in die Bedarfsschätzung ein.
         let mut will_reuse = false;
         if let (Some(snap), Some((prev_ts, prev_meta))) = (snap_opt.as_ref(), previous.as_ref()) {
-            let archive_ext = if is_zstd_available() { "tar.zst" } else { "tar.gz" };
+            let archive_ext = if is_zstd_available() {
+                "tar.zst"
+            } else {
+                "tar.gz"
+            };
             let archive_name = archive_name_for(original, archive_ext);
             let prev_inventory = suite_root.join("inventories").join(prev_ts);
             if let Some(prev_snapshot) = load_manifest(&prev_inventory, &archive_name) {
                 if same_source_version(&prev_snapshot, snap)
-                    && prev_meta.items.iter().any(|it| it.path == *dir && it.archive == archive_name)
-                    && suite_root.join("data").join(prev_ts).join(&archive_name).exists()
+                    && prev_meta
+                        .items
+                        .iter()
+                        .any(|it| it.path == *dir && it.archive == archive_name)
+                    && suite_root
+                        .join("data")
+                        .join(prev_ts)
+                        .join(&archive_name)
+                        .exists()
                 {
                     will_reuse = true;
                 }
             }
         }
 
-        if let Some(snap)=snap_opt.as_ref() {
-            let ext=if expanded.is_file() || !is_zstd_available() {"tar.gz"} else {"tar.zst"};
-            let name=archive_name_for(original,ext);
-            if let Some(item)=resume_candidate(&inventory_root,dir,&name,snap,&resumed_items) {
+        if let Some(snap) = snap_opt.as_ref() {
+            let ext = if expanded.is_file() || !is_zstd_available() {
+                "tar.gz"
+            } else {
+                "tar.zst"
+            };
+            let name = archive_name_for(original, ext);
+            if let Some(item) = resume_candidate(&inventory_root, dir, &name, snap, &resumed_items)
+            {
                 will_reuse |= backup_root.join(&item.archive).is_file();
             }
         }
         cached_snapshots[pre_i] = snap_opt;
         let dt = t0.elapsed().as_secs_f32();
-        trace(&format!("  -> {} bytes in {:.2}s (reuse={})", added, dt, will_reuse));
+        trace(&format!(
+            "  -> {} bytes in {:.2}s (reuse={})",
+            added, dt, will_reuse
+        ));
         estimated_source_bytes = estimated_source_bytes.saturating_add(added);
         if !will_reuse {
             estimated_new_bytes = estimated_new_bytes.saturating_add(added);
         }
     }
-    trace(&format!("pre-flight scan done, total {} bytes", estimated_source_bytes));
+    trace(&format!(
+        "pre-flight scan done, total {} bytes",
+        estimated_source_bytes
+    ));
 
     if estimated_source_bytes > 0 {
         let free_gb = get_free_space_gb(Path::new(&target_path));
@@ -1610,31 +2062,48 @@ fn create_backup_impl(
     trace("disk space check done, creating dirs");
     fs::create_dir_all(suite_root.join("data")).map_err(|e| e.to_string())?;
     if !is_resume {
-        fs::create_dir(&backup_root).map_err(|e| format!("Cannot create a new backup (timestamp already used?): {e}"))?;
+        fs::create_dir(&backup_root)
+            .map_err(|e| format!("Cannot create a new backup (timestamp already used?): {e}"))?;
     }
     fs::create_dir_all(&inventory_root).map_err(|e| e.to_string())?;
-    atomic_write(&backup_root.join("source-snapshots.json"), &serde_json::to_vec_pretty(&frozen.report()).map_err(|e|e.to_string())?)?;
+    atomic_write(
+        &backup_root.join("source-snapshots.json"),
+        &serde_json::to_vec_pretty(&frozen.report()).map_err(|e| e.to_string())?,
+    )?;
     // Keep successful checkpoints across another interruption. Every candidate
     // is checked against the new frozen source and its archive before reuse.
-    if !is_resume {atomic_write(&resume_state_path(&backup_root), b"")?;}
+    if !is_resume {
+        atomic_write(&resume_state_path(&backup_root), b"")?;
+    }
     trace("dirs created");
-    
-    let _ = window.emit("backup-log", format!("=== Backup started: {} ===", start_time_str));
-    let _ = window.emit("backup-progress", serde_json::json!({
-        "progress": 1,
-        "message": "Initialisiere Backup..."
-    }));
-    
-    let _ = window.emit("backup-log", "Dateiinhalte werden vollständig im Datenstrom geprüft; nur Dateiattribute benötigen begrenzten temporären Speicher.");
-    let manual=get_manual_apps()?.join("\n");
-    atomic_write(&inventory_root.join("manual_apps.txt"),manual.as_bytes())?;
 
-    let mut extra_source_guards: Vec<(PathBuf,Vec<ManifestEntry>)> = Vec::new();
+    let _ = window.emit(
+        "backup-log",
+        format!("=== Backup started: {} ===", start_time_str),
+    );
+    let _ = window.emit(
+        "backup-progress",
+        serde_json::json!({
+            "progress": 1,
+            "message": "Initialisiere Backup..."
+        }),
+    );
+
+    let _ = window.emit("backup-log", "Dateiinhalte werden vollständig im Datenstrom geprüft; nur Dateiattribute benötigen begrenzten temporären Speicher.");
+    let manual = get_manual_apps()?.join("\n");
+    atomic_write(&inventory_root.join("manual_apps.txt"), manual.as_bytes())?;
+
+    let mut extra_source_guards: Vec<(PathBuf, Vec<ManifestEntry>)> = Vec::new();
     let mut items = Vec::new();
     let total = directories.len();
-    trace(&format!("main loop begin, incremental={} total={}", incremental, total));
+    trace(&format!(
+        "main loop begin, incremental={} total={}",
+        incremental, total
+    ));
 
-    if is_resume { let _ = window.emit("backup-log", format!("Fortsetzung: {} vorhandene Archive werden mit dem aktuellen Snapshot und ihrer Prüfsumme verglichen; veränderte Quellen werden neu gesichert.", resumed_items.len())); }
+    if is_resume {
+        let _ = window.emit("backup-log", format!("Fortsetzung: {} vorhandene Archive werden mit dem aktuellen Snapshot und ihrer Prüfsumme verglichen; veränderte Quellen werden neu gesichert.", resumed_items.len()));
+    }
     // Inkrementelles Backup: vorheriges Backup ermitteln (Timestamp + Metadata),
     // um Manifeste vergleichen und Archive per Hardlink wiederverwenden zu können.
     trace(&format!("previous backup found={}", previous.is_some()));
@@ -1651,63 +2120,85 @@ fn create_backup_impl(
     }
 
     for (i, dir) in directories.iter().enumerate() {
-        trace(&format!("loop[{}/{}] {}", i+1, total, dir));
+        trace(&format!("loop[{}/{}] {}", i + 1, total, dir));
         // Check for cancellation before each directory
         if BACKUP_CANCELLED.load(Ordering::SeqCst) {
             let _ = window.emit("backup-log", "⚠️ Backup cancelled!");
-            let _ = window.emit("backup-progress", serde_json::json!({
-                "progress": 0,
-                "message": "Backup cancelled"
-            }));
+            let _ = window.emit(
+                "backup-progress",
+                serde_json::json!({
+                    "progress": 0,
+                    "message": "Backup cancelled"
+                }),
+            );
             BACKUP_CANCELLED.store(false, Ordering::SeqCst);
             return Err("Backup was cancelled".to_string());
         }
 
-        let original=&original_sources[i];
-        let expanded=frozen.get(original)?;
+        let original = &original_sources[i];
+        let expanded = frozen.get(original)?;
 
-        fs::symlink_metadata(&expanded).map_err(|e| format!("{}: {}", expanded.display(),e))?;
-        
+        fs::symlink_metadata(&expanded).map_err(|e| format!("{}: {}", expanded.display(), e))?;
+
         let is_file = expanded.is_file();
-        
-        let name = expanded.file_name()
+
+        let name = expanded
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "backup".to_string());
-        
+
         // Einzeldateien werden mit system-tar und gzip gepackt,
         // Verzeichnisse via `create_tar_gz` mit zstd (sofern verfügbar). Die
         // Endung muss zum tatsächlichen Kompressor passen, sonst schlägt die
         // zstd-Vorprüfung beim Verify/Restore unnötig fehl.
-        let archive_ext = if !is_file && is_zstd_available() { "tar.zst" } else { "tar.gz" };
+        let archive_ext = if !is_file && is_zstd_available() {
+            "tar.zst"
+        } else {
+            "tar.gz"
+        };
         let archive_name = archive_name_for(original, archive_ext);
         let archive_path = backup_root.join(&archive_name);
-        
+
         let _ = window.emit("backup-log", format!("Archiving {} ...", dir));
         let progress = 15 + (60 * (i + 1) / total);
-        let _ = window.emit("backup-progress", serde_json::json!({
-            "progress": progress,
-            "message": format!("Archiving {}...", name)
-        }));
-        
+        let _ = window.emit(
+            "backup-progress",
+            serde_json::json!({
+                "progress": progress,
+                "message": format!("Archiving {}...", name)
+            }),
+        );
+
         // Preflight, tar, readback and final guards all read the same immutable
         // APFS view. Changes to the live source cannot invalidate this baseline.
-        let current_snapshot = cached_snapshots[i].as_ref().ok_or("Quellmanifest fehlt")?.clone();
+        let current_snapshot = cached_snapshots[i]
+            .as_ref()
+            .ok_or("Quellmanifest fehlt")?
+            .clone();
         let source_size: u64 = current_snapshot.iter().map(|e| e.s).sum();
-        trace(&format!("  compute_snapshot done ({} entries)", current_snapshot.len()));
+        trace(&format!(
+            "  compute_snapshot done ({} entries)",
+            current_snapshot.len()
+        ));
 
-        if let Some(item)=verified_resume_item(&backup_root,&inventory_root,dir,&archive_name,&current_snapshot,&resumed_items)? {
-            save_manifest(&inventory_root,&archive_name,&current_snapshot)?;
+        if let Some(item) = verified_resume_item(
+            &backup_root,
+            &inventory_root,
+            dir,
+            &archive_name,
+            &current_snapshot,
+            &resumed_items,
+        )? {
+            save_manifest(&inventory_root, &archive_name, &current_snapshot)?;
             let _=window.emit("backup-log",format!("✅ Fortgesetzt: {} unverändert, bereits rückgelesenes Archiv mit SHA-256 bestätigt",dir));
-            append_resume_entry(&backup_root,&item)?;
+            append_resume_entry(&backup_root, &item)?;
             items.push(item);
             continue;
         }
 
         let mut reused_from_prev: Option<(String, String, u64)> = None; // (prev_ts, prev_hash, prev_archive_size)
         if let Some((prev_ts, prev_meta)) = &previous {
-            let prev_inventory = suite_root
-                .join("inventories")
-                .join(prev_ts);
+            let prev_inventory = suite_root.join("inventories").join(prev_ts);
             if let Some(prev_snapshot) = load_manifest(&prev_inventory, &archive_name) {
                 if same_source_version(&prev_snapshot, &current_snapshot) {
                     // Finde passenden Eintrag in vorheriger Metadata (gleicher Pfad + Archiv-Name)
@@ -1739,7 +2230,10 @@ fn create_backup_impl(
                 ensure_unchanged(&expanded, &current_snapshot)?;
                 let _ = window.emit(
                     "backup-log",
-                    format!("⏭️  Keine Änderungen in {} – Archiv übernommen aus {}", dir, prev_ts),
+                    format!(
+                        "⏭️  Keine Änderungen in {} – Archiv übernommen aus {}",
+                        dir, prev_ts
+                    ),
                 );
                 save_manifest(&inventory_root, &archive_name, &current_snapshot)?;
                 items.push(BackupItem {
@@ -1749,34 +2243,45 @@ fn create_backup_impl(
                     archive_size_bytes: prev_size,
                     source_size_bytes: source_size,
                 });
-                if let Some(it) = items.last() { append_resume_entry(&backup_root, it)?; }
+                if let Some(it) = items.last() {
+                    append_resume_entry(&backup_root, it)?;
+                }
                 continue;
             }
             // Wiederverwendung fehlgeschlagen → regulär fortfahren
             let _ = window.emit(
                 "backup-log",
-                format!("⚠️  Archiv-Wiederverwendung fehlgeschlagen für {} – erstelle neu", dir),
+                format!(
+                    "⚠️  Archiv-Wiederverwendung fehlgeschlagen für {} – erstelle neu",
+                    dir
+                ),
             );
         }
 
-        create_verified_archive_from_snapshot(&expanded, &archive_path, is_file, &current_snapshot)?;
-        
+        create_verified_archive_from_snapshot(
+            &expanded,
+            &archive_path,
+            is_file,
+            &current_snapshot,
+        )?;
+
         // Check for cancellation after archive
         if BACKUP_CANCELLED.load(Ordering::SeqCst) {
             // Clean up partial archive
             let _ = fs::remove_file(&archive_path);
             let _ = window.emit("backup-log", "⚠️ Backup cancelled!");
-            let _ = window.emit("backup-progress", serde_json::json!({
-                "progress": 0,
-                "message": "Backup cancelled"
-            }));
+            let _ = window.emit(
+                "backup-progress",
+                serde_json::json!({
+                    "progress": 0,
+                    "message": "Backup cancelled"
+                }),
+            );
             BACKUP_CANCELLED.store(false, Ordering::SeqCst);
             return Err("Backup was cancelled".to_string());
         }
-        
-        let archive_size = fs::metadata(&archive_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+
+        let archive_size = fs::metadata(&archive_path).map(|m| m.len()).unwrap_or(0);
         trace(&format!("  hashing archive ({} bytes)", archive_size));
         let hash = hash_file(&archive_path)?;
         trace("  hash done");
@@ -1792,57 +2297,90 @@ fn create_backup_impl(
             archive_size_bytes: archive_size,
             source_size_bytes: source_size,
         });
-        if let Some(it) = items.last() { append_resume_entry(&backup_root, it)?; }
-        trace(&format!("loop[{}/{}] done", i+1, total));
+        if let Some(it) = items.last() {
+            append_resume_entry(&backup_root, it)?;
+        }
+        trace(&format!("loop[{}/{}] done", i + 1, total));
     }
     trace("main loop complete, archiving inventory");
 
-    for (label,filename,content) in [
+    for (label, filename, content) in [
         ("homebrew-packages", "homebrew_packages.txt", brew_inventory),
         ("mas-apps", "mas_apps.txt", mas_inventory),
-        ("vscode-extensions", "vscode_extensions.txt", vscode_inventory),
+        (
+            "vscode-extensions",
+            "vscode_extensions.txt",
+            vscode_inventory,
+        ),
     ] {
-        if let Some(content)=content {
+        if let Some(content) = content {
             match label {
-                "homebrew-packages" => {brew_entries(&content)?;atomic_write(&inventory_root.join("Brewfile"),content.as_bytes())?;},
-                "mas-apps" => {mas_ids(&content)?;},
-                _ => {extension_ids(&content)?;},
+                "homebrew-packages" => {
+                    brew_entries(&content)?;
+                    atomic_write(&inventory_root.join("Brewfile"), content.as_bytes())?;
+                }
+                "mas-apps" => {
+                    mas_ids(&content)?;
+                }
+                _ => {
+                    extension_ids(&content)?;
+                }
             }
-            let source=inventory_root.join(filename);
-            atomic_write(&source,content.as_bytes())?;
-            let archive_name=format!("{label}.tar.gz");
-            let archive=backup_root.join(&archive_name);
-            create_file_archive(&source,filename,&archive)?;
-            let item=BackupItem{path:label.into(),archive:archive_name,hash:hash_file(&archive)?,
-                archive_size_bytes:fs::metadata(&archive).map_err(|e| e.to_string())?.len(),source_size_bytes:content.len() as u64};
-            append_resume_entry(&backup_root,&item)?;
+            let source = inventory_root.join(filename);
+            atomic_write(&source, content.as_bytes())?;
+            let archive_name = format!("{label}.tar.gz");
+            let archive = backup_root.join(&archive_name);
+            create_file_archive(&source, filename, &archive)?;
+            let item = BackupItem {
+                path: label.into(),
+                archive: archive_name,
+                hash: hash_file(&archive)?,
+                archive_size_bytes: fs::metadata(&archive).map_err(|e| e.to_string())?.len(),
+                source_size_bytes: content.len() as u64,
+            };
+            append_resume_entry(&backup_root, &item)?;
             items.push(item);
         }
     }
 
     // Optional: complete Homebrew cache; selected sources must never be silently skipped.
-    trace(&format!("config: brew_cache={} safari={}", config.backup_homebrew_cache, config.backup_safari_settings));
+    trace(&format!(
+        "config: brew_cache={} safari={}",
+        config.backup_homebrew_cache, config.backup_safari_settings
+    ));
     if config.backup_homebrew_cache {
         trace("archiving homebrew-cache");
         let _ = window.emit("backup-log", "Checking Homebrew cache...");
-        
-        let cache_path=cache_source.as_ref().map(|p|frozen.get(p)).transpose()?;
+
+        let cache_path = cache_source.as_ref().map(|p| frozen.get(p)).transpose()?;
 
         if let Some(cache_dir) = cache_path {
             validate_source_target(&cache_dir, Path::new(&target_path))?;
-            let cache_manifest=compute_snapshot(&cache_dir)?;
-            let cache_size=cache_manifest.iter().map(|e| e.s).sum::<u64>();
-            extra_source_guards.push((cache_dir.clone(),cache_manifest));
-            
+            let cache_manifest = compute_snapshot(&cache_dir)?;
+            let cache_size = cache_manifest.iter().map(|e| e.s).sum::<u64>();
+            extra_source_guards.push((cache_dir.clone(), cache_manifest));
+
             {
-                let cache_archive_name = if is_zstd_available() { "homebrew-cache.tar.zst" } else { "homebrew-cache.tar.gz" };
+                let cache_archive_name = if is_zstd_available() {
+                    "homebrew-cache.tar.zst"
+                } else {
+                    "homebrew-cache.tar.gz"
+                };
                 let cache_archive_path = backup_root.join(cache_archive_name);
-                
-                let _ = window.emit("backup-log", format!("Archiving Homebrew cache ({:.1} MB)...", cache_size as f64 / (1024.0 * 1024.0)));
-                
+
+                let _ = window.emit(
+                    "backup-log",
+                    format!(
+                        "Archiving Homebrew cache ({:.1} MB)...",
+                        cache_size as f64 / (1024.0 * 1024.0)
+                    ),
+                );
+
                 {
                     create_tar_gz(&cache_dir, &cache_archive_path)?;
-                    let archive_size = fs::metadata(&cache_archive_path).map(|m| m.len()).unwrap_or(0);
+                    let archive_size = fs::metadata(&cache_archive_path)
+                        .map(|m| m.len())
+                        .unwrap_or(0);
                     {
                         let hash = hash_file(&cache_archive_path)?;
                         items.push(BackupItem {
@@ -1852,58 +2390,83 @@ fn create_backup_impl(
                             archive_size_bytes: archive_size,
                             source_size_bytes: cache_size,
                         });
-                        if let Some(it) = items.last() { append_resume_entry(&backup_root, it)?; }
-                        let _ = window.emit("backup-log", format!("✅ Homebrew cache archived: {:.1} MB", archive_size as f64 / (1024.0 * 1024.0)));
+                        if let Some(it) = items.last() {
+                            append_resume_entry(&backup_root, it)?;
+                        }
+                        let _ = window.emit(
+                            "backup-log",
+                            format!(
+                                "✅ Homebrew cache archived: {:.1} MB",
+                                archive_size as f64 / (1024.0 * 1024.0)
+                            ),
+                        );
                     }
                 }
             }
-        } else { return Err("Homebrew-Cache ausgewählt, aber kein Cache gefunden".into()); }
+        } else {
+            return Err("Homebrew-Cache ausgewählt, aber kein Cache gefunden".into());
+        }
     }
 
     // Optional: Backup Safari Settings including Bookmarks
     if config.backup_safari_settings {
         trace("archiving safari-settings");
         let _ = window.emit("backup-log", "Backing up Safari settings...");
-        
-        let safari_paths: Vec<PathBuf> = safari_sources.iter().map(|p|frozen.get(p)).collect::<Result<_,_>>()?;
+
+        let safari_paths: Vec<PathBuf> = safari_sources
+            .iter()
+            .map(|p| frozen.get(p))
+            .collect::<Result<_, _>>()?;
 
         let safari_stage = PrivateDir::temp()?;
         let temp_safari_dir = safari_stage.0.join("safari_backup");
         fs::create_dir(&temp_safari_dir).map_err(|e| e.to_string())?;
-        
+
         let mut copied_count = 0;
         for safari_path in &safari_paths {
             match fs::symlink_metadata(safari_path) {
-                Err(e) if e.kind()==std::io::ErrorKind::NotFound => { continue; }
-                Err(e) => return Err(format!("Safari {}: {e}",safari_path.display())),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    continue;
+                }
+                Err(e) => return Err(format!("Safari {}: {e}", safari_path.display())),
                 Ok(_) => {}
             }
             {
-                let original_manifest=compute_snapshot(safari_path)?;
-                extra_source_guards.push((safari_path.clone(),original_manifest));
-                let relative_name = safari_path.file_name()
+                let original_manifest = compute_snapshot(safari_path)?;
+                extra_source_guards.push((safari_path.clone(), original_manifest));
+                let relative_name = safari_path
+                    .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "unknown".to_string());
-                
+
                 let dest = temp_safari_dir.join(&relative_name);
-                
-                let mut cmd=Command::new("/usr/bin/ditto");
+
+                let mut cmd = Command::new("/usr/bin/ditto");
                 cmd.arg(safari_path).arg(&dest);
-                let output=run_with_timeout(cmd,std::time::Duration::from_secs(3600))?;
-                require_success("Safari backup copy",&output)?;
+                let output = run_with_timeout(cmd, std::time::Duration::from_secs(3600))?;
+                require_success("Safari backup copy", &output)?;
                 copied_count += 1;
             }
         }
-        
+
         if copied_count > 0 {
-            let safari_archive_name = if is_zstd_available() { "safari-settings.tar.zst" } else { "safari-settings.tar.gz" };
+            let safari_archive_name = if is_zstd_available() {
+                "safari-settings.tar.zst"
+            } else {
+                "safari-settings.tar.gz"
+            };
             let safari_archive_path = backup_root.join(safari_archive_name);
-            
+
             {
                 create_tar_gz(&temp_safari_dir, &safari_archive_path)?;
-                let source_size = compute_snapshot(&temp_safari_dir)?.iter().map(|e| e.s).sum();
-                let archive_size = fs::metadata(&safari_archive_path).map(|m| m.len()).unwrap_or(0);
-                
+                let source_size = compute_snapshot(&temp_safari_dir)?
+                    .iter()
+                    .map(|e| e.s)
+                    .sum();
+                let archive_size = fs::metadata(&safari_archive_path)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+
                 {
                     let hash = hash_file(&safari_archive_path)?;
                     items.push(BackupItem {
@@ -1913,29 +2476,45 @@ fn create_backup_impl(
                         archive_size_bytes: archive_size,
                         source_size_bytes: source_size,
                     });
-                    if let Some(it) = items.last() { append_resume_entry(&backup_root, it)?; }
-                    let _ = window.emit("backup-log", format!("✅ Safari settings archived: {} files/folders", copied_count));
+                    if let Some(it) = items.last() {
+                        append_resume_entry(&backup_root, it)?;
+                    }
+                    let _ = window.emit(
+                        "backup-log",
+                        format!(
+                            "✅ Safari settings archived: {} files/folders",
+                            copied_count
+                        ),
+                    );
                 }
             }
         } else {
             return Err("Safari-Sicherung ausgewählt, aber keine Safari-Daten gefunden".into());
         }
-        
+
         let _ = fs::remove_dir_all(&temp_safari_dir);
     }
 
-    let _ = window.emit("backup-log", "Abschlussprüfung: eingefrorener Sicherungsstand und Archive werden erneut geprüft …");
-    for (i,source) in original_sources.iter().enumerate() {
-        extra_source_guards.push((frozen.get(source)?,cached_snapshots[i].clone().ok_or("Quellmanifest fehlt")?));
+    let _ = window.emit(
+        "backup-log",
+        "Abschlussprüfung: eingefrorener Sicherungsstand und Archive werden erneut geprüft …",
+    );
+    for (i, source) in original_sources.iter().enumerate() {
+        extra_source_guards.push((
+            frozen.get(source)?,
+            cached_snapshots[i].clone().ok_or("Quellmanifest fehlt")?,
+        ));
     }
 
     let end = Local::now();
     let end_time_str = end.format("%d.%m.%Y %H:%M:%S").to_string();
     let duration = (end - start).num_seconds() as u64;
-    
+
     let total_size: u64 = items.iter().map(|i| i.source_size_bytes).sum();
-    
+
     let metadata = BackupMetadata {
+        profile_id: config.profile_id.clone(),
+        profile_name: config.profile_name.clone(),
         timestamp: timestamp.clone(),
         items,
         hash_algorithm: "sha256".to_string(),
@@ -1944,36 +2523,40 @@ fn create_backup_impl(
         end_time: end_time_str.clone(),
         duration_seconds: duration,
     };
-    
-    finish_backup(&backup_root,&metadata,&extra_source_guards)?;
+
+    finish_backup(&backup_root, &metadata, &extra_source_guards)?;
 
     // Backup erfolgreich abgeschlossen — Resume-State kann jetzt verworfen werden.
     clear_resume_state(&backup_root);
-    
+
     // Copy the DMG installer to backup root (always include app in backup)
     let dmg_filename = "macOS Backup Suite.dmg";
     let dmg_dest = suite_root.join(dmg_filename);
     let mut dmg_copied = false;
-    
+
     // Look for DMG in the app bundle's Resources folder
     if let Ok(exe) = std::env::current_exe() {
         // exe is at: App.app/Contents/MacOS/binary
         // We need: App.app/Contents/Resources/
         if let Some(macos_dir) = exe.parent() {
-            let resources_dmg = macos_dir.parent()
+            let resources_dmg = macos_dir
+                .parent()
                 .map(|contents| contents.join("Resources").join(dmg_filename));
-            
+
             if let Some(ref src) = resources_dmg {
                 if src.exists() {
                     if fs::copy(src, &dmg_dest).is_ok() {
-                        let _ = window.emit("backup-log", format!("✅ App installer copied: {}", dmg_filename));
+                        let _ = window.emit(
+                            "backup-log",
+                            format!("✅ App installer copied: {}", dmg_filename),
+                        );
                         dmg_copied = true;
                     }
                 }
             }
         }
     }
-    
+
     // Fallback: Look in multiple locations
     if !dmg_copied {
         let home = dirs::home_dir().unwrap_or_default();
@@ -2005,40 +2588,68 @@ fn create_backup_impl(
         for dev_path in &candidates {
             if dev_path.exists() {
                 if fs::copy(dev_path, &dmg_dest).is_ok() {
-                    let _ = window.emit("backup-log", format!("✅ App installer copied: {}", dmg_filename));
+                    let _ = window.emit(
+                        "backup-log",
+                        format!("✅ App installer copied: {}", dmg_filename),
+                    );
                     dmg_copied = true;
                     break;
                 }
             }
         }
     }
-    
+
     if !dmg_copied {
-        let _ = window.emit("backup-log", "ℹ️ App installer (DMG) not found - run 'npm run tauri build'");
+        let _ = window.emit(
+            "backup-log",
+            "ℹ️ App installer (DMG) not found - run 'npm run tauri build'",
+        );
     }
-    
+
     let latest = serde_json::json!({
         "latest": timestamp,
         "created_at": end.to_rfc3339()
     });
-    if let Err(e)=atomic_write(&suite_root.join("latest.json"), latest.to_string().as_bytes()) {
-        let _ = window.emit("backup-log", format!("Backup vollständig; Aktualisierung der Latest-Verknüpfung fehlgeschlagen: {e}"));
+    if let Err(e) = atomic_write(
+        &suite_root.join("latest.json"),
+        latest.to_string().as_bytes(),
+    ) {
+        let _ = window.emit(
+            "backup-log",
+            format!(
+                "Backup vollständig; Aktualisierung der Latest-Verknüpfung fehlgeschlagen: {e}"
+            ),
+        );
     }
-    
+
     let duration_str = if duration >= 3600 {
-        format!("{}h {}m {}s", duration / 3600, (duration % 3600) / 60, duration % 60)
+        format!(
+            "{}h {}m {}s",
+            duration / 3600,
+            (duration % 3600) / 60,
+            duration % 60
+        )
     } else if duration >= 60 {
         format!("{}m {}s", duration / 60, duration % 60)
     } else {
         format!("{}s", duration)
     };
-    
-    let _ = window.emit("backup-log", format!("=== Backup finished: {} (Duration: {}) ===", end_time_str, duration_str));
-    let _ = window.emit("backup-progress", serde_json::json!({
-        "progress": 100,
-        "message": "Backup completed."
-    }));
-    
+
+    let _ = window.emit(
+        "backup-log",
+        format!(
+            "=== Backup finished: {} (Duration: {}) ===",
+            end_time_str, duration_str
+        ),
+    );
+    let _ = window.emit(
+        "backup-progress",
+        serde_json::json!({
+            "progress": 100,
+            "message": "Backup completed."
+        }),
+    );
+
     Ok(metadata)
 }
 
@@ -2047,10 +2658,11 @@ async fn verify_backup(
     window: tauri::Window,
     target_path: String,
     timestamp: String,
+    profile_id: String,
 ) -> Result<VerifyResult, String> {
     validate_component(&timestamp)?;
     tauri::async_runtime::spawn_blocking(move || {
-        verify_backup_impl(window, target_path, timestamp)
+        verify_backup_impl(window, target_path, timestamp, profile_id)
     })
     .await
     .map_err(|e| format!("Verify task join error: {}", e))?
@@ -2060,21 +2672,22 @@ fn verify_backup_impl(
     window: tauri::Window,
     target_path: String,
     timestamp: String,
+    profile_id: String,
 ) -> Result<VerifyResult, String> {
     let _guard = OperationGuard::acquire()?;
     let _progress = BackupProgress::attach(window.clone());
     validate_component(&timestamp)?;
-    let backup_path = PathBuf::from(&target_path)
-        .join("macos-backup-suite")
+    let backup_path = profile_root(&target_path, &profile_id)?
         .join("data")
         .join(&timestamp);
-    
+
     let metadata_path = backup_path.join("metadata.json");
     if !metadata_path.exists() {
         return Err(format!("Backup not found: {}", timestamp));
     }
     let metadata = load_backup_metadata(&metadata_path)?;
-    
+    validate_backup_profile(&metadata, &profile_id)?;
+
     let total_files = metadata.items.len();
     let mut verified_files = 0;
     let mut failed_files = Vec::new();
@@ -2096,48 +2709,55 @@ fn verify_backup_impl(
             VERIFY_CANCELLED.store(false, Ordering::SeqCst);
             return Err("Verification cancelled".to_string());
         }
-        
+
         let archive_path = backup_path.join(&item.archive);
-        
+
         let progress_msg = format!("Verifiziere {}/{}: {}", i + 1, total_files, item.archive);
         let _ = window.emit("backup-log", progress_msg);
-        
+
         if !archive_path.exists() {
             failed_files.push(format!("{}: File not found", item.archive));
             continue;
         }
-        
+
         match hash_file(&archive_path) {
             Ok(computed_hash) => {
                 if computed_hash.eq_ignore_ascii_case(&item.hash) {
                     verified_files += 1;
                 } else {
-                    failed_files.push(format!("{}: Hash mismatch (expected: {}, computed: {})", 
-                        item.archive, &item.hash.chars().take(16).collect::<String>(), &computed_hash[..16]));
+                    failed_files.push(format!(
+                        "{}: Hash mismatch (expected: {}, computed: {})",
+                        item.archive,
+                        &item.hash.chars().take(16).collect::<String>(),
+                        &computed_hash[..16]
+                    ));
                 }
             }
             Err(e) => {
                 failed_files.push(format!("{}: Read error: {}", item.archive, e));
             }
         }
-        
+
         // Emit progress
         let fraction = (i + 1) as f64 / total_files as f64;
-        let _ = window.emit("backup-progress", ProgressUpdate {
-            message: format!("{}/{} files verified", i + 1, total_files),
-            fraction,
-        });
+        let _ = window.emit(
+            "backup-progress",
+            ProgressUpdate {
+                message: format!("{}/{} files verified", i + 1, total_files),
+                fraction,
+            },
+        );
     }
-    
+
     let success = failed_files.is_empty();
     let message = if success {
         format!("All {} files verified successfully!", total_files)
     } else {
         format!("{} of {} files failed", failed_files.len(), total_files)
     };
-    
+
     let _ = window.emit("backup-log", &message);
-    
+
     Ok(VerifyResult {
         success,
         total_files,
@@ -2154,10 +2774,11 @@ async fn verify_backup_parallel(
     window: tauri::Window,
     target_path: String,
     timestamp: String,
+    profile_id: String,
 ) -> Result<VerifyResult, String> {
     validate_component(&timestamp)?;
     tauri::async_runtime::spawn_blocking(move || {
-        verify_backup_parallel_impl(window, target_path, timestamp)
+        verify_backup_parallel_impl(window, target_path, timestamp, profile_id)
     })
     .await
     .map_err(|e| format!("Verify task join error: {}", e))?
@@ -2167,41 +2788,42 @@ fn verify_backup_parallel_impl(
     window: tauri::Window,
     target_path: String,
     timestamp: String,
+    profile_id: String,
 ) -> Result<VerifyResult, String> {
     let _guard = OperationGuard::acquire()?;
     validate_component(&timestamp)?;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::Arc;
     use std::sync::Mutex;
-    
-    let backup_path = PathBuf::from(&target_path)
-        .join("macos-backup-suite")
+
+    let backup_path = profile_root(&target_path, &profile_id)?
         .join("data")
         .join(&timestamp);
-    
+
     let metadata_path = backup_path.join("metadata.json");
     if !metadata_path.exists() {
         return Err(format!("Backup not found: {}", timestamp));
     }
     let metadata = load_backup_metadata(&metadata_path)?;
-    
+    validate_backup_profile(&metadata, &profile_id)?;
+
     let total_files = metadata.items.len();
     let verified_counter = Arc::new(AtomicUsize::new(0));
     let failed_files = Arc::new(Mutex::new(Vec::<String>::new()));
-    
-    let _ = window.emit("backup-log", format!("🔍 Parallel verification of {} files...", total_files));
-    
+
+    let _ = window.emit(
+        "backup-log",
+        format!("🔍 Parallel verification of {} files...", total_files),
+    );
+
     // Process files in parallel batches (4 at a time to balance CPU and I/O)
     const PARALLEL_VERIFY: usize = 4;
-    
+
     let items: Vec<_> = metadata.items.iter().cloned().collect();
-    let chunks: Vec<Vec<BackupItem>> = items
-        .chunks(PARALLEL_VERIFY)
-        .map(|c| c.to_vec())
-        .collect();
-    
+    let chunks: Vec<Vec<BackupItem>> = items.chunks(PARALLEL_VERIFY).map(|c| c.to_vec()).collect();
+
     let mut processed = 0;
-    
+
     for chunk in chunks {
         // Abbruch zwischen den Batches sauber behandeln: laufende hash_file-
         // Aufrufe brechen intern via VERIFY_CANCELLED ab und würden sonst
@@ -2212,29 +2834,33 @@ fn verify_backup_parallel_impl(
             return Err("Verification cancelled".to_string());
         }
         let mut handles = Vec::new();
-        
+
         for item in chunk {
             let backup_path_clone = backup_path.clone();
             let verified = Arc::clone(&verified_counter);
             let failed = Arc::clone(&failed_files);
-            
+
             let handle = std::thread::spawn(move || {
                 let archive_path = backup_path_clone.join(&item.archive);
-                
+
                 if !archive_path.exists() {
                     let mut failed_lock = failed.lock().unwrap();
                     failed_lock.push(format!("{}: File not found", item.archive));
                     return;
                 }
-                
+
                 match hash_file(&archive_path) {
                     Ok(computed_hash) => {
                         if computed_hash.eq_ignore_ascii_case(&item.hash) {
                             verified.fetch_add(1, AtomicOrdering::SeqCst);
                         } else {
                             let mut failed_lock = failed.lock().unwrap();
-                            failed_lock.push(format!("{}: Hash mismatch (expected: {}, computed: {})", 
-                                item.archive, &item.hash.chars().take(16).collect::<String>(), &computed_hash[..16]));
+                            failed_lock.push(format!(
+                                "{}: Hash mismatch (expected: {}, computed: {})",
+                                item.archive,
+                                &item.hash.chars().take(16).collect::<String>(),
+                                &computed_hash[..16]
+                            ));
                         }
                     }
                     Err(e) => {
@@ -2243,44 +2869,61 @@ fn verify_backup_parallel_impl(
                     }
                 }
             });
-            
+
             handles.push(handle);
         }
-        
+
         // Wait for batch to complete
         for handle in handles {
-            handle.join().map_err(|_| "Verification worker failed".to_string())?;
+            handle
+                .join()
+                .map_err(|_| "Verification worker failed".to_string())?;
         }
-        
+
         processed += PARALLEL_VERIFY.min(total_files - processed);
         let fraction = processed as f64 / total_files as f64;
-        let _ = window.emit("backup-progress", ProgressUpdate {
-            message: format!("{}/{} files verified", processed, total_files),
-            fraction,
-        });
+        let _ = window.emit(
+            "backup-progress",
+            ProgressUpdate {
+                message: format!("{}/{} files verified", processed, total_files),
+                fraction,
+            },
+        );
     }
-    
+
     // Falls der Abbruch erst während des letzten Batches eintraf.
     if VERIFY_CANCELLED.load(Ordering::SeqCst) {
         VERIFY_CANCELLED.store(false, Ordering::SeqCst);
         return Err("Verification cancelled".to_string());
     }
-    
+
     let verified_files = verified_counter.load(AtomicOrdering::SeqCst);
     let failed_files_result = match Arc::try_unwrap(failed_files) {
-        Ok(mutex) => mutex.into_inner().map_err(|_| "Verification results unavailable")?,
-        Err(arc) => arc.lock().map_err(|_| "Verification results unavailable")?.clone(),
+        Ok(mutex) => mutex
+            .into_inner()
+            .map_err(|_| "Verification results unavailable")?,
+        Err(arc) => arc
+            .lock()
+            .map_err(|_| "Verification results unavailable")?
+            .clone(),
     };
-    
+
     let success = failed_files_result.is_empty() && verified_files == total_files;
     let message = if success {
-        format!("✅ All {} files verified successfully (parallel)!", total_files)
+        format!(
+            "✅ All {} files verified successfully (parallel)!",
+            total_files
+        )
     } else {
-        format!("❌ {} of {} files failed", failed_files_result.len(), total_files)
+        format!(
+            "❌ {} of {} files failed",
+            failed_files_result.len(),
+            total_files
+        )
     };
-    
+
     let _ = window.emit("backup-log", &message);
-    
+
     Ok(VerifyResult {
         success,
         total_files,
@@ -2290,32 +2933,37 @@ fn verify_backup_parallel_impl(
     })
 }
 
-
 #[tauri::command]
-fn list_backup_files(target_path: String, timestamp: String) -> Result<BackupDetails, String> {
+fn list_backup_files(
+    target_path: String,
+    timestamp: String,
+    profile_id: String,
+) -> Result<BackupDetails, String> {
     validate_component(&timestamp)?;
-    let backup_path = PathBuf::from(&target_path)
-        .join("macos-backup-suite")
+    let backup_path = profile_root(&target_path, &profile_id)?
         .join("data")
         .join(&timestamp);
-    
+
     let metadata_path = backup_path.join("metadata.json");
     if !metadata_path.exists() {
         return Err(format!("Backup not found: {}", timestamp));
     }
     let metadata = load_backup_metadata(&metadata_path)?;
-    
-    let items: Vec<BackupFileInfo> = metadata.items.iter().map(|item| {
-        BackupFileInfo {
+    validate_backup_profile(&metadata, &profile_id)?;
+
+    let items: Vec<BackupFileInfo> = metadata
+        .items
+        .iter()
+        .map(|item| BackupFileInfo {
             path: item.path.clone(),
             archive: item.archive.clone(),
             archive_size_bytes: item.archive_size_bytes,
             source_size_bytes: item.source_size_bytes,
-        }
-    }).collect();
-    
+        })
+        .collect();
+
     let total_archive_size_bytes: u64 = items.iter().map(|i| i.archive_size_bytes).sum();
-    
+
     Ok(BackupDetails {
         timestamp: metadata.timestamp,
         items,
@@ -2329,130 +2977,128 @@ fn list_backup_files(target_path: String, timestamp: String) -> Result<BackupDet
 
 #[tauri::command]
 fn list_backups(target_path: String) -> Result<Vec<BackupListItem>, String> {
-    let data_path = PathBuf::from(&target_path)
-        .join("macos-backup-suite")
-        .join("data");
-    
-    if !data_path.exists() {
-        return Ok(Vec::new());
-    }
-    
     let mut backups = Vec::new();
-    if let Ok(entries) = fs::read_dir(&data_path) {
+    for (profile_id, profile_name, root) in backup_profile_roots(&target_path)? {
+        let data_path = root.join("data");
+        let Ok(entries) = fs::read_dir(&data_path) else { continue; };
         for entry in entries.flatten() {
-            if entry.path().is_dir() {
-                if let Some(name) = entry.file_name().to_str() {
-                    let metadata_path = entry.path().join("metadata.json");
-                    let metadata_valid = load_backup_metadata(&metadata_path).is_ok();
-                    let hash_verified = false;
-                    
-                    backups.push(BackupListItem {
-                        timestamp: name.to_string(),
-                        hash_verified,
-                        metadata_valid,
-                    });
-                }
-            }
+            if !entry.path().is_dir() { continue; }
+            let Some(timestamp) = entry.file_name().to_str().map(str::to_string) else { continue; };
+            let metadata_valid = load_backup_metadata(&entry.path().join("metadata.json"))
+                .and_then(|metadata| validate_backup_profile(&metadata, &profile_id))
+                .is_ok();
+            backups.push(BackupListItem {
+                timestamp,
+                profile_id: profile_id.clone(),
+                profile_name: profile_name.clone(),
+                hash_verified: false,
+                metadata_valid,
+            });
         }
     }
-    
-    backups.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    backups.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.profile_name.cmp(&b.profile_name)));
     Ok(backups)
 }
 
 #[tauri::command]
-fn get_manual_apps_from_backup(target_path: String, timestamp: String) -> Result<Vec<String>, String> {
+fn get_manual_apps_from_backup(
+    target_path: String,
+    timestamp: String,
+    profile_id: String,
+) -> Result<Vec<String>, String> {
     validate_component(&timestamp)?;
-    let inventory_path = PathBuf::from(&target_path)
-        .join("macos-backup-suite")
+    let inventory_path = profile_root(&target_path, &profile_id)?
         .join("inventories")
         .join(&timestamp)
         .join("manual_apps.txt");
-    
+
     if !inventory_path.exists() {
         return Err("File manual_apps.txt not found".to_string());
     }
-    
-    let content = fs::read_to_string(&inventory_path)
-        .map_err(|e| format!("Error reading file: {}", e))?;
-    
+
+    let content =
+        fs::read_to_string(&inventory_path).map_err(|e| format!("Error reading file: {}", e))?;
+
     let apps: Vec<String> = content
         .lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| l.to_string())
         .collect();
-    
+
     Ok(apps)
 }
 
 #[tauri::command]
-fn save_license_data(target_path: String, timestamp: String, data: Vec<AppLicenseEntry>) -> Result<(), String> {
+fn save_license_data(
+    target_path: String,
+    timestamp: String,
+    data: Vec<AppLicenseEntry>,
+    profile_id: String,
+) -> Result<(), String> {
     validate_component(&timestamp)?;
-    let inventory_dir = PathBuf::from(&target_path)
-        .join("macos-backup-suite")
+    let inventory_dir = profile_root(&target_path, &profile_id)?
         .join("inventories")
         .join(&timestamp);
-    
+
     if !inventory_dir.exists() {
         return Err("Inventory directory not found".to_string());
     }
-    
+
     let license_path = inventory_dir.join("license_data.json");
     let json = serde_json::to_string_pretty(&data)
         .map_err(|e| format!("JSON serialization error: {}", e))?;
-    
-    fs::write(&license_path, &json)
-        .map_err(|e| format!("Error writing license data: {}", e))?;
-    
+
+    fs::write(&license_path, &json).map_err(|e| format!("Error writing license data: {}", e))?;
+
     Ok(())
 }
 
 #[tauri::command]
-fn load_license_data(target_path: String, timestamp: String) -> Result<Vec<AppLicenseEntry>, String> {
+fn load_license_data(
+    target_path: String,
+    timestamp: String,
+    profile_id: String,
+) -> Result<Vec<AppLicenseEntry>, String> {
     validate_component(&timestamp)?;
-    let license_path = PathBuf::from(&target_path)
-        .join("macos-backup-suite")
+    let license_path = profile_root(&target_path, &profile_id)?
         .join("inventories")
         .join(&timestamp)
         .join("license_data.json");
-    
+
     if !license_path.exists() {
         return Ok(Vec::new());
     }
-    
+
     let content = fs::read_to_string(&license_path)
         .map_err(|e| format!("Error reading license data: {}", e))?;
-    
-    let data: Vec<AppLicenseEntry> = serde_json::from_str(&content)
-        .map_err(|e| format!("JSON parse error: {}", e))?;
-    
+
+    let data: Vec<AppLicenseEntry> =
+        serde_json::from_str(&content).map_err(|e| format!("JSON parse error: {}", e))?;
+
     Ok(data)
 }
 
 #[tauri::command]
 fn show_help_window(app_handle: tauri::AppHandle) -> Result<(), String> {
     use tauri::WebviewUrl;
-    
+
     // Check if help window already exists
     if let Some(window) = app_handle.get_webview_window("help") {
         window.set_focus().map_err(|e| e.to_string())?;
         return Ok(());
     }
-    
+
     // Create help window
-    let help_window = tauri::WebviewWindowBuilder::new(
-        &app_handle,
-        "help",
-        WebviewUrl::App("help.html".into())
-    )
-    .title("macOS Backup Suite - Hilfe")
-    .inner_size(800.0, 600.0)
-    .resizable(true)
-    .build()
-    .map_err(|e| e.to_string())?;
-    
+    let help_window =
+        tauri::WebviewWindowBuilder::new(&app_handle, "help", WebviewUrl::App("help.html".into()))
+            .title("macOS Backup Suite - Hilfe")
+            .inner_size(800.0, 600.0)
+            .resizable(true)
+            .build()
+            .map_err(|e| e.to_string())?;
+
     help_window.set_focus().map_err(|e| e.to_string())?;
-    
+
     Ok(())
 }
 
@@ -2463,10 +3109,11 @@ async fn restore_items(
     items: Vec<String>,
     overwrite: bool,
     window: tauri::Window,
+    profile_id: String,
 ) -> Result<RestoreResult, String> {
     validate_component(&timestamp)?;
     tauri::async_runtime::spawn_blocking(move || {
-        restore_items_impl(target_path, timestamp, items, overwrite, window)
+        restore_items_impl(target_path, timestamp, items, overwrite, window, profile_id)
     })
     .await
     .map_err(|e| format!("Restore task join error: {}", e))?
@@ -2501,10 +3148,18 @@ async fn test_restore_item(
     item_path: String,
     dest_dir: String,
     window: tauri::Window,
+    profile_id: String,
 ) -> Result<TestRestoreResult, String> {
     validate_component(&timestamp)?;
     tauri::async_runtime::spawn_blocking(move || {
-        test_restore_item_impl(target_path, timestamp, item_path, dest_dir, window)
+        test_restore_item_impl(
+            target_path,
+            timestamp,
+            item_path,
+            dest_dir,
+            window,
+            profile_id,
+        )
     })
     .await
     .map_err(|e| format!("Test-Restore task join error: {}", e))?
@@ -2516,13 +3171,18 @@ fn test_restore_item_impl(
     item_path: String,
     dest_dir: String,
     window: tauri::Window,
+    profile_id: String,
 ) -> Result<TestRestoreResult, String> {
     let _guard = OperationGuard::acquire()?;
     let _progress = BackupProgress::attach(window.clone());
     validate_component(&timestamp)?;
-    let backup = PathBuf::from(&target_path)
-        .join("macos-backup-suite/data")
+    let backup = profile_root(&target_path, &profile_id)?
+        .join("data")
         .join(&timestamp);
+    validate_backup_profile(
+        &load_backup_metadata(&backup.join("metadata.json"))?,
+        &profile_id,
+    )?;
     let result = test_restore_to(&backup, &item_path, Path::new(&dest_dir))?;
     let _ = window.emit(
         "restore-log",
@@ -2544,17 +3204,21 @@ fn restore_items_impl(
     items: Vec<String>,
     overwrite: bool,
     window: tauri::Window,
+    profile_id: String,
 ) -> Result<RestoreResult, String> {
     let _guard = OperationGuard::acquire()?;
     let _progress = BackupProgress::attach(window.clone());
     validate_component(&timestamp)?;
-    let backup = PathBuf::from(&target_path)
-        .join("macos-backup-suite/data")
+    let backup = profile_root(&target_path, &profile_id)?
+        .join("data")
         .join(&timestamp);
+    validate_backup_profile(
+        &load_backup_metadata(&backup.join("metadata.json"))?,
+        &profile_id,
+    )?;
     let home = dirs::home_dir().ok_or("Home directory not found")?;
     restore_selected(&backup, &items, overwrite, &home, Some(&window))
 }
-
 
 fn restore_homebrew_packages(
     backup_path: &Path,
@@ -2577,7 +3241,6 @@ fn restore_homebrew_packages(
     install_brew_entries(&brew, &entries, reinstall, window)
 }
 
-
 /// Quick-Restore mode: Install essential packages first for rapid productivity
 /// Essential brew packages: git, vim, python, node, curl, wget, htop, tree, jq, ripgrep
 /// Essential casks: visual-studio-code, iterm2, google-chrome, firefox, 1password
@@ -2586,20 +3249,24 @@ async fn quick_restore_essentials(
     target_path: String,
     timestamp: String,
     window: tauri::Window,
+    profile_id: String,
 ) -> Result<RestoreResult, String> {
     validate_component(&timestamp)?;
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = OperationGuard::acquire()?;
-        let backup = PathBuf::from(target_path)
-            .join("macos-backup-suite/data")
+        let backup = profile_root(&target_path, &profile_id)?
+            .join("data")
             .join(timestamp);
+        validate_backup_profile(
+            &load_backup_metadata(&backup.join("metadata.json"))?,
+            &profile_id,
+        )?;
         let home = dirs::home_dir().ok_or("Home directory not found")?;
         quick_restore(&backup, &home, Some(&window))
     })
     .await
     .map_err(|e| format!("Quick restore task failed: {e}"))?
 }
-
 
 /// Restore Safari settings from backup
 fn restore_safari_settings(
@@ -2656,7 +3323,6 @@ fn restore_safari_settings(
     Ok(result)
 }
 
-
 /// Restore Homebrew cache from backup
 fn restore_homebrew_cache(
     backup_path: &Path,
@@ -2677,7 +3343,6 @@ fn restore_homebrew_cache(
         .ok_or("Homebrew cache root not found")?;
     copy_then_merge(&source, &home.join("Library/Caches/Homebrew"), overwrite)
 }
-
 
 /// Parallel MAS app installation with up to 4 concurrent downloads
 /// Provides ~60-80% time savings when installing many apps
@@ -2750,8 +3415,6 @@ fn restore_mas_apps(
     }
 }
 
-
-
 /// Parallel VS Code extension installation with up to 6 concurrent installs
 /// Provides ~60-80% time savings when installing many extensions
 fn restore_vscode_extensions(
@@ -2779,32 +3442,34 @@ fn restore_vscode_extensions(
     install_extensions(&code, &extensions, reinstall)
 }
 
-
 #[tauri::command]
-fn delete_backup(target_path: String, timestamp: String) -> Result<(), String> {
+fn delete_backup(target_path: String, timestamp: String, profile_id: String) -> Result<(), String> {
     validate_component(&timestamp)?;
     let _guard = OperationGuard::acquire()?;
-    let suite_root = PathBuf::from(&target_path).join("macos-backup-suite");
-    
+    let suite_root = profile_root(&target_path, &profile_id)?;
+
     let backup_path = suite_root.join("data").join(&timestamp);
-    
+
     if !backup_path.exists() {
         return Err(format!("Backup {} not found", timestamp));
     }
-    
+    validate_backup_profile(
+        &load_backup_metadata(&backup_path.join("metadata.json"))?,
+        &profile_id,
+    )?;
+
     // Remove the backup data directory recursively
-    fs::remove_dir_all(&backup_path)
-        .map_err(|e| format!("Error deleting (data): {}", e))?;
-    
+    fs::remove_dir_all(&backup_path).map_err(|e| format!("Error deleting (data): {}", e))?;
+
     // Also remove the inventories directory for this timestamp
     let inventories_path = suite_root.join("inventories").join(&timestamp);
     if inventories_path.exists() {
         let _ = fs::remove_dir_all(&inventories_path);
     }
-    
+
     // Update latest.json if we deleted the latest backup
     let latest_path = suite_root.join("latest.json");
-    
+
     if latest_path.exists() {
         if let Ok(content) = fs::read_to_string(&latest_path) {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
@@ -2823,13 +3488,16 @@ fn delete_backup(target_path: String, timestamp: String) -> Result<(), String> {
                             }
                         }
                         backups.sort_by(|a, b| b.cmp(a));
-                        
+
                         if let Some(new_latest) = backups.first() {
                             let new_json = serde_json::json!({
                                 "latest": new_latest,
                                 "created_at": chrono::Utc::now().to_rfc3339()
                             });
-                            let _ = fs::write(&latest_path, serde_json::to_string_pretty(&new_json).unwrap());
+                            let _ = fs::write(
+                                &latest_path,
+                                serde_json::to_string_pretty(&new_json).unwrap(),
+                            );
                         } else {
                             // No more backups, remove latest.json
                             let _ = fs::remove_file(&latest_path);
@@ -2839,7 +3507,7 @@ fn delete_backup(target_path: String, timestamp: String) -> Result<(), String> {
             }
         }
     }
-    
+
     Ok(())
 }
 
@@ -2851,8 +3519,9 @@ fn apply_retention_policy(
     target_path: String,
     keep_last: Option<usize>,
     max_age_days: Option<u32>,
+    profile_id: String,
 ) -> Result<Vec<String>, String> {
-    let suite_root = PathBuf::from(&target_path).join("macos-backup-suite");
+    let suite_root = profile_root(&target_path, &profile_id)?;
     let data_path = suite_root.join("data");
     if !data_path.exists() {
         return Ok(Vec::new());
@@ -2860,7 +3529,10 @@ fn apply_retention_policy(
 
     // Timestamps im Format YYYYMMDD-HHMMSS (lexikografisch sortierbar ~ chronologisch)
     let mut timestamps: Vec<String> = Vec::new();
-    for entry in fs::read_dir(&data_path).map_err(|e| e.to_string())?.flatten() {
+    for entry in fs::read_dir(&data_path)
+        .map_err(|e| e.to_string())?
+        .flatten()
+    {
         if entry.path().is_dir() {
             if let Some(name) = entry.file_name().to_str() {
                 timestamps.push(name.to_string());
@@ -2907,7 +3579,7 @@ fn apply_retention_policy(
 
     let mut deleted = Vec::new();
     for ts in to_delete {
-        match delete_backup(target_path.clone(), ts.clone()) {
+        match delete_backup(target_path.clone(), ts.clone(), profile_id.clone()) {
             Ok(_) => deleted.push(ts),
             Err(e) => eprintln!("Retention: konnte {} nicht löschen: {}", ts, e),
         }
@@ -2949,12 +3621,21 @@ fn dry_run_backup(
             continue;
         }
 
-        validate_source_target(&expanded,Path::new(&target_path))?;
-        let bytes = compute_snapshot(&expanded)?.iter().map(|e| e.s).sum::<u64>();
-        let is_file=fs::symlink_metadata(&expanded).map_err(|e| e.to_string())?.is_file();
+        validate_source_target(&expanded, Path::new(&target_path))?;
+        let bytes = compute_snapshot(&expanded)?
+            .iter()
+            .map(|e| e.s)
+            .sum::<u64>();
+        let is_file = fs::symlink_metadata(&expanded)
+            .map_err(|e| e.to_string())?
+            .is_file();
         total_bytes += bytes;
 
-        let archive_ext = if !is_file && is_zstd_available() { "tar.zst" } else { "tar.gz" };
+        let archive_ext = if !is_file && is_zstd_available() {
+            "tar.zst"
+        } else {
+            "tar.gz"
+        };
         let archive_name = archive_name_for(&expanded, archive_ext);
 
         items.push(serde_json::json!({
@@ -2996,81 +3677,175 @@ fn build_menu(app_handle: &AppHandle) -> Result<(), Box<dyn std::error::Error>> 
         comments: Some("Backup & Restore for macOS".to_string()),
         ..Default::default()
     };
-    
-    let about = PredefinedMenuItem::about(app_handle, Some("About macOS Backup Suite"), Some(about_metadata))?;
+
+    let about = PredefinedMenuItem::about(
+        app_handle,
+        Some("About macOS Backup Suite"),
+        Some(about_metadata),
+    )?;
     let separator = PredefinedMenuItem::separator(app_handle)?;
     let hide = PredefinedMenuItem::hide(app_handle, Some("Hide macOS Backup Suite"))?;
     let hide_others = PredefinedMenuItem::hide_others(app_handle, Some("Hide Others"))?;
     let show_all = PredefinedMenuItem::show_all(app_handle, Some("Show All"))?;
     let quit = PredefinedMenuItem::quit(app_handle, Some("Quit macOS Backup Suite"))?;
-    
+
     let app_menu = Submenu::with_items(
         app_handle,
         "macOS Backup Suite",
         true,
-        &[&about, &separator, &hide, &hide_others, &show_all, &PredefinedMenuItem::separator(app_handle)?, &quit],
+        &[
+            &about,
+            &separator,
+            &hide,
+            &hide_others,
+            &show_all,
+            &PredefinedMenuItem::separator(app_handle)?,
+            &quit,
+        ],
     )?;
-    
-    let backup_start = MenuItem::with_id(app_handle, "backup_start", "Start Backup", true, Some("CmdOrCtrl+B"))?;
-    let backup_add_folder = MenuItem::with_id(app_handle, "backup_add_folder", "Add Folder...", true, Some("CmdOrCtrl+O"))?;
-    let backup_refresh_volumes = MenuItem::with_id(app_handle, "backup_refresh_volumes", "Refresh Volumes", true, Some("CmdOrCtrl+R"))?;
-    
+
+    let backup_start = MenuItem::with_id(
+        app_handle,
+        "backup_start",
+        "Start Backup",
+        true,
+        Some("CmdOrCtrl+B"),
+    )?;
+    let backup_add_folder = MenuItem::with_id(
+        app_handle,
+        "backup_add_folder",
+        "Add Folder...",
+        true,
+        Some("CmdOrCtrl+O"),
+    )?;
+    let backup_refresh_volumes = MenuItem::with_id(
+        app_handle,
+        "backup_refresh_volumes",
+        "Refresh Volumes",
+        true,
+        Some("CmdOrCtrl+R"),
+    )?;
+
     let backup_menu = Submenu::with_items(
         app_handle,
         "Backup",
         true,
-        &[&backup_start, &PredefinedMenuItem::separator(app_handle)?, &backup_add_folder, &backup_refresh_volumes],
+        &[
+            &backup_start,
+            &PredefinedMenuItem::separator(app_handle)?,
+            &backup_add_folder,
+            &backup_refresh_volumes,
+        ],
     )?;
-    
-    let restore_start = MenuItem::with_id(app_handle, "restore_start", "Restore...", true, Some("CmdOrCtrl+Shift+R"))?;
-    let restore_verify = MenuItem::with_id(app_handle, "restore_verify", "Verify Backup", true, Some("CmdOrCtrl+V"))?;
-    let restore_show_files = MenuItem::with_id(app_handle, "restore_show_files", "Show Files", true, Some("CmdOrCtrl+F"))?;
-    
+
+    let restore_start = MenuItem::with_id(
+        app_handle,
+        "restore_start",
+        "Restore...",
+        true,
+        Some("CmdOrCtrl+Shift+R"),
+    )?;
+    let restore_verify = MenuItem::with_id(
+        app_handle,
+        "restore_verify",
+        "Verify Backup",
+        true,
+        Some("CmdOrCtrl+V"),
+    )?;
+    let restore_show_files = MenuItem::with_id(
+        app_handle,
+        "restore_show_files",
+        "Show Files",
+        true,
+        Some("CmdOrCtrl+F"),
+    )?;
+
     let restore_menu = Submenu::with_items(
         app_handle,
         "Restore",
         true,
-        &[&restore_start, &restore_verify, &PredefinedMenuItem::separator(app_handle)?, &restore_show_files],
+        &[
+            &restore_start,
+            &restore_verify,
+            &PredefinedMenuItem::separator(app_handle)?,
+            &restore_show_files,
+        ],
     )?;
-    
-    let log_copy = MenuItem::with_id(app_handle, "log_copy", "Copy Log", true, Some("CmdOrCtrl+Shift+C"))?;
-    let log_save = MenuItem::with_id(app_handle, "log_save", "Save Log...", true, Some("CmdOrCtrl+Shift+S"))?;
-    let log_clear = MenuItem::with_id(app_handle, "log_clear", "Clear Log", true, Some("CmdOrCtrl+L"))?;
-    
+
+    let log_copy = MenuItem::with_id(
+        app_handle,
+        "log_copy",
+        "Copy Log",
+        true,
+        Some("CmdOrCtrl+Shift+C"),
+    )?;
+    let log_save = MenuItem::with_id(
+        app_handle,
+        "log_save",
+        "Save Log...",
+        true,
+        Some("CmdOrCtrl+Shift+S"),
+    )?;
+    let log_clear = MenuItem::with_id(
+        app_handle,
+        "log_clear",
+        "Clear Log",
+        true,
+        Some("CmdOrCtrl+L"),
+    )?;
+
     let log_menu = Submenu::with_items(
         app_handle,
         "Log",
         true,
-        &[&log_copy, &log_save, &PredefinedMenuItem::separator(app_handle)?, &log_clear],
+        &[
+            &log_copy,
+            &log_save,
+            &PredefinedMenuItem::separator(app_handle)?,
+            &log_clear,
+        ],
     )?;
-    
+
     let minimize = PredefinedMenuItem::minimize(app_handle, Some("Minimize"))?;
     let fullscreen = PredefinedMenuItem::fullscreen(app_handle, Some("Full Screen"))?;
     let close = PredefinedMenuItem::close_window(app_handle, Some("Close Window"))?;
-    
+
     let window_menu = Submenu::with_items(
         app_handle,
         "Window",
         true,
-        &[&minimize, &fullscreen, &PredefinedMenuItem::separator(app_handle)?, &close],
+        &[
+            &minimize,
+            &fullscreen,
+            &PredefinedMenuItem::separator(app_handle)?,
+            &close,
+        ],
     )?;
-    
-    let help_item = MenuItem::with_id(app_handle, "show_help", "macOS Backup Suite Help", true, Some("F1"))?;
-    
-    let help_menu = Submenu::with_items(
+
+    let help_item = MenuItem::with_id(
         app_handle,
-        "Help",
+        "show_help",
+        "macOS Backup Suite Help",
         true,
-        &[&help_item],
+        Some("F1"),
     )?;
-    
+
+    let help_menu = Submenu::with_items(app_handle, "Help", true, &[&help_item])?;
+
     let menu = Menu::with_items(
         app_handle,
-        &[&app_menu, &backup_menu, &restore_menu, &log_menu, &window_menu, &help_menu],
+        &[
+            &app_menu,
+            &backup_menu,
+            &restore_menu,
+            &log_menu,
+            &window_menu,
+            &help_menu,
+        ],
     )?;
-    
+
     app_handle.set_menu(menu)?;
-    
+
     Ok(())
 }
 
@@ -3119,7 +3894,7 @@ fn cancel_backup() -> Result<(), String> {
 fn cancel_operation() -> Result<(), String> {
     BACKUP_CANCELLED.store(true, Ordering::SeqCst);
     VERIFY_CANCELLED.store(true, Ordering::SeqCst);
-    
+
     // Kill any running tar process (group), escalating TERM -> KILL.
     let pid = TAR_PID.swap(0, Ordering::SeqCst);
     if pid > 0 {
@@ -3150,7 +3925,9 @@ async fn get_app_settings_sources() -> Result<Vec<app_settings::SettingsSources>
     tauri::async_runtime::spawn_blocking(|| {
         let home = dirs::home_dir().ok_or("Benutzerverzeichnis nicht verfügbar")?;
         app_settings::discover(&home, &BackupConfig::default())
-    }).await.map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -3164,6 +3941,11 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .invoke_handler(tauri::generate_handler![
             load_config,
+            list_profiles,
+            select_profile,
+            create_profile,
+            rename_profile,
+            delete_profile,
             get_app_settings_sources,
             save_config,
             get_external_volumes,
@@ -3205,38 +3987,64 @@ pub fn run() {
         ])
         .setup(|app| {
             let app_handle = app.handle();
-            
+
             // Restore window state from saved settings
             if let Some(window) = app.get_webview_window("main") {
                 if let Some(state) = get_window_state() {
                     if state.width >= 960 && state.height >= 660 {
-                        let _ = window.set_size(tauri::LogicalSize::new(state.width as f64, state.height as f64));
+                        let _ = window.set_size(tauri::LogicalSize::new(
+                            state.width as f64,
+                            state.height as f64,
+                        ));
                     }
-                    let _ = window.set_position(tauri::LogicalPosition::new(state.x as f64, state.y as f64));
+                    let _ = window
+                        .set_position(tauri::LogicalPosition::new(state.x as f64, state.y as f64));
                 }
             }
-            
+
             build_menu(app_handle)?;
-            
+
             app.on_menu_event(move |app, event| {
                 let id = event.id().as_ref();
                 if let Some(window) = app.get_webview_window("main") {
                     match id {
-                        "backup_start" => { let _ = window.eval("document.getElementById('btn-backup').click()"); }
-                        "backup_add_folder" => { let _ = window.eval("document.getElementById('add-directory').click()"); }
-                        "backup_refresh_volumes" => { let _ = window.eval("document.getElementById('refresh-volumes').click()"); }
-                        "restore_start" => { let _ = window.eval("document.getElementById('btn-restore').click()"); }
-                        "restore_verify" => { let _ = window.eval("document.getElementById('btn-restore-test').click()"); }
-                        "restore_show_files" => { let _ = window.eval("document.getElementById('show-files').click()"); }
-                        "log_copy" => { let _ = window.eval("document.getElementById('copy-log').click()"); }
-                        "log_save" => { let _ = window.eval("document.getElementById('save-log').click()"); }
-                        "log_clear" => { let _ = window.eval("document.getElementById('clear-log').click()"); }
-                        "show_help" => { let _ = window.eval("showHelp()"); }
+                        "backup_start" => {
+                            let _ = window.eval("document.getElementById('btn-backup').click()");
+                        }
+                        "backup_add_folder" => {
+                            let _ = window.eval("document.getElementById('add-directory').click()");
+                        }
+                        "backup_refresh_volumes" => {
+                            let _ =
+                                window.eval("document.getElementById('refresh-volumes').click()");
+                        }
+                        "restore_start" => {
+                            let _ = window.eval("document.getElementById('btn-restore').click()");
+                        }
+                        "restore_verify" => {
+                            let _ =
+                                window.eval("document.getElementById('btn-restore-test').click()");
+                        }
+                        "restore_show_files" => {
+                            let _ = window.eval("document.getElementById('show-files').click()");
+                        }
+                        "log_copy" => {
+                            let _ = window.eval("document.getElementById('copy-log').click()");
+                        }
+                        "log_save" => {
+                            let _ = window.eval("document.getElementById('save-log').click()");
+                        }
+                        "log_clear" => {
+                            let _ = window.eval("document.getElementById('clear-log').click()");
+                        }
+                        "show_help" => {
+                            let _ = window.eval("showHelp()");
+                        }
                         _ => {}
                     }
                 }
             });
-            
+
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -3245,3 +4053,83 @@ pub fn run() {
 
 #[cfg(test)]
 mod restore_tests;
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    #[test]
+    fn profile_roots_and_manifests_are_isolated() {
+        let target = PrivateDir::temp().unwrap();
+        let standard = BackupConfig::default();
+        let mut work = BackupConfig::default();
+        work.profile_id = "profil-work-123".into();
+        work.profile_name = "Work".into();
+
+        let standard_root = profile_root(target.0.to_str().unwrap(), &standard.profile_id).unwrap();
+        let work_root = profile_root(target.0.to_str().unwrap(), &work.profile_id).unwrap();
+        assert_ne!(standard_root, work_root);
+        assert_eq!(
+            work_root,
+            target.0.join("macos-backup-suite/profiles/profil-work-123")
+        );
+
+        ensure_profile_manifest(&work_root, &work).unwrap();
+        let manifest: ProfileManifest =
+            serde_json::from_slice(&fs::read(work_root.join("profile.json")).unwrap()).unwrap();
+        assert_eq!(manifest.profile_id, work.profile_id);
+        assert_eq!(manifest.profile_name, work.profile_name);
+
+        let mut wrong = work.clone();
+        wrong.profile_id = "profil-other-456".into();
+        assert!(ensure_profile_manifest(&work_root, &wrong).is_err());
+    }
+
+    #[test]
+    fn backup_metadata_cannot_be_used_by_another_profile() {
+        let metadata = BackupMetadata {
+            profile_id: "profil-personal-123".into(),
+            profile_name: "Personal".into(),
+            timestamp: "20260910-120000".into(),
+            items: Vec::new(),
+            hash_algorithm: "sha256".into(),
+            total_source_size_bytes: 0,
+            start_time: String::new(),
+            end_time: String::new(),
+            duration_seconds: 0,
+        };
+        assert!(validate_backup_profile(&metadata, "profil-personal-123").is_ok());
+        assert!(validate_backup_profile(&metadata, "profil-work-456").is_err());
+    }
+
+    #[test]
+    fn backup_list_identifies_each_profile_on_one_target() {
+        let target = PrivateDir::temp().unwrap();
+        let mut work = BackupConfig::default();
+        work.profile_id = "profil-work-123".into();
+        work.profile_name = "Work".into();
+        let work_root = profile_root(target.0.to_str().unwrap(), &work.profile_id).unwrap();
+        ensure_profile_manifest(&work_root, &work).unwrap();
+
+        let standard_root = profile_root(target.0.to_str().unwrap(), "standard").unwrap();
+        let standard_backup = standard_root.join("data/20260910-120000");
+        let work_backup = work_root.join("data/20260910-130000");
+        fs::create_dir_all(&standard_backup).unwrap();
+        fs::create_dir_all(&work_backup).unwrap();
+        let legacy_metadata = BackupMetadata {
+            profile_id: String::new(), profile_name: String::new(), timestamp: "20260910-120000".into(), items: Vec::new(),
+            hash_algorithm: "sha256".into(), total_source_size_bytes: 0, start_time: String::new(), end_time: String::new(), duration_seconds: 0,
+        };
+        let work_metadata = BackupMetadata {
+            profile_id: work.profile_id.clone(), profile_name: work.profile_name.clone(), timestamp: "20260910-130000".into(), items: Vec::new(),
+            hash_algorithm: "sha256".into(), total_source_size_bytes: 0, start_time: String::new(), end_time: String::new(), duration_seconds: 0,
+        };
+        fs::write(standard_backup.join("metadata.json"), serde_json::to_vec(&legacy_metadata).unwrap()).unwrap();
+        fs::write(work_backup.join("metadata.json"), serde_json::to_vec(&work_metadata).unwrap()).unwrap();
+
+        let listed = list_backups(target.0.to_string_lossy().into()).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().any(|item| item.profile_id == "standard" && item.profile_name == "Standard"));
+        assert!(listed.iter().any(|item| item.profile_id == work.profile_id && item.profile_name == "Work"));
+    }
+}

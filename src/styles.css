@@ -126,6 +126,26 @@ header h1 {
   font-size: 0.85rem;
 }
 
+.profile-picker {
+  justify-content: center;
+  flex-wrap: wrap;
+  margin: 10px 0 4px;
+}
+
+.profile-picker label {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
+.profile-picker select {
+  flex: 0 1 260px;
+  height: 36px;
+}
+
+.profile-picker button {
+  height: 36px;
+}
+
 .section {
   background: var(--bg-secondary);
   border-radius: 12px;

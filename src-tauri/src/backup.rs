@@ -1,7 +1,9 @@
 //! Fail-closed source scanning, durable publication and verified archive creation.
 use super::*;
 mod readback;
-pub(super) fn readback_space_preflight() -> Result<(), String> { readback::space_preflight() }
+pub(super) fn readback_space_preflight() -> Result<(), String> {
+    readback::space_preflight()
+}
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
 use std::io::Write;
@@ -21,17 +23,30 @@ struct ProgressReporter {
     last_log: std::time::Instant,
     skipped_sockets: std::collections::BTreeSet<PathBuf>,
 }
-pub(super) struct BackupProgress { _work: crate::work_progress::Session }
+pub(super) struct BackupProgress {
+    _work: crate::work_progress::Session,
+}
 impl BackupProgress {
     pub fn attach(window: tauri::Window) -> Self {
-        PROGRESS.with(|p| *p.borrow_mut()=Some(ProgressReporter { window:window.clone(),last_ui:std::time::Instant::now(),last_log:std::time::Instant::now(),skipped_sockets:Default::default() }));
-        Self { _work: crate::work_progress::Session::attach(window) }
+        PROGRESS.with(|p| {
+            *p.borrow_mut() = Some(ProgressReporter {
+                window: window.clone(),
+                last_ui: std::time::Instant::now(),
+                last_log: std::time::Instant::now(),
+                skipped_sockets: Default::default(),
+            })
+        });
+        Self {
+            _work: crate::work_progress::Session::attach(window),
+        }
     }
 }
 impl Drop for BackupProgress {
-    fn drop(&mut self) {PROGRESS.with(|p| *p.borrow_mut()=None);}
+    fn drop(&mut self) {
+        PROGRESS.with(|p| *p.borrow_mut() = None);
+    }
 }
-#[derive(Clone,Debug)]
+#[derive(Clone, Debug)]
 struct ScanActivity {
     current_file: PathBuf,
     entries: u64,
@@ -42,22 +57,45 @@ struct ScanActivity {
 }
 fn report_activity(activity: &ScanActivity) {
     PROGRESS.with(|p| {
-        if let Some(reporter)=p.borrow_mut().as_mut() {
+        if let Some(reporter) = p.borrow_mut().as_mut() {
             if activity.skipped_socket {
-                if reporter.skipped_sockets.insert(activity.current_file.clone()) {
-                    let _=reporter.window.emit("backup-log",format!("Laufzeit-Socket übersprungen (keine Dateidaten): {}",activity.current_file.display()));
+                if reporter
+                    .skipped_sockets
+                    .insert(activity.current_file.clone())
+                {
+                    let _ = reporter.window.emit(
+                        "backup-log",
+                        format!(
+                            "Laufzeit-Socket übersprungen (keine Dateidaten): {}",
+                            activity.current_file.display()
+                        ),
+                    );
                 }
                 return;
             }
-            if !activity.boundary && reporter.last_ui.elapsed()<std::time::Duration::from_millis(500) {return;}
-            let mib=activity.bytes as f64 / (1024.0*1024.0);
-            let speed=mib/activity.elapsed.as_secs_f64().max(0.001);
-            let name=activity.current_file.file_name().unwrap_or_default().to_string_lossy();
-            let message=format!("{} Einträge · {:.1} MiB gelesen · {:.1} MiB/s · {}",activity.entries,mib,speed,name);
-            reporter.last_ui=std::time::Instant::now();
-            let log=activity.boundary || reporter.last_log.elapsed()>=std::time::Duration::from_secs(10);
-            crate::work_progress::detail(message,log);
-            if log { reporter.last_log=std::time::Instant::now(); }
+            if !activity.boundary
+                && reporter.last_ui.elapsed() < std::time::Duration::from_millis(500)
+            {
+                return;
+            }
+            let mib = activity.bytes as f64 / (1024.0 * 1024.0);
+            let speed = mib / activity.elapsed.as_secs_f64().max(0.001);
+            let name = activity
+                .current_file
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy();
+            let message = format!(
+                "{} Einträge · {:.1} MiB gelesen · {:.1} MiB/s · {}",
+                activity.entries, mib, speed, name
+            );
+            reporter.last_ui = std::time::Instant::now();
+            let log = activity.boundary
+                || reporter.last_log.elapsed() >= std::time::Duration::from_secs(10);
+            crate::work_progress::detail(message, log);
+            if log {
+                reporter.last_log = std::time::Instant::now();
+            }
         }
     });
 }
@@ -88,9 +126,12 @@ pub(super) struct ManifestEntry {
 // device number. Ignore only that mount-local number for incremental reuse;
 // source guards and hardlink verification continue to compare full identities.
 pub(super) fn same_source_version(a: &[ManifestEntry], b: &[ManifestEntry]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(a,b)| {
-        let mut comparable=b.clone();comparable.dev=a.dev;*a == comparable
-    })
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(a, b)| {
+            let mut comparable = b.clone();
+            comparable.dev = a.dev;
+            *a == comparable
+        })
 }
 
 fn fail(path: &Path, e: impl std::fmt::Display) -> String {
@@ -128,13 +169,16 @@ fn read_acl(path: &Path) -> Result<String, String> {
             if acl.is_null() {
                 let error = std::io::Error::last_os_error();
                 // Darwin reports ENOENT for an existing object with no extended ACL.
-                if error.raw_os_error() != Some(libc::ENOENT) || fs::symlink_metadata(path).is_err() {
+                if error.raw_os_error() != Some(libc::ENOENT) || fs::symlink_metadata(path).is_err()
+                {
                     return Err(error);
                 }
             }
             Ok(acl)
         })?;
-        if acl.is_null() { return Ok(String::new()); }
+        if acl.is_null() {
+            return Ok(String::new());
+        }
         let raw = acl_to_text(acl, std::ptr::null_mut());
         if raw.is_null() {
             acl_free(acl);
@@ -151,15 +195,28 @@ pub(super) fn compute_snapshot(root: &Path) -> Result<Vec<ManifestEntry>, String
     snapshot_with_phase(root, "Quelldateien lesen und prüfen")
 }
 fn snapshot_with_phase(root: &Path, label: &str) -> Result<Vec<ManifestEntry>, String> {
-    let _phase=crate::work_progress::Phase::enter(&format!("{label}: {}",root.file_name().unwrap_or_default().to_string_lossy()));
+    let _phase = crate::work_progress::Phase::enter(&format!(
+        "{label}: {}",
+        root.file_name().unwrap_or_default().to_string_lossy()
+    ));
     scan_with_activity(root, &mut report_activity)
 }
-fn scan_with_activity(root: &Path, report: &mut impl FnMut(&ScanActivity)) -> Result<Vec<ManifestEntry>, String> {
+fn scan_with_activity(
+    root: &Path,
+    report: &mut impl FnMut(&ScanActivity),
+) -> Result<Vec<ManifestEntry>, String> {
     cancelled()?;
-    let started=std::time::Instant::now();
-    let mut activity=ScanActivity {current_file:root.to_path_buf(),entries:0,bytes:0,elapsed:started.elapsed(),boundary:true,skipped_socket:false};
+    let started = std::time::Instant::now();
+    let mut activity = ScanActivity {
+        current_file: root.to_path_buf(),
+        entries: 0,
+        bytes: 0,
+        elapsed: started.elapsed(),
+        boundary: true,
+        skipped_socket: false,
+    };
     report(&activity);
-    activity.boundary=false;
+    activity.boundary = false;
     if std::env::var("BACKUP_EXTRA_EXCLUDES").is_ok_and(|v| !v.trim().is_empty()) {
         return Err("BACKUP_EXTRA_EXCLUDES wird nicht mehr stillschweigend angewandt. Variable entfernen; alle ausgewählten Daten werden vollständig gesichert.".into());
     }
@@ -171,17 +228,17 @@ fn scan_with_activity(root: &Path, report: &mut impl FnMut(&ScanActivity)) -> Re
         cancelled()?;
         let dent = dent.map_err(|e| fail(root, e))?;
         let path = dent.path();
-        activity.current_file=path.to_path_buf();
-        activity.entries+=1;
-        activity.elapsed=started.elapsed();
+        activity.current_file = path.to_path_buf();
+        activity.entries += 1;
+        activity.elapsed = started.elapsed();
         report(&activity);
         if let Some(entry) = read_stable_entry(root, path, &mut activity, report)? {
             entries.push(entry);
         }
     }
     entries.sort_by(|a, b| a.p.cmp(&b.p));
-    activity.elapsed=started.elapsed();
-    activity.boundary=true;
+    activity.elapsed = started.elapsed();
+    activity.boundary = true;
     report(&activity);
     Ok(entries)
 }
@@ -189,14 +246,24 @@ fn scan_with_activity(root: &Path, report: &mut impl FnMut(&ScanActivity)) -> Re
 // Retry only a proven identity change while reading one entry, never permission
 // failures, corrupt data or arbitrary errors. Completed manifests are still strict.
 #[derive(Debug)]
-enum EntryReadError { Changed, Other(String) }
+enum EntryReadError {
+    Changed,
+    Other(String),
+}
 impl From<String> for EntryReadError {
-    fn from(error: String) -> Self { Self::Other(error) }
+    fn from(error: String) -> Self {
+        Self::Other(error)
+    }
 }
 impl From<&str> for EntryReadError {
-    fn from(error: &str) -> Self { Self::Other(error.into()) }
+    fn from(error: &str) -> Self {
+        Self::Other(error.into())
+    }
 }
-fn retry_entry<T>(path: &Path, mut read: impl FnMut() -> Result<T, EntryReadError>) -> Result<T, String> {
+fn retry_entry<T>(
+    path: &Path,
+    mut read: impl FnMut() -> Result<T, EntryReadError>,
+) -> Result<T, String> {
     for attempt in 0..3 {
         cancelled()?;
         match read() {
@@ -210,18 +277,30 @@ fn retry_entry<T>(path: &Path, mut read: impl FnMut() -> Result<T, EntryReadErro
     }
     unreachable!()
 }
-fn read_stable_entry(root: &Path, path: &Path, activity: &mut ScanActivity, report: &mut impl FnMut(&ScanActivity)) -> Result<Option<ManifestEntry>, String> {
+fn read_stable_entry(
+    root: &Path,
+    path: &Path,
+    activity: &mut ScanActivity,
+    report: &mut impl FnMut(&ScanActivity),
+) -> Result<Option<ManifestEntry>, String> {
     retry_entry(path, || read_entry(root, path, activity, report))
 }
-fn read_entry(root: &Path, path: &Path, activity: &mut ScanActivity, report: &mut impl FnMut(&ScanActivity)) -> Result<Option<ManifestEntry>, EntryReadError> {
+fn read_entry(
+    root: &Path,
+    path: &Path,
+    activity: &mut ScanActivity,
+    report: &mut impl FnMut(&ScanActivity),
+) -> Result<Option<ManifestEntry>, EntryReadError> {
     let started = std::time::Instant::now();
     let previous_elapsed = activity.elapsed;
     let md = access_io(path, "Dateistatus lesen", || fs::symlink_metadata(path))?;
     if md.file_type().is_socket() {
-        if path == root { return Err(EntryReadError::Other(fail(path,"Der ausgewählte Pfad ist ein Laufzeit-Socket und enthält keine sicherbaren Dateidaten. Bitte den übergeordneten Ordner auswählen."))); }
-        activity.skipped_socket=true;
+        if path == root {
+            return Err(EntryReadError::Other(fail(path,"Der ausgewählte Pfad ist ein Laufzeit-Socket und enthält keine sicherbaren Dateidaten. Bitte den übergeordneten Ordner auswählen.")));
+        }
+        activity.skipped_socket = true;
         report(&activity);
-        activity.skipped_socket=false;
+        activity.skipped_socket = false;
         return Ok(None);
     }
     let kind = if md.is_file() {
@@ -239,8 +318,12 @@ fn read_entry(root: &Path, path: &Path, activity: &mut ScanActivity, report: &mu
         .ok_or_else(|| fail(path, "Dateiname ist kein gültiges UTF-8"))?
         .to_string();
     let hash = if md.is_file() {
-        let mut file = access_io(path, "Datei öffnen", || fs::OpenOptions::new()
-            .read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path))?;
+        let mut file = access_io(path, "Datei öffnen", || {
+            fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(path)
+        })?;
         if identity(&file.metadata().map_err(|e| fail(path, e))?) != identity(&md) {
             return Err(EntryReadError::Changed);
         }
@@ -253,8 +336,8 @@ fn read_entry(root: &Path, path: &Path, activity: &mut ScanActivity, report: &mu
                 break;
             }
             digest.update(&buf[..n]);
-            activity.bytes+=n as u64;
-            activity.elapsed=previous_elapsed + started.elapsed();
+            activity.bytes += n as u64;
+            activity.elapsed = previous_elapsed + started.elapsed();
             report(&activity);
         }
         format!("{:x}", digest.finalize())
@@ -282,7 +365,11 @@ fn read_entry(root: &Path, path: &Path, activity: &mut ScanActivity, report: &mu
         );
     }
     let acl = read_acl(path)?;
-    if identity(&md) != identity(&access_io(path, "Dateistatus lesen", || fs::symlink_metadata(path))?) {
+    if identity(&md)
+        != identity(&access_io(path, "Dateistatus lesen", || {
+            fs::symlink_metadata(path)
+        })?)
+    {
         return Err(EntryReadError::Changed);
     }
     use std::os::macos::fs::MetadataExt as MacMetadataExt;
@@ -307,7 +394,11 @@ fn read_entry(root: &Path, path: &Path, activity: &mut ScanActivity, report: &mu
     }))
 }
 
-fn access_io<T>(path: &Path, action: &str, operation: impl FnMut() -> std::io::Result<T>) -> Result<T, String> {
+fn access_io<T>(
+    path: &Path,
+    action: &str,
+    operation: impl FnMut() -> std::io::Result<T>,
+) -> Result<T, String> {
     crate::protected_access::retry(operation).map_err(|error| match error {
         crate::protected_access::AccessError::Io(error) => access_error(path, action, error),
         crate::protected_access::AccessError::Cancelled => "Vorgang abgebrochen".into(),
@@ -317,7 +408,9 @@ fn access_io<T>(path: &Path, action: &str, operation: impl FnMut() -> std::io::R
 fn access_error(path: &Path, action: &str, error: std::io::Error) -> String {
     let hint = if error.kind() == std::io::ErrorKind::PermissionDenied {
         " Zugriff durch macOS verweigert. Festplattenvollzugriff und Dateirechte für macOS Backup Suite prüfen; nach einer Berechtigungsänderung die App neu starten. Die Datei wurde nicht übersprungen."
-    } else { "" };
+    } else {
+        ""
+    };
     fail(path, format!("{action}: {error}.{hint}"))
 }
 
@@ -331,24 +424,41 @@ pub(super) fn validate_source_access(directories: &[String], home: &Path) -> Res
     let mut checked = 0u64;
     let mut last = std::time::Instant::now();
     for source in directories {
-        let root = if source == "~" { home.to_path_buf() } else if let Some(rel) = source.strip_prefix("~/") { home.join(rel) } else { PathBuf::from(source) };
-        for dent in WalkDir::new(&root).follow_links(false).follow_root_links(false) {
+        let root = if source == "~" {
+            home.to_path_buf()
+        } else if let Some(rel) = source.strip_prefix("~/") {
+            home.join(rel)
+        } else {
+            PathBuf::from(source)
+        };
+        for dent in WalkDir::new(&root)
+            .follow_links(false)
+            .follow_root_links(false)
+        {
             cancelled()?;
             checked += 1;
             let result = match dent {
                 Ok(entry) => {
                     if last.elapsed() >= std::time::Duration::from_millis(500) {
-                        crate::work_progress::detail(format!("{checked} Pfade geprüft · {}", entry.path().display()), false);
+                        crate::work_progress::detail(
+                            format!("{checked} Pfade geprüft · {}", entry.path().display()),
+                            false,
+                        );
                         last = std::time::Instant::now();
                     }
                     probe_entry_access(entry.path(), entry.path() == root)
                 }
-                Err(error) => Err(fail(error.path().unwrap_or(&root), format!("Verzeichnis durchlaufen: {error}"))),
+                Err(error) => Err(fail(
+                    error.path().unwrap_or(&root),
+                    format!("Verzeichnis durchlaufen: {error}"),
+                )),
             };
             cancelled()?;
             if let Err(error) = result {
                 problem_count += 1;
-                if problems.len() < 100 { problems.push(error); }
+                if problems.len() < 100 {
+                    problems.push(error);
+                }
             }
         }
     }
@@ -357,18 +467,33 @@ pub(super) fn validate_source_access(directories: &[String], home: &Path) -> Res
         crate::work_progress::detail(format!("{checked} Pfade auf Zugriff geprüft"), true);
         Ok(())
     } else {
-        if problem_count > problems.len() { problems.push(format!("{} weitere Probleme; Anzeige auf 100 Einträge begrenzt.", problem_count - problems.len())); }
+        if problem_count > problems.len() {
+            problems.push(format!(
+                "{} weitere Probleme; Anzeige auf 100 Einträge begrenzt.",
+                problem_count - problems.len()
+            ));
+        }
         Err(format!("Zugriffsprüfung fehlgeschlagen: {problem_count} Problem(e). Noch keine vollständigen Dateiinhalte eingelesen und kein Backup erstellt.\n{}", problems.join("\n")))
     }
 }
 fn probe_entry_access(path: &Path, is_root: bool) -> Result<(), String> {
     let md = access_io(path, "Dateistatus lesen", || fs::symlink_metadata(path))?;
-    if md.file_type().is_socket() && !is_root { return Ok(()); }
+    if md.file_type().is_socket() && !is_root {
+        return Ok(());
+    }
     if md.is_file() {
-        let mut file = access_io(path, "Datei öffnen", || fs::OpenOptions::new().read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path))?;
+        let mut file = access_io(path, "Datei öffnen", || {
+            fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(path)
+        })?;
         // Opening the pathname can race with replacement by a special file.
-        if !file.metadata().map_err(|e| access_error(path, "Geöffnete Datei prüfen", e))?.is_file() {
+        if !file
+            .metadata()
+            .map_err(|e| access_error(path, "Geöffnete Datei prüfen", e))?
+            .is_file()
+        {
             return Err(fail(path, "Dateityp während der Zugriffsprüfung geändert"));
         }
         access_io(path, "Dateiinhalt lesen", || file.read(&mut [0u8; 1]))?;
@@ -377,7 +502,10 @@ fn probe_entry_access(path: &Path, is_root: bool) -> Result<(), String> {
     } else if md.is_dir() {
         access_io(path, "Verzeichnis öffnen", || fs::read_dir(path))?;
     } else {
-        return Err(fail(path, "Nicht unterstützte Spezialdatei (FIFO, Gerät oder ausgewählter Socket)"));
+        return Err(fail(
+            path,
+            "Nicht unterstützte Spezialdatei (FIFO, Gerät oder ausgewählter Socket)",
+        ));
     }
     for key in access_io(path, "Dateiattribute auflisten", || xattr::list(path))? {
         access_io(path, "Dateiattribut lesen", || xattr::get(path, &key))?;
@@ -391,7 +519,8 @@ pub(super) fn ensure_unchanged(source: &Path, expected: &[ManifestEntry]) -> Res
     if actual != expected {
         let before: BTreeMap<_, _> = expected.iter().map(|e| (e.p.as_str(), e)).collect();
         let after: BTreeMap<_, _> = actual.iter().map(|e| (e.p.as_str(), e)).collect();
-        let paths: std::collections::BTreeSet<_> = before.keys().chain(after.keys()).copied().collect();
+        let paths: std::collections::BTreeSet<_> =
+            before.keys().chain(after.keys()).copied().collect();
         let mut details = Vec::new();
         for path in paths {
             let change = match (before.get(path), after.get(path)) {
@@ -400,9 +529,13 @@ pub(super) fn ensure_unchanged(source: &Path, expected: &[ManifestEntry]) -> Res
                     // Source comparisons also include OS-managed attributes and
                     // identity; the readback exemptions do not apply here.
                     for key in ["com.apple.provenance", "com.apple.quarantine"] {
-                        if a.xattrs.get(key) != b.xattrs.get(key) { fields.push(format!("Quellattribut {key}")); }
+                        if a.xattrs.get(key) != b.xattrs.get(key) {
+                            fields.push(format!("Quellattribut {key}"));
+                        }
                     }
-                    if fields.is_empty() { fields.push("Dateiidentität, Eigentümer oder Statuszeit".into()); }
+                    if fields.is_empty() {
+                        fields.push("Dateiidentität, Eigentümer oder Statuszeit".into());
+                    }
                     Some(fields.join(", "))
                 }
                 (Some(_), None) => Some("entfernt".into()),
@@ -410,7 +543,10 @@ pub(super) fn ensure_unchanged(source: &Path, expected: &[ManifestEntry]) -> Res
                 _ => None,
             };
             if let Some(change) = change {
-                if details.len() == 10 { details.push("Weitere Änderungen vorhanden.".into()); break; }
+                if details.len() == 10 {
+                    details.push("Weitere Änderungen vorhanden.".into());
+                    break;
+                }
                 details.push(fail(&source.join(path), change));
             }
         }
@@ -469,7 +605,7 @@ pub(super) fn reuse_archive(source: &Path, target: &Path) -> Result<(), String> 
 struct ReadbackDir(PrivateDir);
 impl Drop for ReadbackDir {
     fn drop(&mut self) {
-        let _phase=crate::work_progress::Phase::enter("Temporäre Rücklesedaten aufräumen");
+        let _phase = crate::work_progress::Phase::enter("Temporäre Rücklesedaten aufräumen");
         if fs::remove_dir_all(&self.0 .0).is_ok() {
             return;
         }
@@ -515,23 +651,43 @@ impl Drop for ReadbackDir {
 // but do not demand byte identity after extraction. Quarantine is also regenerated
 // by macOS on extraction; its presence remains mandatory when the source has it.
 fn readback_differences(actual: &ManifestEntry, expected: &ManifestEntry) -> Vec<String> {
-    let mut fields=Vec::new();
-    for (different,label) in [
-        (actual.p!=expected.p,"Pfad"),
-        (actual.kind!=expected.kind,"Dateityp"),
-        (actual.s!=expected.s,"Dateigröße"),
-        (actual.hash!=expected.hash,"Dateiinhalt (SHA-256)"),
-        (actual.link!=expected.link,"Linkziel"),
-        (actual.mode!=expected.mode,"Zugriffsmodus"),
-        ((actual.m,actual.mn)!=(expected.m,expected.mn),"Änderungszeit"),
-        (actual.acl!=expected.acl,"Zugriffsrechte (ACL)"),
-    ] { if different {fields.push(label.to_string());} }
-    if actual.flags != expected.flags { fields.push(format!("Dateiflags (erwartet 0x{:08x}, zurückgelesen 0x{:08x})",expected.flags,actual.flags)); }
-    let keys:std::collections::BTreeSet<_>=actual.xattrs.keys().chain(expected.xattrs.keys()).collect();
+    let mut fields = Vec::new();
+    for (different, label) in [
+        (actual.p != expected.p, "Pfad"),
+        (actual.kind != expected.kind, "Dateityp"),
+        (actual.s != expected.s, "Dateigröße"),
+        (actual.hash != expected.hash, "Dateiinhalt (SHA-256)"),
+        (actual.link != expected.link, "Linkziel"),
+        (actual.mode != expected.mode, "Zugriffsmodus"),
+        (
+            (actual.m, actual.mn) != (expected.m, expected.mn),
+            "Änderungszeit",
+        ),
+        (actual.acl != expected.acl, "Zugriffsrechte (ACL)"),
+    ] {
+        if different {
+            fields.push(label.to_string());
+        }
+    }
+    if actual.flags != expected.flags {
+        fields.push(format!(
+            "Dateiflags (erwartet 0x{:08x}, zurückgelesen 0x{:08x})",
+            expected.flags, actual.flags
+        ));
+    }
+    let keys: std::collections::BTreeSet<_> =
+        actual.xattrs.keys().chain(expected.xattrs.keys()).collect();
     for key in keys {
-        if key == "com.apple.provenance" { continue; }
-        if key == "com.apple.quarantine" && actual.xattrs.contains_key(key) && expected.xattrs.contains_key(key) { continue; }
-        if actual.xattrs.get(key)!=expected.xattrs.get(key) {
+        if key == "com.apple.provenance" {
+            continue;
+        }
+        if key == "com.apple.quarantine"
+            && actual.xattrs.contains_key(key)
+            && expected.xattrs.contains_key(key)
+        {
+            continue;
+        }
+        if actual.xattrs.get(key) != expected.xattrs.get(key) {
             fields.push(format!("Erweitertes Attribut {key}"));
         }
     }
@@ -547,8 +703,8 @@ pub(super) fn verify_archive_source(
     let owned = ReadbackDir(PrivateDir::temp()?);
     let actual = readback::verify_contents_and_metadata(archive, root_name, expected, &owned.0 .0)?;
     if actual.len() != expected.len() {
-        let wanted: std::collections::BTreeSet<_> = expected.iter().map(|e|e.p.as_str()).collect();
-        let found: std::collections::BTreeSet<_> = actual.iter().map(|e|e.p.as_str()).collect();
+        let wanted: std::collections::BTreeSet<_> = expected.iter().map(|e| e.p.as_str()).collect();
+        let found: std::collections::BTreeSet<_> = actual.iter().map(|e| e.p.as_str()).collect();
         let missing: Vec<_> = wanted.difference(&found).take(10).copied().collect();
         let extra: Vec<_> = found.difference(&wanted).take(10).copied().collect();
         return Err(fail(archive, format!("Anzahl der Archiveinträge stimmt nicht: erwartet {}, zurückgelesen {}; fehlend: {:?}; zusätzlich: {:?}",expected.len(),actual.len(),missing,extra)));
@@ -556,10 +712,20 @@ pub(super) fn verify_archive_source(
     // Identity/change times belong to the live filesystem, ownership is deliberately
     // mapped to the restoring user. All restorable content/permissions are compared.
     for (a, b) in actual.iter().zip(expected) {
-        let differences=readback_differences(a,b);
+        let differences = readback_differences(a, b);
         if !differences.is_empty() {
-            let name=if b.p.is_empty() {root_name.to_string()} else {format!("{root_name}/{}",b.p)};
-            return Err(fail(archive, format!("Archiv-Rückleseprüfung fehlgeschlagen bei {name}: {}",differences.join(", "))));
+            let name = if b.p.is_empty() {
+                root_name.to_string()
+            } else {
+                format!("{root_name}/{}", b.p)
+            };
+            return Err(fail(
+                archive,
+                format!(
+                    "Archiv-Rückleseprüfung fehlgeschlagen bei {name}: {}",
+                    differences.join(", ")
+                ),
+            ));
         }
     }
     // Hard links within a source must still share an inode after extraction.
@@ -590,7 +756,10 @@ pub(super) fn create_verified_archive(
 /// Reuse the caller's full source baseline. It is verified against both the
 /// extracted archive and a fresh full source scan before publishing the archive.
 pub(super) fn create_verified_archive_from_snapshot(
-    source: &Path, target: &Path, gzip: bool, expected: &[ManifestEntry],
+    source: &Path,
+    target: &Path,
+    gzip: bool,
+    expected: &[ManifestEntry],
 ) -> Result<(), String> {
     cancelled()?;
     let bytes = expected
@@ -607,11 +776,21 @@ pub(super) fn create_verified_archive_from_snapshot(
         .ok_or("Ungültige Quellwurzel")?;
     let stage = PrivateDir::new(target.parent().ok_or("Missing parent")?, ".archive")?;
     let tmp = stage.0.join("archive");
-    let flags_archive = crate::archive_flags::write(&stage.0, &crate::archive_flags::Flags {
-        root: name.into(),
-        pax_metadata: true,
-        entries: expected.iter().filter(|e|e.flags != 0).map(|e|crate::archive_flags::Record {path:e.p.clone(),flags:e.flags}).collect(),
-    })?;
+    let flags_archive = crate::archive_flags::write(
+        &stage.0,
+        &crate::archive_flags::Flags {
+            root: name.into(),
+            pax_metadata: true,
+            entries: expected
+                .iter()
+                .filter(|e| e.flags != 0)
+                .map(|e| crate::archive_flags::Record {
+                    path: e.p.clone(),
+                    flags: e.flags,
+                })
+                .collect(),
+        },
+    )?;
     // Exact NUL-delimited list; no glob exclusions, no recursive second traversal.
     let mut members = Vec::new();
     for item in expected {
@@ -627,7 +806,9 @@ pub(super) fn create_verified_archive_from_snapshot(
     fs::write(&list, members).map_err(|e| e.to_string())?;
     let source_parent = source.parent().ok_or("Missing source parent")?;
     let output = {
-        let _phase=crate::work_progress::Phase::enter(&format!("Archiv erstellen und komprimieren: {name}"));
+        let _phase = crate::work_progress::Phase::enter(&format!(
+            "Archiv erstellen und komprimieren: {name}"
+        ));
         crate::protected_access::create_archive(|| {
             let mut cmd = Command::new("/usr/bin/tar");
             cmd.current_dir(source_parent);
@@ -655,7 +836,10 @@ pub(super) fn create_verified_archive_from_snapshot(
             }
             // Import the small metadata tar after the exact source member list.
             // This preserves source traversal order and requires no source edits.
-            cmd.arg(&tmp).arg("-T").arg(&list).arg(format!("@{}",flags_archive.display()));
+            cmd.arg(&tmp)
+                .arg("-T")
+                .arg(&list)
+                .arg(format!("@{}", flags_archive.display()));
             // Stable English diagnostics are used only to identify access errors.
             cmd.env("LC_ALL", "C");
             cmd
@@ -676,34 +860,83 @@ pub(super) fn create_verified_archive_from_snapshot(
 
 /// Validate every selected root before hashing any source or creating a backup.
 /// This is deliberately shallow: missing late entries must not cost a full scan.
-pub(super) fn validate_selected_sources(directories: &[String], target: &Path, home: &Path) -> Result<(),String> {
-    let mut problems=Vec::new();
-    let mut seen=std::collections::BTreeSet::new();
+pub(super) fn validate_selected_sources(
+    directories: &[String],
+    target: &Path,
+    home: &Path,
+) -> Result<(), String> {
+    let mut problems = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
     for source in directories {
         cancelled()?;
-        let path=if source=="~" {home.to_path_buf()} else if let Some(rel)=source.strip_prefix("~/") {home.join(rel)} else {PathBuf::from(source)};
-        let check=(|| -> Result<(),String> {
-            if !path.is_absolute() || path.file_name().is_none() || path.components().any(|c|matches!(c,std::path::Component::ParentDir)) {return Err("Ungültiger absoluter Quellpfad".into());}
-            if !seen.insert(path.clone()) {return Err("Quelle mehrfach ausgewählt".into());}
+        let path = if source == "~" {
+            home.to_path_buf()
+        } else if let Some(rel) = source.strip_prefix("~/") {
+            home.join(rel)
+        } else {
+            PathBuf::from(source)
+        };
+        let check = (|| -> Result<(), String> {
+            if !path.is_absolute()
+                || path.file_name().is_none()
+                || path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err("Ungültiger absoluter Quellpfad".into());
+            }
+            if !seen.insert(path.clone()) {
+                return Err("Quelle mehrfach ausgewählt".into());
+            }
             let md=fs::symlink_metadata(&path).map_err(|e| if e.kind()==std::io::ErrorKind::NotFound {"Pfad existiert nicht mehr – Auswahl korrigieren oder Quelle wieder verfügbar machen".to_string()} else {e.to_string()})?;
-            if md.is_dir() { access_io(&path,"Verzeichnis nicht lesbar",||fs::read_dir(&path))?; }
-            else if md.is_file() { access_io(&path,"Datei nicht lesbar",||fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(&path))?; }
-            else if md.file_type().is_symlink() {fs::read_link(&path).map_err(|e|e.to_string())?;}
-            else {return Err("Ausgewählter Pfad ist eine Spezialdatei, keine sicherbare Datei oder Ordner".into());}
-            validate_source_target(&path,target)
+            if md.is_dir() {
+                access_io(&path, "Verzeichnis nicht lesbar", || fs::read_dir(&path))?;
+            } else if md.is_file() {
+                access_io(&path, "Datei nicht lesbar", || {
+                    fs::OpenOptions::new()
+                        .read(true)
+                        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                        .open(&path)
+                })?;
+            } else if md.file_type().is_symlink() {
+                fs::read_link(&path).map_err(|e| e.to_string())?;
+            } else {
+                return Err(
+                    "Ausgewählter Pfad ist eine Spezialdatei, keine sicherbare Datei oder Ordner"
+                        .into(),
+                );
+            }
+            validate_source_target(&path, target)
         })();
-        if let Err(error)=check {problems.push(format!("{source}: {error}"));}
+        if let Err(error) = check {
+            problems.push(format!("{source}: {error}"));
+        }
     }
-    if problems.is_empty() {Ok(())} else {Err(format!("Quellprüfung fehlgeschlagen. Es wurden noch keine Dateiinhalte gelesen.\n{}",problems.join("\n")))}
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Quellprüfung fehlgeschlagen. Es wurden noch keine Dateiinhalte gelesen.\n{}",
+            problems.join("\n")
+        ))
+    }
 }
 
 pub(super) fn validate_source_target(source: &Path, target: &Path) -> Result<(), String> {
-    let md=fs::symlink_metadata(source).map_err(|e|fail(source,e))?;
+    let md = fs::symlink_metadata(source).map_err(|e| fail(source, e))?;
     let canonical = if md.file_type().is_symlink() {
         // An explicitly selected dangling symlink is valid backup data. Do not
         // canonicalize its target: scanning and archiving do not follow it either.
-        fs::canonicalize(source.parent().ok_or("Quellpfad ohne übergeordneten Ordner")?).map_err(|e|fail(source,e))?.join(source.file_name().ok_or("Quellname fehlt")?)
-    } else {fs::canonicalize(source).map_err(|e| fail(source,e))?};
+        fs::canonicalize(
+            source
+                .parent()
+                .ok_or("Quellpfad ohne übergeordneten Ordner")?,
+        )
+        .map_err(|e| fail(source, e))?
+        .join(source.file_name().ok_or("Quellname fehlt")?)
+    } else {
+        fs::canonicalize(source).map_err(|e| fail(source, e))?
+    };
     let resolved = super::restore::resolve_existing_ancestor(target)?;
     if resolved.starts_with(&canonical)
         || canonical.starts_with(resolved.join("macos-backup-suite"))
@@ -713,14 +946,14 @@ pub(super) fn validate_source_target(source: &Path, target: &Path) -> Result<(),
     Ok(())
 }
 
-fn socket_report_json(paths: &std::collections::BTreeSet<PathBuf>) -> Result<Vec<u8>,String> {
+fn socket_report_json(paths: &std::collections::BTreeSet<PathBuf>) -> Result<Vec<u8>, String> {
     serde_json::to_vec_pretty(&serde_json::json!({
         "schema_version":1,
         "reason":"Unix runtime sockets contain no restorable file data and are recreated by their applications.",
         "skipped_unix_sockets":paths,
     })).map_err(|e|e.to_string())
 }
-pub(super) fn write_socket_report(backup_root: &Path) -> Result<(),String> {
+pub(super) fn write_socket_report(backup_root: &Path) -> Result<(), String> {
     PROGRESS.with(|p| {
         if let Some(reporter)=p.borrow().as_ref() {
             atomic_write(&backup_root.join("skipped-runtime-sockets.json"),&socket_report_json(&reporter.skipped_sockets)?)?;
@@ -761,19 +994,40 @@ mod tests;
 /// A checkpoint is reusable only when the full current source manifest matches
 /// and the already readback-verified archive still has its recorded SHA-256.
 pub(super) fn resume_candidate(
-    inventory: &Path, source: &str, archive: &str, current: &[ManifestEntry], items: &[BackupItem],
+    inventory: &Path,
+    source: &str,
+    archive: &str,
+    current: &[ManifestEntry],
+    items: &[BackupItem],
 ) -> Option<BackupItem> {
-    let item=items.iter().find(|item|item.path==source && item.archive==archive)?;
-    if item.source_size_bytes != current.iter().map(|e|e.s).sum::<u64>() { return None; }
-    let previous=load_manifest(inventory,archive)?;
-    same_source_version(&previous,current).then(||item.clone())
+    let item = items
+        .iter()
+        .find(|item| item.path == source && item.archive == archive)?;
+    if item.source_size_bytes != current.iter().map(|e| e.s).sum::<u64>() {
+        return None;
+    }
+    let previous = load_manifest(inventory, archive)?;
+    same_source_version(&previous, current).then(|| item.clone())
 }
 pub(super) fn verified_resume_item(
-    backup: &Path, inventory: &Path, source: &str, archive: &str, current: &[ManifestEntry], items: &[BackupItem],
-) -> Result<Option<BackupItem>,String> {
-    let Some(item)=resume_candidate(inventory,source,archive,current,items) else {return Ok(None)};
-    let _phase=crate::work_progress::Phase::enter(&format!("Bereits geprüftes Archiv für Fortsetzung prüfen: {source}"));
-    let verified=verify_item(backup,&item);
+    backup: &Path,
+    inventory: &Path,
+    source: &str,
+    archive: &str,
+    current: &[ManifestEntry],
+    items: &[BackupItem],
+) -> Result<Option<BackupItem>, String> {
+    let Some(item) = resume_candidate(inventory, source, archive, current, items) else {
+        return Ok(None);
+    };
+    let _phase = crate::work_progress::Phase::enter(&format!(
+        "Bereits geprüftes Archiv für Fortsetzung prüfen: {source}"
+    ));
+    let verified = verify_item(backup, &item);
     cancelled()?;
-    if verified.is_ok() {Ok(Some(item))} else {Ok(None)}
+    if verified.is_ok() {
+        Ok(Some(item))
+    } else {
+        Ok(None)
+    }
 }
