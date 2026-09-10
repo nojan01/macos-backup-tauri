@@ -1108,11 +1108,74 @@ impl Drop for SleepInhibitor {
     }
 }
 
+/// Delays the password prompt while an explicitly enabled unattended backup is
+/// running. The display can sleep; only the lock that would revoke access to
+/// protected source data is postponed. The exact prior value is restored on
+/// every normal completion, error, or cancellation path through `Drop`.
+struct ScreenLockDelay {
+    previous_delay: Option<f64>,
+}
+impl ScreenLockDelay {
+    fn start() -> Result<Self, String> {
+        let read = Command::new("/usr/bin/defaults")
+            .args(["read", "com.apple.screensaver", "askForPasswordDelay"])
+            .output()
+            .map_err(|e| format!("Bildschirmsperre konnte nicht gelesen werden: {e}"))?;
+        let previous_delay = if read.status.success() {
+            Some(
+                String::from_utf8_lossy(&read.stdout)
+                    .trim()
+                    .parse::<f64>()
+                    .map_err(|_| "Ungültige Einstellung für die Bildschirmsperre".to_string())?,
+            )
+        } else {
+            None
+        };
+        let status = Command::new("/usr/bin/defaults")
+            .args([
+                "write",
+                "com.apple.screensaver",
+                "askForPasswordDelay",
+                "-float",
+                "86400",
+            ])
+            .status()
+            .map_err(|e| format!("Bildschirmsperre konnte nicht verzögert werden: {e}"))?;
+        if !status.success() {
+            return Err("Bildschirmsperre konnte nicht verzögert werden".into());
+        }
+        Ok(Self { previous_delay })
+    }
+}
+impl Drop for ScreenLockDelay {
+    fn drop(&mut self) {
+        let mut command = Command::new("/usr/bin/defaults");
+        command.arg("write").arg("com.apple.screensaver").arg("askForPasswordDelay");
+        match self.previous_delay {
+            Some(delay) => {
+                command.arg("-float").arg(delay.to_string());
+            }
+            None => {
+                command = Command::new("/usr/bin/defaults");
+                command.args(["delete", "com.apple.screensaver", "askForPasswordDelay"]);
+            }
+        }
+        let _ = command.status();
+    }
+}
+
 pub(super) struct OperationGuard {
     _sleep_inhibitor: SleepInhibitor,
+    _screen_lock_delay: Option<ScreenLockDelay>,
 }
 impl OperationGuard {
     pub fn acquire() -> Result<Self, String> {
+        Self::acquire_with_backup_mode(false)
+    }
+    pub fn acquire_backup(keep_session_unlocked: bool) -> Result<Self, String> {
+        Self::acquire_with_backup_mode(keep_session_unlocked)
+    }
+    fn acquire_with_backup_mode(keep_session_unlocked: bool) -> Result<Self, String> {
         ACTIVE_DISK_OPERATION
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .map_err(|_| "Another backup, restore or verification is already running")?;
@@ -1123,9 +1186,21 @@ impl OperationGuard {
                 return Err(error);
             }
         };
+        let screen_lock_delay = if keep_session_unlocked {
+            match ScreenLockDelay::start() {
+                Ok(delay) => Some(delay),
+                Err(error) => {
+                    drop(sleep_inhibitor);
+                    ACTIVE_DISK_OPERATION.store(false, Ordering::SeqCst);
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
         BACKUP_CANCELLED.store(false, Ordering::SeqCst);
         VERIFY_CANCELLED.store(false, Ordering::SeqCst);
-        Ok(Self { _sleep_inhibitor: sleep_inhibitor })
+        Ok(Self { _sleep_inhibitor: sleep_inhibitor, _screen_lock_delay: screen_lock_delay })
     }
 }
 impl Drop for OperationGuard {

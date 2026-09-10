@@ -24,6 +24,7 @@ interface BackupConfig {
   backup_safari_settings: boolean;
   backup_chrome_settings: boolean;
   backup_firefox_settings: boolean;
+  keep_session_unlocked_during_backup: boolean;
   backup_vscode_settings: boolean;
   backup_chatgpt_settings: boolean;
   backup_codex_settings: boolean;
@@ -115,6 +116,9 @@ const translations: Record<string, Record<string, string>> = {
     safariSettings: "Safari-Einstellungen",
     backupSafariSettings: "Safari-Einstellungen sichern",
     safariSettingsHint: "Lesezeichen, Leseliste, Erweiterungen, Top Sites",
+    unattendedBackup: "Unbeaufsichtigtes Backup",
+    keepSessionUnlocked: "Monitor darf ausgehen, Sitzung für Backup entsperrt halten",
+    keepSessionUnlockedHint: "Verzögert die Passwortsperre nur während des Backups und stellt deine bisherige Einstellung danach wieder her.",
     browserSettings: "Browser-Einstellungen",
     backupChromeSettings: "Chrome-Profile sichern",
     chromeSettingsHint: "Einstellungen, Lesezeichen und Erweiterungen aller lokalen Profile",
@@ -352,6 +356,9 @@ const translations: Record<string, Record<string, string>> = {
     safariSettings: "Safari settings",
     backupSafariSettings: "Back up Safari settings",
     safariSettingsHint: "Bookmarks, Reading List, extensions, Top Sites",
+    unattendedBackup: "Unattended backup",
+    keepSessionUnlocked: "Allow display sleep and keep the session unlocked for backup",
+    keepSessionUnlockedHint: "Delays the password lock only while the backup runs, then restores your previous setting.",
     browserSettings: "Browser settings",
     backupChromeSettings: "Back up Chrome profiles",
     chromeSettingsHint: "Settings, bookmarks and extensions from all local profiles",
@@ -648,6 +655,7 @@ const backupHomebrewCacheCheckbox = document.getElementById("backup-homebrew-cac
 const backupSafariSettingsCheckbox = document.getElementById("backup-safari-settings") as HTMLInputElement;
 const backupChromeSettingsCheckbox = document.getElementById("backup-chrome-settings") as HTMLInputElement;
 const backupFirefoxSettingsCheckbox = document.getElementById("backup-firefox-settings") as HTMLInputElement;
+const keepSessionUnlockedCheckbox = document.getElementById("keep-session-unlocked-during-backup") as HTMLInputElement;
 const appSettingsControls = ["vscode", "chatgpt", "codex"].map(id => ({
   id,
   key: `backup_${id}_settings` as "backup_vscode_settings" | "backup_chatgpt_settings" | "backup_codex_settings",
@@ -703,6 +711,7 @@ let config: BackupConfig = {
   backup_safari_settings: false,
   backup_chrome_settings: false,
   backup_firefox_settings: false,
+  keep_session_unlocked_during_backup: false,
   backup_vscode_settings: true,
   backup_chatgpt_settings: true,
   backup_codex_settings: true,
@@ -2372,6 +2381,9 @@ btnSettings.addEventListener("click", () => {
   if (backupFirefoxSettingsCheckbox) {
     backupFirefoxSettingsCheckbox.checked = config.backup_firefox_settings || false;
   }
+  if (keepSessionUnlockedCheckbox) {
+    keepSessionUnlockedCheckbox.checked = config.keep_session_unlocked_during_backup || false;
+  }
   for (const control of appSettingsControls) control.checkbox.checked = config[control.key];
   settingsDialog.showModal();
   void refreshAppSettingsPreview();
@@ -2390,6 +2402,7 @@ settingsSaveBtn.addEventListener("click", async () => {
     backup_safari_settings: backupSafariSettingsCheckbox.checked,
     backup_chrome_settings: backupChromeSettingsCheckbox.checked,
     backup_firefox_settings: backupFirefoxSettingsCheckbox.checked,
+    keep_session_unlocked_during_backup: keepSessionUnlockedCheckbox.checked,
   };
   for (const control of appSettingsControls) next[control.key] = control.checkbox.checked;
   settingsSaveBtn.disabled = true;

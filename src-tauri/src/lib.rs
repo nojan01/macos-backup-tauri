@@ -99,6 +99,8 @@ pub struct BackupConfig {
     pub backup_chrome_settings: bool,
     #[serde(default)]
     pub backup_firefox_settings: bool,
+    #[serde(default)]
+    pub keep_session_unlocked_during_backup: bool,
     #[serde(default = "default_app_settings")]
     pub backup_vscode_settings: bool,
     #[serde(default = "default_app_settings")]
@@ -126,6 +128,7 @@ impl Default for BackupConfig {
             backup_safari_settings: false,
             backup_chrome_settings: false,
             backup_firefox_settings: false,
+            keep_session_unlocked_during_backup: false,
             backup_vscode_settings: true,
             backup_chatgpt_settings: true,
             backup_codex_settings: true,
@@ -1379,7 +1382,8 @@ fn create_backup_impl(
     incremental: Option<bool>,
     resume_timestamp: Option<String>,
 ) -> Result<BackupMetadata, String> {
-    let _guard = OperationGuard::acquire()?;
+    let config = load_config()?;
+    let _guard = OperationGuard::acquire_backup(config.keep_session_unlocked_during_backup)?;
     let _progress = BackupProgress::attach(window.clone());
     // Debug-Trace-Closure (No-op in Release-Builds). Für Diagnose kann hier
     // wieder ein Schreiber in /tmp/macos-backup-trace.log aktiviert werden.
@@ -1423,7 +1427,6 @@ fn create_backup_impl(
     // Validate explicit selections first: optional detection must not hide a stale
     // manually selected source. Freeze options and detected sources for this run.
     validate_selected_sources(&directories, target, &home_settings)?;
-    let config = load_config()?;
     let settings = app_settings::discover(&home_settings, &config)?;
     let mut directories = directories;
     for group in &settings {
