@@ -30,12 +30,15 @@ fn full_native_readback(
         parent,
         RESERVE.saturating_add(payload).saturating_add(payload / 10),
     )?;
-    let stage = PrivateDir::new(parent, ".readback-full")?;
+    // Native extraction restores ACLs and immutable flags. Use the cleanup
+    // guard that clears those attributes so a failed verification cannot leave
+    // a large temporary readback tree on the backup volume.
+    let stage = ReadbackDir(PrivateDir::new(parent, ".readback-full")?);
     let _phase = crate::work_progress::Phase::enter(
         "PAX-Metadatenprobe unvollständig – vollständige Rückleseprüfung auf dem Backup-Laufwerk",
     );
-    unpack_private_with_root(archive, &stage.0, Some(std::ffi::OsStr::new(root)))?;
-    snapshot_with_phase(&stage.0.join(root), "Vollständige Rückleseprüfung")
+    unpack_private_with_root(archive, &stage.0 .0, Some(std::ffi::OsStr::new(root)))?;
+    snapshot_with_phase(&stage.0 .0.join(root), "Vollständige Rückleseprüfung")
 }
 
 struct LimitedMetadata<W> {

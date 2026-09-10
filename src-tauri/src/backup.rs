@@ -11,6 +11,7 @@ use std::os::unix::{
     ffi::OsStrExt,
     fs::{FileTypeExt, MetadataExt, OpenOptionsExt},
 };
+use unicode_normalization::UnicodeNormalization;
 
 // Backup work runs on a single blocking worker. The scoped, thread-local reporter
 // also covers nested scans/readback without leaking a window into other operations.
@@ -663,7 +664,11 @@ impl Drop for ReadbackDir {
 fn readback_differences(actual: &ManifestEntry, expected: &ManifestEntry) -> Vec<String> {
     let mut fields = Vec::new();
     for (different, label) in [
-        (actual.p != expected.p, "Pfad"),
+        // APFS may expose an archive path in a canonically equivalent Unicode
+        // form after native extraction (for example ü as one code point versus
+        // u + combining diaeresis). macOS addresses both forms as the same
+        // filename, so only that representation difference is not data loss.
+        (!actual.p.nfc().eq(expected.p.nfc()), "Pfad"),
         (actual.kind != expected.kind, "Dateityp"),
         (actual.s != expected.s, "Dateigröße"),
         (actual.hash != expected.hash, "Dateiinhalt (SHA-256)"),

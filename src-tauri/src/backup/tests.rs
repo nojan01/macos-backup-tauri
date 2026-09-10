@@ -62,6 +62,30 @@ fn symlink_targets_are_scanned_without_following_even_at_root() {
     assert_ne!(a[0].link, b[0].link);
     assert_eq!(b.len(), 1);
 }
+
+#[test]
+fn readback_accepts_equivalent_unicode_path_normalization() {
+    use unicode_normalization::UnicodeNormalization;
+
+    let d = fixture();
+    let source = d.0.join("tree");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("file"), b"payload").unwrap();
+    let entry = compute_snapshot(&source)
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.p == "file")
+        .unwrap();
+    let mut composed = entry.clone();
+    composed.p = "Webcam-Schnappschüsse".nfc().collect();
+    let mut decomposed = entry;
+    decomposed.p = "Webcam-Schnappschüsse".nfd().collect();
+
+    assert_ne!(composed.p, decomposed.p);
+    assert!(!readback_differences(&composed, &decomposed)
+        .iter()
+        .any(|difference| difference == "Pfad"));
+}
 #[test]
 fn missing_unreadable_and_special_sources_fail() {
     let d = fixture();
