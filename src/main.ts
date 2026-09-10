@@ -2444,36 +2444,150 @@ licenseSaveBtn.addEventListener("click", async () => {
   }
 });
 
+const mitLicenseText = `MIT License
+
+Copyright (c) 2026 Norbert Jander
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.`;
+
+const helpGuideHtml: Record<string, string> = {
+  de: `
+    <section class="help-section">
+      <h3>🧭 Ein vollständiges Benutzerprofil planen</h3>
+      <p class="help-intro">Ein Backup-Profil beschreibt genau einen Zweck, zum Beispiel „Privat“, „Arbeit“ oder „Minimal“. Wähle nur Daten, die gemeinsam wiederhergestellt werden sollen. Die Suite sichert ausgewählte Quellen vollständig, einschließlich versteckter Dateien und Metadaten.</p>
+    </section>
+    <section class="help-section">
+      <h3>📁 Empfohlene Ordner</h3>
+      <div class="help-profile-grid">
+        <article class="help-profile-card"><h4>✓ ~/Documents</h4><p>Dokumente, Projekte, lokale Arbeitskopien und meist auch Entwicklungsdaten. Für ein vollständiges Profil fast immer erforderlich.</p></article>
+        <article class="help-profile-card"><h4>✓ ~/Desktop</h4><p>Arbeitsdateien auf dem Schreibtisch. Dieser Ordner ist standardmäßig enthalten.</p></article>
+        <article class="help-profile-card"><h4>△ ~/Downloads</h4><p>Installer, PDFs und heruntergeladene Arbeitsdateien. Sinnvoll, wenn diese nicht anderweitig verfügbar sind; große oder leicht erneut ladbare Dateien erhöhen die Laufzeit.</p></article>
+        <article class="help-profile-card"><h4>+ ~/Pictures</h4><p>Fotos, Bilder und gegebenenfalls die Fotos-Mediathek. Für lokale Fotos normalerweise hinzufügen; die Fotos-App vorher schließen.</p></article>
+        <article class="help-profile-card"><h4>+ ~/Music und ~/Movies</h4><p>Lokale Musik, Videos sowie eigene Medienprojekte. Nur hinzufügen, wenn die Inhalte nicht aus einer Cloud oder Mediathek erneut geladen werden können.</p></article>
+        <article class="help-profile-card"><h4>⚙️ System-Configs</h4><p>Sichert wichtige persönliche Konfigurationen wie SSH-Schlüssel, Git- und Shell-Einstellungen. Für Entwickler und Terminal-Nutzung empfohlen.</p></article>
+      </div>
+      <p class="help-warning">Nicht pauschal den gesamten Ordner <code>~/Library</code> hinzufügen. Er enthält große Caches, temporäre Daten und aktive Datenbanken. Nutze stattdessen die Optionen für Browser und App-Einstellungen oder füge für eine bestimmte App nur deren benötigten Datenordner hinzu.</p>
+    </section>
+    <section class="help-section">
+      <h3>🌐 Einstellungen und Browser</h3>
+      <ul class="help-tips">
+        <li><strong>Safari, Chrome und Firefox:</strong> In Einstellungen aktivieren, wenn Lesezeichen, Profile und Erweiterungen nach einer Neuinstallation zurückkehren sollen.</li>
+        <li><strong>VS Code, ChatGPT und Codex:</strong> In Einstellungen aktivieren, wenn lokale Konfiguration, Profile, Regeln und eigene Skills wichtig sind. Die App vor dem Backup schließen.</li>
+        <li><strong>Weitere Apps:</strong> Prüfe, ob sie Daten in <code>~/Library/Application Support</code>, <code>~/Library/Containers</code> oder <code>~/Library/Group Containers</code> speichern, und füge nur den konkreten App-Ordner hinzu.</li>
+      </ul>
+    </section>
+    <section class="help-section">
+      <h3>📤 Sichern, prüfen und Speicher verstehen</h3>
+      <ol class="help-steps">
+        <li>Externes, beschreibbares APFS-Volume auswählen und der Suite Festplattenvollzugriff geben.</li>
+        <li>Ordner und Optionen des aktiven Profils prüfen. Geöffnete Datenbanken, virtuelle Maschinen und Medienbibliotheken vorher schließen.</li>
+        <li>„Backup erstellen“ starten. Die Suite arbeitet aus einem schreibgeschützten APFS-Snapshot und prüft jedes neue Archiv beim Rücklesen.</li>
+        <li>Nach Abschluss „Verifizieren“ verwenden und regelmäßig einen Test-Restore durchführen.</li>
+        <li>Unveränderte ausgewählte Ordner werden als Hardlink aus dem Vorgänger übernommen. Eine Änderung innerhalb eines ausgewählten Ordners erstellt dessen Archiv neu; die Backup-Liste zeigt dafür „neu“ und „übernommen“ getrennt an. Finder zählt Hardlinks in jedem Backup-Ordner erneut und zeigt deshalb nicht den tatsächlich zusätzlich belegten Speicher.</li>
+      </ol>
+    </section>
+    <section class="help-section">
+      <h3>📥 Wiederherstellen</h3>
+      <ol class="help-steps">
+        <li>Backup-Ziel und gewünschtes Backup wählen.</li>
+        <li>„Wiederherstellen“ klicken und nur die benötigten Ordner oder Einstellungen auswählen.</li>
+        <li>Ohne „Überschreiben“ bleiben vorhandene Dateien erhalten. Mit „Überschreiben“ werden auch Metadaten vorhandener Verzeichnisse wiederhergestellt.</li>
+        <li>Zuerst einen Test-Restore ausführen. Homebrew- und App-Store-Listen helfen bei der Neuinstallation; manuell installierte Apps müssen weiterhin manuell installiert werden.</li>
+      </ol>
+    </section>
+    <section class="help-section">
+      <h3>⚠️ Was dieses Backup nicht ersetzt</h3>
+      <p class="help-muted">Die Suite ist keine vollständige macOS-Systemwiederherstellung und kein Ersatz für ein zweites, unabhängiges Backup. iCloud-Dateien müssen lokal geladen sein, damit sie im Snapshot enthalten sind. Für besonders wichtige Daten empfiehlt sich zusätzlich ein getrenntes Backup oder Time Machine.</p>
+    </section>`,
+  en: `
+    <section class="help-section">
+      <h3>🧭 Plan a complete user profile</h3>
+      <p class="help-intro">A backup profile represents one purpose, such as “Personal”, “Work”, or “Minimal”. Select only data that should be restored together. The Suite backs up selected sources in full, including hidden files and metadata.</p>
+    </section>
+    <section class="help-section">
+      <h3>📁 Recommended folders</h3>
+      <div class="help-profile-grid">
+        <article class="help-profile-card"><h4>✓ ~/Documents</h4><p>Documents, projects, local working copies, and usually development data. Almost always needed for a complete profile.</p></article>
+        <article class="help-profile-card"><h4>✓ ~/Desktop</h4><p>Working files stored on the desktop. This folder is included by default.</p></article>
+        <article class="help-profile-card"><h4>△ ~/Downloads</h4><p>Installers, PDFs, and downloaded work files. Include it when these are not otherwise available; large or easily re-downloadable files increase backup time.</p></article>
+        <article class="help-profile-card"><h4>+ ~/Pictures</h4><p>Photos, images, and possibly the Photos library. Usually add it for local photos; close Photos before the backup.</p></article>
+        <article class="help-profile-card"><h4>+ ~/Music and ~/Movies</h4><p>Local music, videos, and personal media projects. Add them only when the content cannot be downloaded again from a cloud or media library.</p></article>
+        <article class="help-profile-card"><h4>⚙️ System Configs</h4><p>Backs up important personal configuration such as SSH keys and Git and shell settings. Recommended for developers and terminal users.</p></article>
+      </div>
+      <p class="help-warning">Do not add all of <code>~/Library</code> by default. It contains large caches, temporary data, and active databases. Instead, use the browser and app-settings options or add only the required folder for one specific app.</p>
+    </section>
+    <section class="help-section">
+      <h3>🌐 Settings and browsers</h3>
+      <ul class="help-tips">
+        <li><strong>Safari, Chrome, and Firefox:</strong> Enable them in Settings when bookmarks, profiles, and extensions should return after a reinstall.</li>
+        <li><strong>VS Code, ChatGPT, and Codex:</strong> Enable them in Settings when local configuration, profiles, rules, and custom skills matter. Close the app before backup.</li>
+        <li><strong>Other apps:</strong> Check whether data is stored in <code>~/Library/Application Support</code>, <code>~/Library/Containers</code>, or <code>~/Library/Group Containers</code>, then add only the specific app folder.</li>
+      </ul>
+    </section>
+    <section class="help-section">
+      <h3>📤 Back up, verify, and understand storage</h3>
+      <ol class="help-steps">
+        <li>Select a writable external APFS volume and grant the Suite Full Disk Access.</li>
+        <li>Review the folders and options in the active profile. Close active databases, virtual machines, and media libraries first.</li>
+        <li>Start “Create Backup”. The Suite works from a read-only APFS snapshot and read-back verifies every new archive.</li>
+        <li>Use “Verify” after completion and run test restores regularly.</li>
+        <li>Unchanged selected folders are reused from the preceding backup by hardlink. A change within a selected folder rebuilds that folder's archive; the backup list shows “new” and “reused” separately. Finder counts hardlinks again in every backup folder, so its folder size is not the physically added storage.</li>
+      </ol>
+    </section>
+    <section class="help-section">
+      <h3>📥 Restore</h3>
+      <ol class="help-steps">
+        <li>Select the backup target and the backup to restore.</li>
+        <li>Click “Restore” and select only the folders or settings needed.</li>
+        <li>Without “Overwrite”, existing files are kept. With “Overwrite”, metadata of existing directories is restored as well.</li>
+        <li>Run a test restore first. Homebrew and App Store lists help reinstall software; manually installed apps still need manual installation.</li>
+      </ol>
+    </section>
+    <section class="help-section">
+      <h3>⚠️ What this backup does not replace</h3>
+      <p class="help-muted">The Suite is not a complete macOS system restore and does not replace a second independent backup. iCloud files must be downloaded locally to be part of the snapshot. For especially important data, also keep a separate backup or Time Machine backup.</p>
+    </section>`
+};
+
 // Help modal
 function openHelpModal() {
-  // Populate translated content
   const titleEl = document.getElementById("help-modal-title");
   if (titleEl) titleEl.textContent = t("helpTitle");
-  
-  const backupTitle = document.getElementById("help-backup-title");
-  if (backupTitle) backupTitle.textContent = "📤 " + t("helpBackupTitle");
-  
-  const restoreTitle = document.getElementById("help-restore-title");
-  if (restoreTitle) restoreTitle.textContent = "📥 " + t("helpRestoreTitle");
-  
-  const tipsTitle = document.getElementById("help-tips-title");
-  if (tipsTitle) tipsTitle.textContent = "💡 " + t("helpTipsTitle");
-  
-  const backupSteps = document.getElementById("help-backup-steps");
-  if (backupSteps) {
-    backupSteps.innerHTML = [1,2,3,4,5].map(i => `<li>${t("helpBackupStep" + i)}</li>`).join("");
-  }
-  
-  const restoreSteps = document.getElementById("help-restore-steps");
-  if (restoreSteps) {
-    restoreSteps.innerHTML = [1,2,3,4,5].map(i => `<li>${t("helpRestoreStep" + i)}</li>`).join("");
-  }
-  
-  const tipsList = document.getElementById("help-tips-list");
-  if (tipsList) {
-    tipsList.innerHTML = [1,2,3].map(i => `<li>${t("helpTip" + i)}</li>`).join("");
-  }
-  
+
+  const guideEl = document.getElementById("help-guide");
+  if (guideEl) guideEl.innerHTML = helpGuideHtml[currentLanguage] ?? helpGuideHtml.de;
+
+  const licenseTitle = document.getElementById("help-license-title");
+  if (licenseTitle) licenseTitle.textContent = currentLanguage === "de" ? "⚖️ Open-Source-Lizenz" : "⚖️ Open-source license";
+  const licenseSummary = document.getElementById("help-license-summary");
+  if (licenseSummary) licenseSummary.textContent = currentLanguage === "de"
+    ? "macOS Backup Suite steht unter der MIT-Lizenz. Sie erlaubt Nutzung, Änderung und Weitergabe unter Beibehaltung dieses Hinweises."
+    : "macOS Backup Suite is licensed under the MIT License. It permits use, modification, and redistribution when this notice is retained.";
+  const licenseToggle = document.getElementById("help-license-toggle");
+  if (licenseToggle) licenseToggle.textContent = currentLanguage === "de" ? "Vollständigen MIT-Lizenztext anzeigen" : "Show the complete MIT License";
+  const licenseText = document.getElementById("help-license-text");
+  if (licenseText) licenseText.textContent = mitLicenseText;
+  const notices = document.getElementById("help-notices");
+  if (notices) notices.textContent = currentLanguage === "de"
+    ? "Hinweise zu Komponenten Dritter sind in THIRD_PARTY_NOTICES.md dokumentiert und werden mit der App ausgeliefert."
+    : "Third-party component notices are documented in THIRD_PARTY_NOTICES.md and bundled with the app.";
+
   helpDialog.showModal();
 }
 

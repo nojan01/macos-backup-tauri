@@ -844,8 +844,10 @@ footer {
 
 /* Help Modal */
 .modal-help {
-  max-width: 550px;
-  width: 95%;
+  max-width: 820px;
+  width: min(95vw, 820px);
+  max-height: 88vh;
+  overflow-y: auto;
 }
 
 .help-section {
@@ -878,6 +880,68 @@ footer {
 
 .help-tips li {
   color: var(--text-secondary);
+}
+
+.help-intro,
+.help-muted {
+  color: var(--text-secondary);
+  font-size: 0.86rem;
+  line-height: 1.5;
+}
+
+.help-profile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+  margin: 10px 0;
+}
+
+.help-profile-card {
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  border-radius: 8px;
+  padding: 11px;
+}
+
+.help-profile-card h4 {
+  margin: 0 0 5px;
+  color: var(--text-primary);
+  font-size: 0.88rem;
+}
+
+.help-profile-card p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.help-warning {
+  border-left: 3px solid var(--warning-color);
+  background: var(--bg-primary);
+  border-radius: 4px;
+  padding: 9px 11px;
+  color: var(--text-secondary);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.help-license-section details {
+  margin-top: 10px;
+}
+
+.license-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 300px;
+  overflow-y: auto;
+  margin: 10px 0 0;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font: 0.72rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 /* License Data Modal */

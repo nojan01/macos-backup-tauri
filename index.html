@@ -296,37 +296,17 @@
     <dialog id="help-dialog" class="modal">
       <div class="modal-content modal-help">
         <h2>❓ <span id="help-modal-title">Hilfe – Anleitung</span></h2>
-        
-        <div class="help-section">
-          <h3 id="help-backup-title">📤 Backup erstellen</h3>
-          <ol class="help-steps" id="help-backup-steps">
-            <li>Externes Volume anschließen und unter "Backup-Ziel" auswählen</li>
-            <li>Zu sichernde Ordner prüfen/anpassen (+ Ordner, System-Configs)</li>
-            <li>"Backup erstellen" klicken – Fortschritt im Protokoll</li>
-            <li>Nach Abschluss: Backup über "Verifizieren" prüfen</li>
-            <li>Optional: Registrierungsdaten über 🔑 Lizenzen eintragen</li>
-          </ol>
-        </div>
-        
-        <div class="help-section">
-          <h3 id="help-restore-title">📥 Wiederherstellung</h3>
-          <ol class="help-steps" id="help-restore-steps">
-            <li>Volume mit vorhandenem Backup auswählen</li>
-            <li>Backup aus der Liste wählen</li>
-            <li>"Wiederherstellen" klicken und gewünschte Elemente wählen</li>
-            <li>Optional: ⚡ Quick-Restore für essentielle Pakete zuerst</li>
-            <li>Manuelle Apps & Lizenzen über die Buttons einsehen</li>
-          </ol>
-        </div>
-        
-        <div class="help-section">
-          <h3 id="help-tips-title">💡 Tipps</h3>
-          <ul class="help-tips" id="help-tips-list">
-            <li>Voller Festplattenzugriff in den Systemeinstellungen aktivieren</li>
-            <li>System-Configs sichert wichtige Konfig-Dateien (.ssh, .gitconfig, etc.)</li>
-            <li>Backups regelmäßig verifizieren für Datenintegrität</li>
-          </ul>
-        </div>
+        <div id="help-guide"></div>
+
+        <section class="help-section help-license-section">
+          <h3 id="help-license-title">⚖️ Open-Source-Lizenz</h3>
+          <p id="help-license-summary"></p>
+          <details>
+            <summary id="help-license-toggle"></summary>
+            <pre id="help-license-text" class="license-text"></pre>
+          </details>
+          <p id="help-notices" class="help-muted"></p>
+        </section>
         
         <div class="modal-actions">
           <button id="help-close" class="btn-secondary"><span data-i18n="close">Schließen</span></button>

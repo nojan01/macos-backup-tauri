@@ -8,7 +8,7 @@ import ts from 'typescript';
 // window. Only IPC and DOM endpoints are replaced; no backup files are touched.
 const source = fs.readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
 const ast = ts.createSourceFile('main.ts', source, ts.ScriptTarget.Latest, true);
-const names = ['startBackup', 'cancelOperation', 'setOperationControls', 'setupEventListeners'];
+const names = ['startBackup', 'cancelOperation', 'setOperationControls', 'setProfileControlsDisabled', 'setupEventListeners'];
 const functions = names.map(name => {
   const node = ast.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === name);
   assert.ok(node, name);
@@ -38,9 +38,10 @@ function fixture(language) {
       if (command === 'create_backup') {started(); return backend;}
     },
   };
-  for (const name of ['btnCancel', 'btnBackup', 'btnRestore', 'btnRestoreTest', 'btnTestRestore', 'btnDeleteBackup', 'restoreStart', 'restoreQuickBtn', 'testRestoreStart', 'backupSelect', 'volumeSelect', 'browseTargetBtn']) {
+  for (const name of ['btnCancel', 'btnBackup', 'btnRestore', 'btnRestoreTest', 'btnTestRestore', 'btnDeleteBackup', 'restoreStart', 'restoreQuickBtn', 'testRestoreStart', 'backupSelect', 'volumeSelect', 'browseTargetBtn', 'profileSelect', 'profileNewBtn', 'profileDuplicateBtn', 'profileRenameBtn', 'profileDeleteBtn']) {
     state[name] = {disabled: false, style: {}, textContent: ''};
   }
+  state.profileSelect.options = {length: 1};
   state.setStatusMessage = message => {state.rawStatus = message;};
   state.setProgressMessage = message => {state.progress = message;};
   vm.createContext(state);
