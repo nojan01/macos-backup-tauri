@@ -129,6 +129,10 @@ const translations: Record<string, Record<string, string>> = {
     deleteProfilePrompt: "Profil „{0}“ löschen? Bereits vorhandene Backups auf dem Ziel bleiben erhalten.",
     profileCreated: "Backup-Profil erstellt:",
     profileSelected: "Backup-Profil ausgewählt:",
+    profileName: "Profilname",
+    profileDialogNew: "Neues Backup-Profil",
+    profileDialogDuplicate: "Backup-Profil duplizieren",
+    profileDialogRename: "Backup-Profil umbenennen",
     softwareInventory: "Software-Inventar",
     backupHomebrew: "Homebrew-Paketliste sichern (Homebrew erforderlich)",
     backupMas: "App-Store-Liste sichern (mas erforderlich)",
@@ -380,6 +384,10 @@ const translations: Record<string, Record<string, string>> = {
     deleteProfilePrompt: "Delete profile “{0}”? Existing backups on the target remain unchanged.",
     profileCreated: "Backup profile created:",
     profileSelected: "Backup profile selected:",
+    profileName: "Profile name",
+    profileDialogNew: "New backup profile",
+    profileDialogDuplicate: "Duplicate backup profile",
+    profileDialogRename: "Rename backup profile",
     softwareInventory: "Software inventory",
     backupHomebrew: "Back up Homebrew package list (requires Homebrew)",
     backupMas: "Back up App Store list (requires mas)",
@@ -681,6 +689,12 @@ const profileNewBtn = document.getElementById("profile-new") as HTMLButtonElemen
 const profileDuplicateBtn = document.getElementById("profile-duplicate") as HTMLButtonElement;
 const profileRenameBtn = document.getElementById("profile-rename") as HTMLButtonElement;
 const profileDeleteBtn = document.getElementById("profile-delete") as HTMLButtonElement;
+const profileDialog = document.getElementById("profile-dialog") as HTMLDialogElement;
+const profileDialogTitle = document.getElementById("profile-dialog-title") as HTMLHeadingElement;
+const profileDialogDescription = document.getElementById("profile-dialog-description") as HTMLParagraphElement;
+const profileNameInput = document.getElementById("profile-name-input") as HTMLInputElement;
+const profileDialogCancelBtn = document.getElementById("profile-dialog-cancel") as HTMLButtonElement;
+const profileDialogSaveBtn = document.getElementById("profile-dialog-save") as HTMLButtonElement;
 const settingsDialog = document.getElementById("settings-dialog") as HTMLDialogElement;
 const defaultDirectoriesList = document.getElementById("default-directories-list") as HTMLUListElement;
 const addDefaultDirectoryBtn = document.getElementById("add-default-directory") as HTMLButtonElement;
@@ -1087,44 +1101,63 @@ async function activateProfile(profileId: string): Promise<void> {
 
 profileSelect.addEventListener("change", () => { void activateProfile(profileSelect.value); });
 
-async function addProfile(copyCurrent: boolean): Promise<void> {
+type ProfileDialogMode = "new" | "duplicate" | "rename";
+let profileDialogMode: ProfileDialogMode = "new";
+
+function openProfileDialog(mode: ProfileDialogMode): void {
   if (operationInProgress) return;
-  const promptText = copyCurrent ? t("duplicateProfilePrompt") : t("newProfilePrompt");
-  const name = window.prompt(promptText, copyCurrent ? `${config.profile_name} 2` : "");
-  if (name === null) return;
+  profileDialogMode = mode;
+  const duplicate = mode === "duplicate";
+  const rename = mode === "rename";
+  profileDialogTitle.textContent = t(rename ? "profileDialogRename" : duplicate ? "profileDialogDuplicate" : "profileDialogNew");
+  profileDialogDescription.textContent = duplicate ? t("duplicateProfilePrompt") : rename ? t("renameProfilePrompt") : t("newProfilePrompt");
+  profileNameInput.value = rename ? config.profile_name : duplicate ? `${config.profile_name} 2` : "";
+  profileDialog.showModal();
+  profileNameInput.focus();
+  profileNameInput.select();
+}
+
+async function saveProfileDialog(): Promise<void> {
+  const name = profileNameInput.value.trim();
+  if (!name) {
+    profileNameInput.focus();
+    return;
+  }
   setProfileControlsDisabled(true);
+  profileDialogSaveBtn.disabled = true;
   try {
-    config = await invoke<BackupConfig>("create_profile", { name, copyCurrent });
-    applyLanguage(config.language);
-    applyTheme(config.theme);
-    updateDirectoriesList();
-    updateTargetPathDisplay();
-    updateVolumeSelect();
-    await loadProfiles();
-    await loadBackups();
-    log(`${t("profileCreated")} ${config.profile_name}`);
+    if (profileDialogMode === "rename") {
+      await invoke("rename_profile", { profileId: config.profile_id, name });
+      config.profile_name = name;
+      await loadProfiles();
+    } else {
+      config = await invoke<BackupConfig>("create_profile", { name, copyCurrent: profileDialogMode === "duplicate" });
+      applyLanguage(config.language);
+      applyTheme(config.theme);
+      updateDirectoriesList();
+      updateTargetPathDisplay();
+      updateVolumeSelect();
+      await loadProfiles();
+      await loadBackups();
+      log(`${t("profileCreated")} ${config.profile_name}`);
+    }
+    profileDialog.close();
   } catch (error) {
     log(`${t("saveError")} ${error}`);
   } finally {
+    profileDialogSaveBtn.disabled = false;
     setProfileControlsDisabled(false);
     await loadProfiles();
   }
 }
 
-profileNewBtn.addEventListener("click", () => { void addProfile(false); });
-profileDuplicateBtn.addEventListener("click", () => { void addProfile(true); });
-
-profileRenameBtn.addEventListener("click", async () => {
-  if (operationInProgress) return;
-  const name = window.prompt(t("renameProfilePrompt"), config.profile_name);
-  if (name === null) return;
-  try {
-    await invoke("rename_profile", { profileId: config.profile_id, name });
-    config.profile_name = name.trim();
-    await loadProfiles();
-  } catch (error) {
-    log(`${t("saveError")} ${error}`);
-  }
+profileNewBtn.addEventListener("click", () => openProfileDialog("new"));
+profileDuplicateBtn.addEventListener("click", () => openProfileDialog("duplicate"));
+profileRenameBtn.addEventListener("click", () => openProfileDialog("rename"));
+profileDialogCancelBtn.addEventListener("click", () => profileDialog.close());
+profileDialogSaveBtn.addEventListener("click", () => { void saveProfileDialog(); });
+profileNameInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") { event.preventDefault(); void saveProfileDialog(); }
 });
 
 profileDeleteBtn.addEventListener("click", async () => {

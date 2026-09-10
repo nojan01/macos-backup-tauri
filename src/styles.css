@@ -1016,6 +1016,22 @@ footer {
   overflow-y: auto;
 }
 
+.modal-small {
+  max-width: 420px;
+}
+
+#profile-name-input {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 6px;
+  padding: 9px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font: inherit;
+}
+
 /* Unknown totals must remain visible even when the overall value is still zero. */
 .progress-fill.indeterminate {
   transition: none;
