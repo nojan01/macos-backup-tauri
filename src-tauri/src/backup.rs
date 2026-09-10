@@ -592,13 +592,23 @@ fn publish(tmp: &Path, path: &Path) -> Result<(), String> {
         .and_then(|f| f.sync_all())
         .map_err(|e| fail(path, e))
 }
-pub(super) fn reuse_archive(source: &Path, target: &Path) -> Result<(), String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ArchiveReuse {
+    HardLink,
+    Copy,
+}
+
+pub(super) fn reuse_archive(source: &Path, target: &Path) -> Result<ArchiveReuse, String> {
     let stage = PrivateDir::new(target.parent().ok_or("Missing parent")?, ".reuse")?;
     let tmp = stage.0.join("archive");
-    if fs::hard_link(source, &tmp).is_err() {
+    let method = if fs::hard_link(source, &tmp).is_ok() {
+        ArchiveReuse::HardLink
+    } else {
         fs::copy(source, &tmp).map_err(|e| fail(target, e))?;
-    }
-    publish(&tmp, target)
+        ArchiveReuse::Copy
+    };
+    publish(&tmp, target)?;
+    Ok(method)
 }
 
 /// Only owns newly extracted files, never hardlinks to live sources or old backups.

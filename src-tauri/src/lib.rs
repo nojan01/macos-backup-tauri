@@ -194,6 +194,12 @@ pub struct BackupMetadata {
     pub start_time: String,
     pub end_time: String,
     pub duration_seconds: u64,
+    #[serde(default)]
+    pub incremental_stats_version: u8,
+    #[serde(default)]
+    pub new_archive_size_bytes: u64,
+    #[serde(default)]
+    pub reused_archive_size_bytes: u64,
 }
 
 /// Validate a parsed `BackupMetadata` to reject unsafe values that could
@@ -278,6 +284,9 @@ pub struct BackupListItem {
     pub timestamp: String,
     pub profile_id: String,
     pub profile_name: String,
+    pub incremental_stats_available: bool,
+    pub new_archive_size_bytes: u64,
+    pub reused_archive_size_bytes: u64,
     pub hash_verified: bool,
     pub metadata_valid: bool,
 }
@@ -313,6 +322,9 @@ pub struct BackupDetails {
     pub items: Vec<BackupFileInfo>,
     pub total_source_size_bytes: u64,
     pub total_archive_size_bytes: u64,
+    pub incremental_stats_available: bool,
+    pub new_archive_size_bytes: u64,
+    pub reused_archive_size_bytes: u64,
     pub start_time: String,
     pub end_time: String,
     pub duration_seconds: u64,
@@ -2095,6 +2107,7 @@ fn create_backup_impl(
 
     let mut extra_source_guards: Vec<(PathBuf, Vec<ManifestEntry>)> = Vec::new();
     let mut items = Vec::new();
+    let mut reused_archive_size_bytes = 0u64;
     let total = directories.len();
     trace(&format!(
         "main loop begin, incremental={} total={}",
@@ -2223,9 +2236,9 @@ fn create_backup_impl(
             trace(&format!("  reuse path: hardlink/copy from {}", prev_ts));
             // Archiv per Hardlink wiederverwenden (Fallback: fs::copy auf anderes Volume)
             let prev_archive_path = suite_root.join("data").join(&prev_ts).join(&archive_name);
-            let reused_ok = reuse_archive(&prev_archive_path, &archive_path).is_ok();
+            let reuse_method = reuse_archive(&prev_archive_path, &archive_path);
 
-            if reused_ok {
+            if let Ok(reuse_method) = reuse_method {
                 verify_archive_source(&archive_path, &name, &current_snapshot)?;
                 ensure_unchanged(&expanded, &current_snapshot)?;
                 let _ = window.emit(
@@ -2243,6 +2256,9 @@ fn create_backup_impl(
                     archive_size_bytes: prev_size,
                     source_size_bytes: source_size,
                 });
+                if reuse_method == ArchiveReuse::HardLink {
+                    reused_archive_size_bytes = reused_archive_size_bytes.saturating_add(prev_size);
+                }
                 if let Some(it) = items.last() {
                     append_resume_entry(&backup_root, it)?;
                 }
@@ -2511,6 +2527,7 @@ fn create_backup_impl(
     let duration = (end - start).num_seconds() as u64;
 
     let total_size: u64 = items.iter().map(|i| i.source_size_bytes).sum();
+    let total_archive_size_bytes: u64 = items.iter().map(|i| i.archive_size_bytes).sum();
 
     let metadata = BackupMetadata {
         profile_id: config.profile_id.clone(),
@@ -2522,6 +2539,9 @@ fn create_backup_impl(
         start_time: start_time_str.clone(),
         end_time: end_time_str.clone(),
         duration_seconds: duration,
+        incremental_stats_version: 1,
+        new_archive_size_bytes: total_archive_size_bytes.saturating_sub(reused_archive_size_bytes),
+        reused_archive_size_bytes,
     };
 
     finish_backup(&backup_root, &metadata, &extra_source_guards)?;
@@ -2969,6 +2989,9 @@ fn list_backup_files(
         items,
         total_source_size_bytes: metadata.total_source_size_bytes,
         total_archive_size_bytes,
+        incremental_stats_available: metadata.incremental_stats_version >= 1,
+        new_archive_size_bytes: metadata.new_archive_size_bytes,
+        reused_archive_size_bytes: metadata.reused_archive_size_bytes,
         start_time: metadata.start_time,
         end_time: metadata.end_time,
         duration_seconds: metadata.duration_seconds,
@@ -2984,13 +3007,22 @@ fn list_backups(target_path: String) -> Result<Vec<BackupListItem>, String> {
         for entry in entries.flatten() {
             if !entry.path().is_dir() { continue; }
             let Some(timestamp) = entry.file_name().to_str().map(str::to_string) else { continue; };
-            let metadata_valid = load_backup_metadata(&entry.path().join("metadata.json"))
-                .and_then(|metadata| validate_backup_profile(&metadata, &profile_id))
-                .is_ok();
+            let metadata = load_backup_metadata(&entry.path().join("metadata.json"))
+                .and_then(|metadata| {
+                    validate_backup_profile(&metadata, &profile_id)?;
+                    Ok(metadata)
+                });
+            let (metadata_valid, incremental_stats_available, new_archive_size_bytes, reused_archive_size_bytes) = match metadata {
+                Ok(metadata) => (true, metadata.incremental_stats_version >= 1, metadata.new_archive_size_bytes, metadata.reused_archive_size_bytes),
+                Err(_) => (false, false, 0, 0),
+            };
             backups.push(BackupListItem {
                 timestamp,
                 profile_id: profile_id.clone(),
                 profile_name: profile_name.clone(),
+                incremental_stats_available,
+                new_archive_size_bytes,
+                reused_archive_size_bytes,
                 hash_verified: false,
                 metadata_valid,
             });
@@ -4097,6 +4129,9 @@ mod profile_tests {
             start_time: String::new(),
             end_time: String::new(),
             duration_seconds: 0,
+            incremental_stats_version: 0,
+            new_archive_size_bytes: 0,
+            reused_archive_size_bytes: 0,
         };
         assert!(validate_backup_profile(&metadata, "profil-personal-123").is_ok());
         assert!(validate_backup_profile(&metadata, "profil-work-456").is_err());
@@ -4119,10 +4154,12 @@ mod profile_tests {
         let legacy_metadata = BackupMetadata {
             profile_id: String::new(), profile_name: String::new(), timestamp: "20260910-120000".into(), items: Vec::new(),
             hash_algorithm: "sha256".into(), total_source_size_bytes: 0, start_time: String::new(), end_time: String::new(), duration_seconds: 0,
+            incremental_stats_version: 0, new_archive_size_bytes: 0, reused_archive_size_bytes: 0,
         };
         let work_metadata = BackupMetadata {
             profile_id: work.profile_id.clone(), profile_name: work.profile_name.clone(), timestamp: "20260910-130000".into(), items: Vec::new(),
             hash_algorithm: "sha256".into(), total_source_size_bytes: 0, start_time: String::new(), end_time: String::new(), duration_seconds: 0,
+            incremental_stats_version: 0, new_archive_size_bytes: 0, reused_archive_size_bytes: 0,
         };
         fs::write(standard_backup.join("metadata.json"), serde_json::to_vec(&legacy_metadata).unwrap()).unwrap();
         fs::write(work_backup.join("metadata.json"), serde_json::to_vec(&work_metadata).unwrap()).unwrap();

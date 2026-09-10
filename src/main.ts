@@ -43,6 +43,9 @@ interface BackupItem {
   timestamp: string;
   profile_id: string;
   profile_name: string;
+  incremental_stats_available: boolean;
+  new_archive_size_bytes: number;
+  reused_archive_size_bytes: number;
   hash_verified: boolean;
   metadata_valid: boolean;
 }
@@ -59,6 +62,9 @@ interface BackupDetails {
   items: BackupFileInfo[];
   total_source_size_bytes: number;
   total_archive_size_bytes: number;
+  incremental_stats_available: boolean;
+  new_archive_size_bytes: number;
+  reused_archive_size_bytes: number;
   start_time: string;
   end_time: string;
   duration_seconds: number;
@@ -133,6 +139,8 @@ const translations: Record<string, Record<string, string>> = {
     profileDialogNew: "Neues Backup-Profil",
     profileDialogDuplicate: "Backup-Profil duplizieren",
     profileDialogRename: "Backup-Profil umbenennen",
+    backupDeltaNew: "neu",
+    backupDeltaReused: "übernommen",
     softwareInventory: "Software-Inventar",
     backupHomebrew: "Homebrew-Paketliste sichern (Homebrew erforderlich)",
     backupMas: "App-Store-Liste sichern (mas erforderlich)",
@@ -388,6 +396,8 @@ const translations: Record<string, Record<string, string>> = {
     profileDialogNew: "New backup profile",
     profileDialogDuplicate: "Duplicate backup profile",
     profileDialogRename: "Rename backup profile",
+    backupDeltaNew: "new",
+    backupDeltaReused: "reused",
     softwareInventory: "Software inventory",
     backupHomebrew: "Back up Homebrew package list (requires Homebrew)",
     backupMas: "Back up App Store list (requires mas)",
@@ -1288,7 +1298,10 @@ async function loadBackups(): Promise<void> {
       option.dataset.profileId = backup.profile_id;
       const verified = backup.metadata_valid ? t("backupNotVerified") : t("backupInvalid");
       const formatted = formatTimestamp(backup.timestamp);
-      option.textContent = `[${backup.profile_name}] ${formatted} [${verified}]`;
+      const delta = backup.incremental_stats_available
+        ? ` · +${formatBytesShort(backup.new_archive_size_bytes)} ${t("backupDeltaNew")} · ${formatBytesShort(backup.reused_archive_size_bytes)} ${t("backupDeltaReused")}`
+        : "";
+      option.textContent = `[${backup.profile_name}] ${formatted}${delta} [${verified}]`;
       option.dataset.label = formatted;
       backupSelect.appendChild(option);
     }
@@ -2174,6 +2187,9 @@ showFilesBtn.addEventListener("click", async () => {
       items: BackupFileInfo[];
       total_source_size_bytes: number;
       total_archive_size_bytes: number;
+      incremental_stats_available: boolean;
+      new_archive_size_bytes: number;
+      reused_archive_size_bytes: number;
       start_time: string;
       end_time: string;
       duration_seconds: number;
@@ -2202,6 +2218,9 @@ showFilesBtn.addEventListener("click", async () => {
     log(`   ${t("filesDuration")}: ${details.duration_seconds} ${t("filesSeconds")}`);
     log("");
     log(`📊 ${details.items.length} ${t("filesItems")} | ${t("filesTotalOriginal")}: ${formatBytes(details.total_source_size_bytes)} | ${t("filesTotalArchive")}: ${formatBytes(details.total_archive_size_bytes)}`);
+    if (details.incremental_stats_available) {
+      log(`   ↳ +${formatBytes(details.new_archive_size_bytes)} ${t("backupDeltaNew")} · ${formatBytes(details.reused_archive_size_bytes)} ${t("backupDeltaReused")}`);
+    }
     log("");
     
     for (const item of details.items) {

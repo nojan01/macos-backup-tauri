@@ -185,7 +185,7 @@ fn failed_publication_keeps_old_archive_and_hardlink_reuse_does_not_truncate_it(
     assert_eq!(fs::read(&old).unwrap(), b"previous");
     let newer = d.0.join("newer");
     fs::write(&newer, b"new").unwrap();
-    reuse_archive(&newer, &target).unwrap();
+    assert_eq!(reuse_archive(&newer, &target).unwrap(), ArchiveReuse::HardLink);
     assert_eq!(fs::read(&old).unwrap(), b"previous");
     assert_eq!(fs::read(&target).unwrap(), b"new");
 }
@@ -234,6 +234,9 @@ fn completed_fixture(d: &PrivateDir) -> (PathBuf, PathBuf, BackupMetadata, Vec<M
         start_time: "".into(),
         end_time: "".into(),
         duration_seconds: 0,
+        incremental_stats_version: 0,
+        new_archive_size_bytes: 0,
+        reused_archive_size_bytes: 0,
     };
     let expected = compute_snapshot(&source).unwrap();
     (source, backup, metadata, expected)
@@ -796,6 +799,9 @@ fn actual_source_backup_finalize_and_test_restore() {
         start_time: String::new(),
         end_time: String::new(),
         duration_seconds: 0,
+        incremental_stats_version: 0,
+        new_archive_size_bytes: 0,
+        reused_archive_size_bytes: 0,
     };
     finish_backup(&backup, &meta, &[(source.clone(), expected.clone())]).unwrap();
     let destination = d.0.join("restore");
@@ -1317,6 +1323,9 @@ fn actual_frozen_source_backup_finalize_and_test_restore() {
         start_time: String::new(),
         end_time: String::new(),
         duration_seconds: 0,
+        incremental_stats_version: 0,
+        new_archive_size_bytes: 0,
+        reused_archive_size_bytes: 0,
     };
     finish_backup(&backup, &meta, &[(stable.clone(), expected.clone())]).unwrap();
     let destination = d.0.join("restore");
@@ -1580,6 +1589,9 @@ fn remaining_frozen_sources_backup_and_restore() {
         start_time: String::new(),
         end_time: String::new(),
         duration_seconds: 0,
+        incremental_stats_version: 0,
+        new_archive_size_bytes: 0,
+        reused_archive_size_bytes: 0,
     };
     finish_backup(&backup, &meta, &guards).unwrap();
     let output = d.0.join("restore");

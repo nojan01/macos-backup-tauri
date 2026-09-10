@@ -33,6 +33,9 @@ impl Fixture {
             start_time: "".into(),
             end_time: "".into(),
             duration_seconds: 0,
+            incremental_stats_version: 0,
+            new_archive_size_bytes: 0,
+            reused_archive_size_bytes: 0,
         };
         fs::write(
             self.backup.join("metadata.json"),
