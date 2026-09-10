@@ -314,6 +314,14 @@ impl FrozenSources {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_source_discovery_allows_no_existing_paths() {
+        let temp = PrivateDir::temp().unwrap();
+        let missing = temp.0.join("missing-homebrew-cache");
+        assert!(existing(vec![missing]).unwrap().is_empty());
+    }
+
     #[test]
     fn nested_volume_checks_account_for_data_firmlinks_and_component_boundaries() {
         assert!(nested_mount(

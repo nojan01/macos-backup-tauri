@@ -2359,7 +2359,9 @@ fn create_backup_impl(
         }
     }
 
-    // Optional: complete Homebrew cache; selected sources must never be silently skipped.
+    // The complete Homebrew cache is optional. Homebrew removes its cache when it
+    // is cleaned, so an enabled option without a local cache must not invalidate
+    // the rest of a backup.
     trace(&format!(
         "config: brew_cache={} safari={}",
         config.backup_homebrew_cache, config.backup_safari_settings
@@ -2420,7 +2422,10 @@ fn create_backup_impl(
                 }
             }
         } else {
-            return Err("Homebrew-Cache ausgewählt, aber kein Cache gefunden".into());
+            let _ = window.emit(
+                "backup-log",
+                "⚠️ Kein lokaler Homebrew-Cache gefunden – übersprungen; Option bleibt für künftige Backups aktiv.",
+            );
         }
     }
 

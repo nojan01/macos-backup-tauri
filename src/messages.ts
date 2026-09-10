@@ -55,6 +55,7 @@ export const messagePairs: [string,string][] = [
   ['Homebrew-Cache prüfen...','Checking Homebrew cache...'],
   ['Homebrew-Cache archivieren ({0} MB)...','Archiving Homebrew cache ({0} MB)...'],
   ['✅ Homebrew-Cache archiviert: {0} MB','✅ Homebrew cache archived: {0} MB'],
+  ['⚠️ Kein lokaler Homebrew-Cache gefunden – übersprungen; Option bleibt für künftige Backups aktiv.','⚠️ No local Homebrew cache found – skipped; the option remains enabled for future backups.'],
   ['Safari-Einstellungen sichern...','Backing up Safari settings...'],
   ['✅ Safari-Einstellungen archiviert: {0} Dateien/Ordner','✅ Safari settings archived: {0} files/folders'],
   ['=== Backup gestartet: {0} ===','=== Backup started: {0} ==='],
