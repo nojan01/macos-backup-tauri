@@ -2087,7 +2087,7 @@ dependencies = [
 
 [[package]]
 name = "macos-backup-suite"
-version = "1.2.42"
+version = "1.2.43"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
