@@ -15,8 +15,10 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::ffi::CString;
 use std::fs;
 use std::io::Read;
+use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -1661,13 +1663,50 @@ fn discard_resumable_backup(
                 "Backup ist bereits abgeschlossen und kann nicht verworfen werden".to_string(),
             );
         }
-        fs::remove_dir_all(&data_dir).map_err(|e| format!("Daten-Ordner: {}", e))?;
+        remove_protected_tree(&data_dir).map_err(|e| format!("Daten-Ordner: {e}"))?;
     }
     let inv_dir = suite_root.join("inventories").join(&timestamp);
     if inv_dir.exists() {
-        let _ = fs::remove_dir_all(&inv_dir);
+        let _ = remove_protected_tree(&inv_dir);
     }
     Ok(())
+}
+
+/// Delete a private backup tree even when an interrupted archive/readback left
+/// ACLs or user-set immutable flags behind. The caller has already validated
+/// the timestamp and confines this to a suite-owned backup directory.
+fn remove_protected_tree(path: &Path) -> Result<(), String> {
+    if fs::remove_dir_all(path).is_ok() || !path.exists() {
+        return Ok(());
+    }
+    unsafe extern "C" {
+        fn lchflags(path: *const libc::c_char, flags: libc::c_uint) -> libc::c_int;
+        fn acl_init(count: libc::c_int) -> *mut libc::c_void;
+        fn acl_set_link_np(path: *const libc::c_char, kind: libc::c_int, acl: *mut libc::c_void) -> libc::c_int;
+        fn acl_free(obj: *mut libc::c_void) -> libc::c_int;
+    }
+    for entry in WalkDir::new(path)
+        .follow_links(false)
+        .follow_root_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        let entry_path = entry.path();
+        let name = CString::new(entry_path.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
+        unsafe {
+            lchflags(name.as_ptr(), 0);
+            let acl = acl_init(0);
+            if !acl.is_null() {
+                acl_set_link_np(name.as_ptr(), 0x100, acl);
+                acl_free(acl);
+            }
+        }
+        if !entry.file_type().is_symlink() {
+            fs::set_permissions(entry_path, fs::Permissions::from_mode(0o700))
+                .map_err(|e| format!("{}: {e}", entry_path.display()))?;
+        }
+    }
+    fs::remove_dir_all(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// Liefert Timestamp + Metadata des jeweils letzten Backups oder None.
@@ -3490,18 +3529,20 @@ fn delete_backup(target_path: String, timestamp: String, profile_id: String) -> 
     if !backup_path.exists() {
         return Err(format!("Backup {} not found", timestamp));
     }
-    validate_backup_profile(
-        &load_backup_metadata(&backup_path.join("metadata.json"))?,
-        &profile_id,
-    )?;
+    // Entries without valid metadata are interrupted backups. They appear in
+    // the list so they can be cleaned up; a missing metadata file must not
+    // prevent deletion of their partial archives.
+    if let Ok(metadata) = load_backup_metadata(&backup_path.join("metadata.json")) {
+        validate_backup_profile(&metadata, &profile_id)?;
+    }
 
     // Remove the backup data directory recursively
-    fs::remove_dir_all(&backup_path).map_err(|e| format!("Error deleting (data): {}", e))?;
+    remove_protected_tree(&backup_path).map_err(|e| format!("Error deleting (data): {e}"))?;
 
     // Also remove the inventories directory for this timestamp
     let inventories_path = suite_root.join("inventories").join(&timestamp);
     if inventories_path.exists() {
-        let _ = fs::remove_dir_all(&inventories_path);
+        let _ = remove_protected_tree(&inventories_path);
     }
 
     // Update latest.json if we deleted the latest backup
@@ -4173,5 +4214,29 @@ mod profile_tests {
         assert_eq!(listed.len(), 2);
         assert!(listed.iter().any(|item| item.profile_id == "standard" && item.profile_name == "Standard"));
         assert!(listed.iter().any(|item| item.profile_id == work.profile_id && item.profile_name == "Work"));
+    }
+
+    #[test]
+    fn incomplete_protected_backup_can_be_deleted() {
+        let target = PrivateDir::temp().unwrap();
+        let timestamp = "20260911-140405";
+        let backup = target
+            .0
+            .join("macos-backup-suite/data")
+            .join(timestamp);
+        fs::create_dir_all(backup.join("nested")).unwrap();
+        fs::write(backup.join("nested/archive"), b"partial").unwrap();
+        let acl = Command::new("/bin/chmod")
+            .args(["+a", "group:everyone deny delete"])
+            .arg(&backup)
+            .output()
+            .unwrap();
+        assert!(acl.status.success());
+        let name = CString::new(backup.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::chflags(name.as_ptr(), libc::UF_IMMUTABLE) }, 0);
+
+        delete_backup(target.0.to_string_lossy().into(), timestamp.into(), "standard".into())
+            .unwrap();
+        assert!(!backup.exists());
     }
 }
