@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "macOS Backup Suite",
-  "version": "1.2.40",
+  "version": "1.2.42",
   "identifier": "com.nojan.macos-backup-suite",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -30,6 +30,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": [
       "dmg",
       "app"
@@ -53,6 +54,14 @@
       "entitlements": null,
       "signingIdentity": "Developer ID Application: Norbert Jander (TXF2V79Z6N)",
       "hardenedRuntime": true
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM5MUZERTYzOTZCOTM5RjkKUldUNU9ibVdZOTRmeVN6T0FYOGV1V1Nvamp3S2tuUGtva010UTNqRnU5V3pUN0o0OVp2RjZmdmsK",
+      "endpoints": [
+        "https://github.com/nojan01/macos-backup-tauri/releases/latest/download/latest.json"
+      ]
     }
   }
 }

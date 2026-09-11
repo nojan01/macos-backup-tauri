@@ -246,6 +246,26 @@ npm run tauri build
 ./embed-dmg.sh
 ```
 
+### Signierte App-Updates
+
+Die App prüft beim Start still auf Updates; über den Button ⬇️ kann die Prüfung
+auch manuell ausgelöst werden. Ein Update wird nur installiert, wenn das
+Updater-Archiv mit dem projektspezifischen Tauri-Schlüssel signiert ist.
+
+Bei einem Release muss zusätzlich zur DMG das von Tauri erzeugte Archiv samt
+`.sig` sowie `latest.json` hochgeladen werden:
+
+```bash
+export TAURI_SIGNING_PRIVATE_KEY="$HOME/.tauri/macos-backup-suite-updater.key"
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+npm run tauri build
+npm run make-updater-manifest -- <version> darwin-aarch64 "src-tauri/target/release/bundle/macos/macOS Backup Suite.app.tar.gz"
+```
+
+`latest.json`, `macOS Backup Suite.app.tar.gz` und dessen `.sig` gehören als
+Assets in dasselbe GitHub-Release wie die DMG. Der private Schlüssel bleibt
+lokal und wird niemals veröffentlicht.
+
 ### Projektstruktur
 ```
 macos-backup-tauri/

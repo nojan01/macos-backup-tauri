@@ -2,6 +2,7 @@ import { localizeMessage } from "./messages";
 import { ProgressIndicator } from "./progress-ui";
 import { renderCancelControl } from "./cancel-ui";
 import { browserRestoreGroup, createRestoreRow, restoreStatusKey } from "./restore-ui";
+import { checkForUpdates } from "./updater";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -162,6 +163,19 @@ const translations: Record<string, Record<string, string>> = {
     footer: "Sichere Datensicherung für deinen Mac",
     changeLanguage: "Sprache wechseln",
     changeTheme: "Design wechseln",
+    checkForUpdates: "Nach Updates suchen",
+    updateTitle: "Software-Aktualisierung",
+    updateUpToDate: "macOS Backup Suite {0} ist aktuell.",
+    updateAvailable: "Version {0} ist verfügbar. Installiert ist {1}.\n\nJetzt laden und installieren?",
+    updateInstall: "Laden und installieren",
+    updateLater: "Später",
+    updatePreparing: "macOS Backup Suite – Update wird vorbereitet …",
+    updateDownloading: "macOS Backup Suite – Update wird geladen … {0} %",
+    updateInstalling: "macOS Backup Suite – Update wird installiert …",
+    updateDone: "Version {0} wurde installiert. macOS Backup Suite startet jetzt neu.",
+    updateRestart: "Neu starten",
+    updateFailed: "Update-Prüfung fehlgeschlagen.",
+    updateBusy: "Updates können erst installiert werden, wenn kein Backup, keine Prüfung und keine Wiederherstellung läuft.",
     refreshVolumes: "Volumes aktualisieren",
     chooseDirectory: "Verzeichnis auswählen",
     quickRestoreHint: "Installiert zuerst essentielle Pakete (git, vim, python, node, VS Code, iTerm2 usw.)",
@@ -421,6 +435,19 @@ const translations: Record<string, Record<string, string>> = {
     footer: "Secure backups for your Mac",
     changeLanguage: "Change language",
     changeTheme: "Change theme",
+    checkForUpdates: "Check for updates",
+    updateTitle: "Software Update",
+    updateUpToDate: "macOS Backup Suite {0} is up to date.",
+    updateAvailable: "Version {0} is available. You have {1}.\n\nDownload and install now?",
+    updateInstall: "Download and install",
+    updateLater: "Later",
+    updatePreparing: "macOS Backup Suite – Preparing update …",
+    updateDownloading: "macOS Backup Suite – Downloading update … {0} %",
+    updateInstalling: "macOS Backup Suite – Installing update …",
+    updateDone: "Version {0} has been installed. macOS Backup Suite will now restart.",
+    updateRestart: "Restart",
+    updateFailed: "Update check failed.",
+    updateBusy: "Updates can only be installed when no backup, check or restore is running.",
     refreshVolumes: "Refresh volumes",
     chooseDirectory: "Choose directory",
     quickRestoreHint: "Installs essential packages first (git, vim, python, node, VS Code, iTerm2, etc.)",
@@ -696,6 +723,7 @@ const saveLogBtn = document.getElementById("save-log") as HTMLButtonElement;
 const clearLogBtn = document.getElementById("clear-log") as HTMLButtonElement;
 const statusEl = document.getElementById("status") as HTMLParagraphElement;
 const btnSettings = document.getElementById("btn-settings") as HTMLButtonElement;
+const btnUpdate = document.getElementById("btn-update") as HTMLButtonElement;
 const btnLanguage = document.getElementById("btn-language") as HTMLButtonElement;
 const btnTheme = document.getElementById("btn-theme") as HTMLButtonElement;
 const profileSelect = document.getElementById("profile-select") as HTMLSelectElement;
@@ -2862,6 +2890,9 @@ if (userFolderCloseBtn) {
 // Theme and language buttons
 btnTheme.addEventListener("click", cycleTheme);
 btnLanguage.addEventListener("click", toggleLanguage);
+btnUpdate.addEventListener("click", () => {
+  void checkForUpdates({ interactive: true, isBusy: () => operationInProgress, log, t: tf });
+});
 
 // Initialize
 async function init(): Promise<void> {
@@ -2934,6 +2965,12 @@ async function init(): Promise<void> {
   } catch (e) {
     // mas check failed silently
   }
+
+  // The automatic check never opens a dialog when the current release is
+  // installed and cannot delay the app start or a newly started backup.
+  window.setTimeout(() => {
+    void checkForUpdates({ isBusy: () => operationInProgress, log, t: tf });
+  }, 3000);
 }
 
 init();
