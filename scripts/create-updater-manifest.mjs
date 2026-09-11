@@ -24,7 +24,10 @@ if (!signature) {
   process.exit(1);
 }
 
-const assetName = basename(artifactPath);
+// GitHub normalisiert beim Upload alle Zeichen außerhalb dieses Zeichensatzes
+// zu Punkten. Die Release-URL muss deshalb den tatsächlichen Asset-Namen
+// verwenden, nicht den ursprünglichen Dateinamen mit Leerzeichen.
+const assetName = basename(artifactPath).replace(/[^A-Za-z0-9._-]/g, ".");
 const manifest = {
   version,
   notes: `macOS Backup Suite ${version}`,

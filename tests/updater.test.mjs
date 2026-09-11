@@ -23,6 +23,7 @@ test("the updater uses a signed archive published with the GitHub release", () =
 test("the release manifest contains the archive signature and its versioned GitHub URL", () => {
   const source = read("scripts/create-updater-manifest.mjs");
   assert.match(source, /signaturePath/);
+  assert.match(source, /replace\(\/\[\^A-Za-z0-9\._-\]\//);
   assert.match(source, /releases\/download\/v\$\{version\}/);
   assert.match(source, /platforms/);
 });
