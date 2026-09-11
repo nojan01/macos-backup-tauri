@@ -5,7 +5,7 @@ import ts from 'typescript';
 
 const source = fs.readFileSync(new URL('../src/restore-ui.ts', import.meta.url), 'utf8');
 const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 } });
-const { createRestoreRow, restoreStatusKey } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`);
+const { browserRestoreGroup, createRestoreRow, restoreStatusKey } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`);
 
 test('backup paths remain literal checkbox values and text, never HTML', () => {
   // A DOM sink spy throws if rendering attempts to parse HTML. The browser's
@@ -23,6 +23,13 @@ test('partial and total failures never select the success message', () => {
   assert.equal(restoreStatusKey({ error_count: 2, restored_count: 0 }), 'restoreWithErrors');
   assert.equal(restoreStatusKey({ error_count: 0, restored_count: 0 }), 'restoreNothingChanged');
   assert.equal(restoreStatusKey({ error_count: 0, restored_count: 2 }), 'restoreComplete');
+});
+
+test('browser setting archives are grouped for clear restore selection', () => {
+  assert.equal(browserRestoreGroup('~/Library/Application Support/Google/Chrome/Default/Preferences'), 'chrome');
+  assert.equal(browserRestoreGroup('~/Library/Application Support/Firefox/Profiles/default/prefs.js'), 'firefox');
+  assert.equal(browserRestoreGroup('~/Library/Safari/Bookmarks.plist'), null);
+  assert.equal(browserRestoreGroup('~/Documents/Google/Chrome/notes.txt'), null);
 });
 
 

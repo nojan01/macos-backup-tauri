@@ -22,6 +22,20 @@ export function createRestoreRow(path: string, icon: string, size: string, doc: 
   return row;
 }
 
+export type BrowserRestoreGroup = "chrome" | "firefox";
+
+/**
+ * Browser settings are stored as individual, verified archives. Group them in
+ * the restore UI so users can select a browser as one meaningful choice while
+ * retaining the precise archive paths internally.
+ */
+export function browserRestoreGroup(path: string): BrowserRestoreGroup | null {
+  const relative = path.startsWith("~/") ? path.slice(2) : path;
+  if (relative.startsWith("Library/Application Support/Google/Chrome/")) return "chrome";
+  if (relative.startsWith("Library/Application Support/Firefox/")) return "firefox";
+  return null;
+}
+
 export function restoreStatusKey(result: { error_count: number; restored_count: number }): "restoreWithErrors" | "restoreNothingChanged" | "restoreComplete" {
   if (result.error_count > 0) return "restoreWithErrors";
   return result.restored_count > 0 ? "restoreComplete" : "restoreNothingChanged";

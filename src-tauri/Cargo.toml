@@ -1,6 +1,6 @@
 [package]
 name = "macos-backup-suite"
-version = "1.2.39"
+version = "1.2.40"
 description = "macOS Backup Suite - Inventar, Backup und Restore für macOS"
 authors = ["Nojan"]
 license = "MIT"

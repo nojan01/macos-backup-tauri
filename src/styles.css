@@ -777,6 +777,29 @@ footer {
   background: var(--bg-secondary);
 }
 
+.restore-browser-group {
+  display: flex;
+  align-items: center;
+  padding: 10px 12px;
+  margin: 8px 0 4px;
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.restore-browser-group input[type="checkbox"] {
+  margin-right: 12px;
+  width: 18px;
+  height: 18px;
+}
+
+.restore-browser-grouped-item {
+  margin-left: 20px;
+  padding-left: 8px;
+}
+
 .restore-item input[type="checkbox"] {
   margin-right: 12px;
   width: 18px;

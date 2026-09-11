@@ -1,7 +1,7 @@
 import { localizeMessage } from "./messages";
 import { ProgressIndicator } from "./progress-ui";
 import { renderCancelControl } from "./cancel-ui";
-import { createRestoreRow, restoreStatusKey } from "./restore-ui";
+import { browserRestoreGroup, createRestoreRow, restoreStatusKey } from "./restore-ui";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -157,6 +157,8 @@ const translations: Record<string, Record<string, string>> = {
     chromeSettingsHint: "Einstellungen, Lesezeichen und Erweiterungen aller lokalen Profile",
     backupFirefoxSettings: "Firefox-Profile sichern",
     firefoxSettingsHint: "Einstellungen, Lesezeichen und Erweiterungen aller lokalen Profile",
+    restoreChromeSettings: "Google Chrome-Einstellungen",
+    restoreFirefoxSettings: "Firefox-Einstellungen",
     footer: "Sichere Datensicherung für deinen Mac",
     changeLanguage: "Sprache wechseln",
     changeTheme: "Design wechseln",
@@ -414,6 +416,8 @@ const translations: Record<string, Record<string, string>> = {
     chromeSettingsHint: "Settings, bookmarks and extensions from all local profiles",
     backupFirefoxSettings: "Back up Firefox profiles",
     firefoxSettingsHint: "Settings, bookmarks and extensions from all local profiles",
+    restoreChromeSettings: "Google Chrome settings",
+    restoreFirefoxSettings: "Firefox settings",
     footer: "Secure backups for your Mac",
     changeLanguage: "Change language",
     changeTheme: "Change theme",
@@ -1890,14 +1894,76 @@ function showRestoreModal(details: BackupDetails): void {
   restoreCancel.textContent = t("cancelRestore");
   restoreStart.textContent = `🔄 ${t("startRestore")}`;
   
-  restoreItemsList.innerHTML = "";
-  for (const item of details.items) {
-    const icon = getRestoreItemIcon(item.path);
-    const size = formatRestoreBytes(item.source_size_bytes);
-    restoreItemsList.appendChild(createRestoreRow(item.path, icon, size));
-  }
+  renderRestoreItems(details.items);
   restoreOverwrite.checked = false;
   restoreModal.style.display = "flex";
+}
+
+function syncRestoreBrowserGroups(): void {
+  restoreItemsList.querySelectorAll<HTMLInputElement>(".restore-browser-group-checkbox").forEach(group => {
+    const groupId = group.dataset.restoreGroup;
+    const items = groupId
+      ? Array.from(restoreItemsList.querySelectorAll<HTMLInputElement>(`.restore-checkbox[data-restore-group="${groupId}"]`))
+      : [];
+    const selected = items.filter(item => item.checked).length;
+    group.checked = items.length > 0 && selected === items.length;
+    group.indeterminate = selected > 0 && selected < items.length;
+  });
+}
+
+function appendRestoreBrowserGroup(group: "chrome" | "firefox", items: BackupFileInfo[]): void {
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.className = "restore-browser-group-checkbox";
+  checkbox.dataset.restoreGroup = group;
+  checkbox.checked = true;
+
+  const label = document.createElement("label");
+  label.className = "restore-browser-group";
+  label.append(checkbox);
+  const icon = document.createElement("span");
+  icon.className = "restore-item-icon";
+  icon.textContent = group === "chrome" ? "🌐" : "🦊";
+  const text = document.createElement("span");
+  const title = group === "chrome" ? t("restoreChromeSettings") : t("restoreFirefoxSettings");
+  const bytes = items.reduce((sum, item) => sum + item.source_size_bytes, 0);
+  text.textContent = `${title} · ${items.length} ${t("items")} · ${formatRestoreBytes(bytes)}`;
+  label.append(icon, text);
+  restoreItemsList.appendChild(label);
+
+  checkbox.addEventListener("change", () => {
+    restoreItemsList.querySelectorAll<HTMLInputElement>(`.restore-checkbox[data-restore-group="${group}"]`)
+      .forEach(item => item.checked = checkbox.checked);
+    syncRestoreBrowserGroups();
+  });
+
+  for (const item of items) {
+    const row = createRestoreRow(item.path, getRestoreItemIcon(item.path), formatRestoreBytes(item.source_size_bytes));
+    row.classList.add("restore-browser-grouped-item");
+    const itemCheckbox = row.querySelector<HTMLInputElement>(".restore-checkbox")!;
+    itemCheckbox.dataset.restoreGroup = group;
+    itemCheckbox.addEventListener("change", syncRestoreBrowserGroups);
+    restoreItemsList.appendChild(row);
+  }
+}
+
+function renderRestoreItems(items: BackupFileInfo[]): void {
+  restoreItemsList.innerHTML = "";
+  const grouped = new Map<"chrome" | "firefox", BackupFileInfo[]>();
+  const otherItems: BackupFileInfo[] = [];
+  for (const item of items) {
+    const group = browserRestoreGroup(item.path);
+    if (group) grouped.set(group, [...(grouped.get(group) ?? []), item]);
+    else otherItems.push(item);
+  }
+  for (const group of ["chrome", "firefox"] as const) {
+    const groupItems = grouped.get(group);
+    if (groupItems?.length) appendRestoreBrowserGroup(group, groupItems);
+  }
+  for (const item of otherItems) {
+    restoreItemsList.appendChild(createRestoreRow(item.path, getRestoreItemIcon(item.path), formatRestoreBytes(item.source_size_bytes)));
+  }
+  syncRestoreBrowserGroups();
 }
 
 function getRestoreItemIcon(path: string): string {
@@ -1926,10 +1992,12 @@ function formatRestoreBytes(bytes: number): string {
 
 restoreSelectAll.addEventListener("click", () => {
   restoreItemsList.querySelectorAll<HTMLInputElement>(".restore-checkbox").forEach(cb => cb.checked = true);
+  syncRestoreBrowserGroups();
 });
 
 restoreDeselectAll.addEventListener("click", () => {
   restoreItemsList.querySelectorAll<HTMLInputElement>(".restore-checkbox").forEach(cb => cb.checked = false);
+  syncRestoreBrowserGroups();
 });
 
 restoreCancel.addEventListener("click", () => {
