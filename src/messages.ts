@@ -63,7 +63,7 @@ export const messagePairs: [string,string][] = [
   ['Backup abgeschlossen.','Backup completed.'],
   ['⚠️ Backup abgebrochen!','⚠️ Backup cancelled!'],
   ['Nicht genug Speicherplatz','Insufficient disk space'],
-  ['Speicherplatzprüfung: {0} GB frei, ~{1} GB neu/geändert (benötigt ≥ {2} GB mit Reserve)','Free space check: {0} GB free, ~{1} GB new/changed (need ≥ {2} GB with margin)'],
+  ['Speicherplatzprüfung: {0} GB frei, ~{1} GB neu/geändert (benötigt ≥ {2} GB mit begrenzter Reserve)','Free space check: {0} GB free, ~{1} GB new/changed (need ≥ {2} GB with bounded reserve)'],
   ['Keine Dateien im Backup zum Verifizieren.','No files in the backup to verify.'],
   ['Verifiziere {0}/{1}: {2}','Verifying {0}/{1}: {2}'],
   ['{0}/{1} Dateien verifiziert','{0}/{1} files verified'],

@@ -32,6 +32,30 @@ static BACKUP_CANCELLED: AtomicBool = AtomicBool::new(false);
 static VERIFY_CANCELLED: AtomicBool = AtomicBool::new(false);
 static TAR_PID: AtomicU32 = AtomicU32::new(0);
 
+// Archive contents are written once to the target. Readback verifies file data
+// as a stream and materializes at most metadata probes elsewhere, so a
+// percentage-based reserve would grow into tens of GiB for VM images without
+// protecting another large on-target allocation.
+const TARGET_CAPACITY_RESERVE: u64 = 8 * 1024 * 1024 * 1024;
+
+fn required_target_capacity(estimated_new_bytes: u64) -> u64 {
+    estimated_new_bytes.saturating_add(TARGET_CAPACITY_RESERVE)
+}
+
+#[cfg(test)]
+mod target_capacity_tests {
+    use super::*;
+
+    #[test]
+    fn capacity_reserve_is_bounded_for_large_sources() {
+        let source = 550 * 1024 * 1024 * 1024;
+        assert_eq!(
+            required_target_capacity(source),
+            source + TARGET_CAPACITY_RESERVE
+        );
+    }
+}
+
 /// Cached zstd path - computed once at first use
 static ZSTD_PATH: OnceLock<Option<String>> = OnceLock::new();
 
@@ -1975,9 +1999,10 @@ fn create_backup_impl(
     let inventory_root = suite_root.join("inventories").join(&timestamp);
 
     // --- Pre-flight: disk space check ---
-    // Estimate total source size and compare against free space on the target
-    // volume (with 10% safety margin). Compression usually reduces the on-disk
-    // footprint significantly, so this is a conservative upper bound.
+    // Estimate new source content and compare it with the target capacity. The
+    // source-size estimate is already conservative because compression may
+    // reduce the archive. Keep a bounded reserve for tar headers, xattrs and
+    // publication instead of multiplying a large VM image by a percentage.
     let _ = window.emit(
         "backup-progress",
         serde_json::json!({ "progress": 1, "message": "Scanne Quellverzeichnisse..." }),
@@ -2088,17 +2113,18 @@ fn create_backup_impl(
         // File contents are verified as a stream; only bounded metadata probes use temporary space.
         let estimated_gb = (estimated_new_bytes as f64) / (1024.0 * 1024.0 * 1024.0);
         backup::readback_space_preflight()?;
-        let required_gb = estimated_new_bytes as f64 * 1.1 / (1024.0 * 1024.0 * 1024.0);
+        let required_bytes = required_target_capacity(estimated_new_bytes);
+        let required_gb = required_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
         let _ = window.emit(
             "backup-log",
             format!(
-                "Free space check: {:.2} GB free, ~{:.2} GB new/changed (need ≥ {:.2} GB with margin)",
+                "Free space check: {:.2} GB free, ~{:.2} GB new/changed (need ≥ {:.2} GB with bounded reserve)",
                 free_gb, estimated_gb, required_gb
             ),
         );
-        if free_gb < required_gb {
+        if ((free_gb * 1024.0 * 1024.0 * 1024.0) as u64) < required_bytes {
             let msg = format!(
-                "Insufficient free space on target: {:.2} GB free, ~{:.2} GB required (new/changed {:.2} GB plus readback and reserve). Aborting.",
+                "Insufficient free space on target: {:.2} GB free, ~{:.2} GB required (new/changed {:.2} GB plus bounded reserve). Aborting.",
                 free_gb, required_gb, estimated_gb
             );
             let _ = window.emit("backup-log", format!("❌ {}", msg));

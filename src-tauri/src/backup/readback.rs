@@ -107,25 +107,21 @@ pub(super) fn verify_contents_and_metadata(
             "Archiveinträge stimmen nicht mit dem Quellmanifest überein; fehlend: {missing:?}; zusätzlich: {extra:?}"
         )));
     }
-    // The PAX metadata probe needs to replay a second tar stream. Real-world
-    // macOS archives can contain PAX records that the streaming reader cannot
-    // safely skip a second time. Integrity takes precedence over temporary
-    // space: extract the original, already structure-validated archive on the
-    // backup volume and compare its complete native filesystem result.
-    return full_native_readback(archive, root, expected);
-
-    #[allow(unreachable_code)]
     {
         let pax = flags.as_ref().is_some_and(|(_, f)| f.pax_metadata);
         let marker = flags.as_ref().map(|(p, _)| p.as_path());
-        let metadata = stage.join("metadata.tar.gz");
+        // Keep every bounded probe in an owned private directory. The caller's
+        // stage is shared across validation steps and must remain empty once
+        // this readback returns, even on an error or fallback.
+        let probe_stage = ReadbackDir(PrivateDir::new(stage, ".metadata-probe")?);
+        let metadata = probe_stage.0 .0.join("metadata.tar.gz");
         let file = fs::File::create(&metadata).map_err(|e| fail(&metadata, e))?;
         let gzip = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
         let limited = LimitedMetadata {
             inner: gzip,
             written: 0,
             checked: 0,
-            directory: stage.into(),
+            directory: probe_stage.0 .0.clone(),
         };
         let mut output = tar::Builder::new(limited);
         let mut contents: BTreeMap<PathBuf, (u64, String)> = BTreeMap::new();
@@ -259,8 +255,8 @@ pub(super) fn verify_contents_and_metadata(
         let extraction_budget = metadata_bytes
             .saturating_mul(3)
             .saturating_add((index.len() as u64).saturating_mul(16384));
-        require_free_space(stage, RESERVE.saturating_add(extraction_budget))?;
-        let probes = stage.join("probes");
+        require_free_space(&probe_stage.0 .0, RESERVE.saturating_add(extraction_budget))?;
+        let probes = probe_stage.0 .0.join("probes");
         fs::create_dir(&probes).map_err(|e| fail(stage, e))?;
         unpack_private_with_root(&metadata, &probes, Some(std::ffi::OsStr::new(root)))?;
         let scanned =
