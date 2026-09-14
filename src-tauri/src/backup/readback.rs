@@ -4,6 +4,7 @@
 //! are read through macOS after extraction, with the same strict metadata budget.
 use super::*;
 use crate::restore::{inspect_archive, open_archive, relative_path, require_root};
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::io;
 
@@ -22,7 +23,7 @@ fn full_native_readback(
     let parent = archive
         .parent()
         .ok_or("Archiv ohne übergeordnetes Verzeichnis")?;
-    let payload = expected.iter().map(|entry| entry.s).sum::<u64>();
+    let payload = expected.iter().fold(0u64, |total, entry| total.saturating_add(entry.s));
     // This path is used only when a PAX metadata probe cannot be proved exact.
     // Keep the temporary extraction on the backup volume, never on the system
     // disk, and refuse it before consuming its required capacity.
@@ -35,13 +36,23 @@ fn full_native_readback(
     // a large temporary readback tree on the backup volume.
     let stage = ReadbackDir(PrivateDir::new(parent, ".readback-full")?);
     let _phase = crate::work_progress::Phase::enter(
-        "PAX-Metadatenprobe unvollständig – vollständige Rückleseprüfung auf dem Backup-Laufwerk",
+        "Vollständige Rückleseprüfung auf dem Backup-Laufwerk",
     );
     unpack_private_with_root(archive, &stage.0 .0, Some(std::ffi::OsStr::new(root)))?;
     snapshot_with_phase(&stage.0 .0.join(root), "Vollständige Rückleseprüfung")
 }
 
+#[derive(Debug)]
+struct MetadataLimitExceeded;
+impl std::fmt::Display for MetadataLimitExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Readback metadata reached the temporary probe limit")
+    }
+}
+impl std::error::Error for MetadataLimitExceeded {}
+
 struct LimitedMetadata<W> {
+    limit: u64,
     inner: W,
     written: u64,
     checked: u64,
@@ -50,8 +61,8 @@ struct LimitedMetadata<W> {
 impl<W: Write> Write for LimitedMetadata<W> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         let next = self.written.saturating_add(bytes.len() as u64);
-        if next > MAX_METADATA {
-            return Err(io::Error::other("Readback metadata exceeds the 512 MiB temporary limit; no full file copy was created"));
+        if next > self.limit {
+            return Err(io::Error::other(MetadataLimitExceeded));
         }
         if next.saturating_sub(self.checked) >= 1024 * 1024 {
             require_free_space(
@@ -70,12 +81,21 @@ impl<W: Write> Write for LimitedMetadata<W> {
     }
 }
 
-#[allow(unused_variables)]
 pub(super) fn verify_contents_and_metadata(
     archive: &Path,
     root: &str,
     expected: &[ManifestEntry],
     stage: &Path,
+) -> Result<Vec<ManifestEntry>, String> {
+    verify_with_metadata_limit(archive, root, expected, stage, MAX_METADATA)
+}
+
+fn verify_with_metadata_limit(
+    archive: &Path,
+    root: &str,
+    expected: &[ManifestEntry],
+    stage: &Path,
+    metadata_limit: u64,
 ) -> Result<Vec<ManifestEntry>, String> {
     space_preflight()?;
     // Validate the original archive, including duplicate names, traversal, links,
@@ -107,7 +127,17 @@ pub(super) fn verify_contents_and_metadata(
             "Archiveinträge stimmen nicht mit dem Quellmanifest überein; fehlend: {missing:?}; zusätzlich: {extra:?}"
         )));
     }
-    {
+    let limit_reached = Cell::new(false);
+    let directory_inexact = Cell::new(false);
+    // Record only a returned, typed budget error. Builder cleanup may attempt
+    // writes too; those must never turn an unrelated error into a fallback.
+    let probe_error = |error: io::Error| {
+        if error.get_ref().is_some_and(|e| e.is::<MetadataLimitExceeded>()) {
+            limit_reached.set(true);
+        }
+        fail(archive, error)
+    };
+    let result = (|| {
         let pax = flags.as_ref().is_some_and(|(_, f)| f.pax_metadata);
         let marker = flags.as_ref().map(|(p, _)| p.as_path());
         // Keep every bounded probe in an owned private directory. The caller's
@@ -118,6 +148,7 @@ pub(super) fn verify_contents_and_metadata(
         let file = fs::File::create(&metadata).map_err(|e| fail(&metadata, e))?;
         let gzip = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
         let limited = LimitedMetadata {
+            limit: metadata_limit,
             inner: gzip,
             written: 0,
             checked: 0,
@@ -132,15 +163,15 @@ pub(super) fn verify_contents_and_metadata(
                 crate::work_progress::Phase::enter("Archiv-Dateiinhalte im Datenstrom prüfen");
             let mut tar = tar::Archive::new(&mut input);
             let mut buffer = vec![0; 1024 * 1024];
-            for entry in tar.entries().map_err(|e| fail(archive, e))? {
+            for entry in tar.entries().map_err(&probe_error)? {
                 cancelled()?;
-                let mut entry = entry.map_err(|e| fail(archive, e))?;
-                let path = relative_path(&entry.path().map_err(|e| fail(archive, e))?)?;
+                let mut entry = entry.map_err(&probe_error)?;
+                let path = relative_path(&entry.path().map_err(&probe_error)?)?;
                 let mut header = entry.header().clone();
                 let kind = header.entry_type();
                 let link = entry
                     .link_name()
-                    .map_err(|e| fail(archive, e))?
+                    .map_err(&probe_error)?
                     .map(|p| p.into_owned());
                 // Old copyfile archives carry their metadata in AppleDouble payloads.
                 // New PAX archives treat every ._ filename as ordinary user content.
@@ -150,9 +181,9 @@ pub(super) fn verify_contents_and_metadata(
                             .file_name()
                             .is_some_and(|n| n.as_bytes().starts_with(b"._")));
                 let mut extensions = Vec::new();
-                if let Some(pax) = entry.pax_extensions().map_err(|e| fail(archive, e))? {
+                if let Some(pax) = entry.pax_extensions().map_err(&probe_error)? {
                     for item in pax {
-                        let item = item.map_err(|e| fail(archive, e))?;
+                        let item = item.map_err(&probe_error)?;
                         let key = item.key().map_err(|e| fail(archive, e))?;
                         // Data length is the only altered property of ordinary probes.
                         if key == "size" && kind.is_file() && !keep_payload {
@@ -173,14 +204,14 @@ pub(super) fn verify_contents_and_metadata(
                         .append_pax_extensions(
                             extensions.iter().map(|(k, v)| (k.as_str(), v.as_slice())),
                         )
-                        .map_err(|e| fail(archive, e))?;
+                        .map_err(&probe_error)?;
                 }
                 if kind.is_file() && !keep_payload {
                     let mut digest = Sha256::new();
                     let mut size = 0u64;
                     loop {
                         cancelled()?;
-                        let n = entry.read(&mut buffer).map_err(|e| fail(archive, e))?;
+                        let n = entry.read(&mut buffer).map_err(&probe_error)?;
                         if n == 0 {
                             break;
                         }
@@ -204,11 +235,11 @@ pub(super) fn verify_contents_and_metadata(
                     if has_pax_path {
                         output
                             .append(&header, probe.as_slice())
-                            .map_err(|e| fail(archive, e))?;
+                            .map_err(&probe_error)?;
                     } else {
                         output
                             .append_data(&mut header, &path, probe.as_slice())
-                            .map_err(|e| fail(archive, e))?;
+                            .map_err(&probe_error)?;
                     }
                 } else if let Some(link) = link {
                     if kind.is_hard_link() {
@@ -217,34 +248,34 @@ pub(super) fn verify_contents_and_metadata(
                     if has_pax_path {
                         output
                             .append(&header, std::io::empty())
-                            .map_err(|e| fail(archive, e))?;
+                            .map_err(&probe_error)?;
                     } else {
                         output
                             .append_link(&mut header, &path, &link)
-                            .map_err(|e| fail(archive, e))?;
+                            .map_err(&probe_error)?;
                     }
                 } else {
                     if has_pax_path {
                         output
                             .append(&header, &mut entry)
-                            .map_err(|e| fail(archive, e))?;
+                            .map_err(&probe_error)?;
                     } else {
                         output
                             .append_data(&mut header, &path, &mut entry)
-                            .map_err(|e| fail(archive, e))?;
+                            .map_err(&probe_error)?;
                     }
                 }
             }
         }
         input.finish()?;
-        let limited = output.into_inner().map_err(|e| fail(archive, e))?;
+        let limited = output.into_inner().map_err(&probe_error)?;
         let metadata_bytes = limited.written;
         limited
             .inner
             .finish()
-            .map_err(|e| fail(archive, e))?
+            .map_err(&probe_error)?
             .sync_all()
-            .map_err(|e| fail(archive, e))?;
+            .map_err(&probe_error)?;
         for (path, link) in hardlinks {
             if let Some(content) = contents.get(&link).cloned() {
                 contents.insert(path, content);
@@ -280,7 +311,8 @@ pub(super) fn verify_contents_and_metadata(
                         .unwrap_or(true)
                 });
         if directory_probe_inexact {
-            return full_native_readback(archive, root, expected);
+            directory_inexact.set(true);
+            return Ok(Vec::new());
         }
         let mut actual = Vec::with_capacity(expected.len());
         for expected_entry in expected {
@@ -331,6 +363,17 @@ pub(super) fn verify_contents_and_metadata(
             }
         }
         Ok(actual)
+    })();
+    // The closure has dropped its readers, builder and private probe directory
+    // before full extraction starts. The system disk stays bounded at 512 MiB.
+    if limit_reached.get() || directory_inexact.get() {
+        cancelled()?;
+        let _phase = crate::work_progress::Phase::enter(
+            "Metadatenprobe zu groß oder unvollständig – Rückleseprüfung auf dem Backup-Laufwerk",
+        );
+        full_native_readback(archive, root, expected)
+    } else {
+        result
     }
 }
 
@@ -338,6 +381,39 @@ pub(super) fn verify_contents_and_metadata(
 mod tests {
     use super::*;
     use std::os::unix::ffi::OsStrExt;
+    #[test]
+    fn metadata_limit_uses_full_readback_and_cleans_both_stages() {
+        let owned = ReadbackDir(PrivateDir::temp().unwrap());
+        let source = owned.0 .0.join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("file"), b"original data").unwrap();
+        xattr::set(source.join("file"), "com.example.large-metadata", b"binary\0metadata\n").unwrap();
+        fs::hard_link(source.join("file"), source.join("hardlink")).unwrap();
+        let expected = compute_snapshot(&source).unwrap();
+        let archive = owned.0 .0.join("archive.tar.gz");
+        create_verified_archive_from_snapshot(&source, &archive, true, &expected).unwrap();
+        let stage = owned.0 .0.join("stage");
+        fs::create_dir(&stage).unwrap();
+        // A zero budget forces exactly the production overflow path without
+        // allocating 512 MiB in the test suite.
+        let actual = verify_with_metadata_limit(&archive, "source", &expected, &stage, 0).unwrap();
+        assert_eq!(actual.len(), expected.len());
+        for (a, e) in actual.iter().zip(&expected) {
+            assert!(readback_differences(a, e).is_empty());
+        }
+        let file = actual.iter().find(|e| e.p == "file").unwrap();
+        let link = actual.iter().find(|e| e.p == "hardlink").unwrap();
+        assert_eq!(file.ino, link.ino);
+        assert_eq!(fs::read_dir(&stage).unwrap().count(), 0);
+        assert!(!fs::read_dir(&owned.0 .0).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with(".readback-full")));
+        let mut wrong = expected.clone();
+        wrong.iter_mut().find(|e| e.p == "file").unwrap().hash = "0".repeat(64);
+        let actual = verify_with_metadata_limit(&archive, "source", &wrong, &stage, 0).unwrap();
+        assert!(actual.iter().zip(&wrong).any(|(a, e)| readback_differences(a, e).iter().any(|d| d.contains("SHA-256"))));
+        fs::write(&archive, b"corrupt archive").unwrap();
+        assert!(verify_with_metadata_limit(&archive, "source", &expected, &stage, 0).is_err());
+        assert_eq!(fs::read_dir(&stage).unwrap().count(), 0);
+    }
     #[test]
     fn binary_multiline_pax_metadata_roundtrips_backup_and_restore() {
         let owned = ReadbackDir(PrivateDir::temp().unwrap());
@@ -475,6 +551,7 @@ mod tests {
     #[test]
     fn metadata_budget_rejects_before_writing_past_limit() {
         let mut writer = LimitedMetadata {
+            limit: MAX_METADATA,
             inner: Vec::new(),
             written: MAX_METADATA - 3,
             checked: MAX_METADATA - 3,
@@ -483,8 +560,8 @@ mod tests {
         assert!(writer
             .write_all(b"four")
             .unwrap_err()
-            .to_string()
-            .contains("512 MiB"));
+            .get_ref()
+            .is_some_and(|e| e.is::<MetadataLimitExceeded>()));
         assert!(writer.inner.is_empty());
     }
 }
