@@ -1,3 +1,4 @@
+import { verificationStatusKey } from "./verification-ui";
 import { localizeMessage } from "./messages";
 import { ProgressIndicator } from "./progress-ui";
 import { renderCancelControl } from "./cancel-ui";
@@ -336,6 +337,7 @@ const translations: Record<string, Record<string, string>> = {
     restoreWithErrors: "Wiederherstellung mit Fehlern beendet",
     restoreNothingChanged: "Keine Änderungen – vorhandene Elemente übersprungen",
     backupNotVerified: "noch nicht verifiziert",
+    backupVerified: "✓ verifiziert",
     backupInvalid: "Metadaten ungültig oder unvollständig",
     operationBusy: "Ein Vorgang läuft bereits. Bitte warten.",
     restoredItems: "Wiederhergestellt",
@@ -623,6 +625,7 @@ const translations: Record<string, Record<string, string>> = {
     restoreWithErrors: "Restore finished with errors",
     restoreNothingChanged: "No changes – existing items skipped",
     backupNotVerified: "not yet verified",
+    backupVerified: "✓ verified",
     backupInvalid: "invalid or incomplete metadata",
     operationBusy: "An operation is already running. Please wait.",
     restoredItems: "Restored",
@@ -1318,6 +1321,8 @@ async function loadBackups(): Promise<void> {
     return;
   }
   
+  const selectedTimestamp = backupSelect.value;
+  const selectedProfile = selectedBackupProfileId();
   try {
     const backups = await invoke<BackupItem[]>("list_backups", {
       targetPath: targetPath,
@@ -1328,7 +1333,7 @@ async function loadBackups(): Promise<void> {
       const option = document.createElement("option");
       option.value = backup.timestamp;
       option.dataset.profileId = backup.profile_id;
-      const verified = backup.metadata_valid ? t("backupNotVerified") : t("backupInvalid");
+      const verified = t(verificationStatusKey(backup));
       const formatted = formatTimestamp(backup.timestamp);
       const delta = backup.incremental_stats_available
         ? ` · +${formatBytesShort(backup.new_archive_size_bytes)} ${t("backupDeltaNew")} · ${formatBytesShort(backup.reused_archive_size_bytes)} ${t("backupDeltaReused")}`
@@ -1336,6 +1341,7 @@ async function loadBackups(): Promise<void> {
       option.textContent = `[${backup.profile_name}] ${formatted}${delta} [${verified}]`;
       option.dataset.label = formatted;
       backupSelect.appendChild(option);
+      if (backup.timestamp === selectedTimestamp && backup.profile_id === selectedProfile) option.selected = true;
     }
     
     if (backups.length === 0) {
@@ -2226,8 +2232,6 @@ btnRestoreTest.addEventListener("click", async () => {
       if (result.success) {
         log(`✅ ${result.message}`);
         setStatusMessage(result.message);
-        const option = Array.from(backupSelect.options).find(o => o.value === timestamp);
-        if (option) option.textContent = `${option.dataset.label || formatTimestamp(timestamp)} [✓]`;
       } else {
         log(`❌ ${result.message}`);
         for (const failure of result.failed_files) {
@@ -2245,6 +2249,7 @@ btnRestoreTest.addEventListener("click", async () => {
       setStatusMessage(t("verifyCancelled"));
     }
   } finally {
+    await loadBackups();
     verifyInProgress = false;
     operationInProgress = false;
     setOperationControls(false);

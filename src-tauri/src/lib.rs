@@ -4,6 +4,7 @@ mod backup;
 mod frozen_sources;
 mod protected_access;
 mod work_progress;
+mod verification_state;
 use backup::*;
 mod restore;
 use restore::*;
@@ -2777,6 +2778,7 @@ fn verify_backup_impl(
     }
     let metadata = load_backup_metadata(&metadata_path)?;
     validate_backup_profile(&metadata, &profile_id)?;
+    let verification_evidence = verification_state::begin(&backup_path, &metadata)?;
 
     let total_files = metadata.items.len();
     let mut verified_files = 0;
@@ -2840,11 +2842,21 @@ fn verify_backup_impl(
     }
 
     let success = failed_files.is_empty();
-    let message = if success {
+    let mut message = if success {
         format!("All {} files verified successfully!", total_files)
     } else {
         format!("{} of {} files failed", failed_files.len(), total_files)
     };
+
+    if VERIFY_CANCELLED.load(Ordering::SeqCst) {
+        VERIFY_CANCELLED.store(false, Ordering::SeqCst);
+        return Err("Verification cancelled".into());
+    }
+    if success {
+        if let Some(warning) = verification_state::record_success(&backup_path, &metadata, &verification_evidence)? {
+            message.push_str(&format!("\n⚠️ {warning}"));
+        }
+    }
 
     let _ = window.emit("backup-log", &message);
 
@@ -2896,6 +2908,7 @@ fn verify_backup_parallel_impl(
     }
     let metadata = load_backup_metadata(&metadata_path)?;
     validate_backup_profile(&metadata, &profile_id)?;
+    let verification_evidence = verification_state::begin(&backup_path, &metadata)?;
 
     let total_files = metadata.items.len();
     let verified_counter = Arc::new(AtomicUsize::new(0));
@@ -2999,7 +3012,7 @@ fn verify_backup_parallel_impl(
     };
 
     let success = failed_files_result.is_empty() && verified_files == total_files;
-    let message = if success {
+    let mut message = if success {
         format!(
             "✅ All {} files verified successfully (parallel)!",
             total_files
@@ -3011,6 +3024,16 @@ fn verify_backup_parallel_impl(
             total_files
         )
     };
+
+    if VERIFY_CANCELLED.load(Ordering::SeqCst) {
+        VERIFY_CANCELLED.store(false, Ordering::SeqCst);
+        return Err("Verification cancelled".into());
+    }
+    if success {
+        if let Some(warning) = verification_state::record_success(&backup_path, &metadata, &verification_evidence)? {
+            message.push_str(&format!("\n⚠️ {warning}"));
+        }
+    }
 
     let _ = window.emit("backup-log", &message);
 
@@ -3082,6 +3105,7 @@ fn list_backups(target_path: String) -> Result<Vec<BackupListItem>, String> {
                     validate_backup_profile(&metadata, &profile_id)?;
                     Ok(metadata)
                 });
+            let hash_verified = metadata.as_ref().is_ok_and(|m| verification_state::is_verified(&entry.path(), m));
             let (metadata_valid, incremental_stats_available, new_archive_size_bytes, reused_archive_size_bytes) = match metadata {
                 Ok(metadata) => (true, metadata.incremental_stats_version >= 1, metadata.new_archive_size_bytes, metadata.reused_archive_size_bytes),
                 Err(_) => (false, false, 0, 0),
@@ -3093,7 +3117,7 @@ fn list_backups(target_path: String) -> Result<Vec<BackupListItem>, String> {
                 incremental_stats_available,
                 new_archive_size_bytes,
                 reused_archive_size_bytes,
-                hash_verified: false,
+                hash_verified,
                 metadata_valid,
             });
         }
