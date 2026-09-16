@@ -70,6 +70,9 @@ export const messagePairs: [string,string][] = [
   ['Alle {0} Dateien erfolgreich verifiziert!','All {0} files verified successfully!'],
   ['{0} von {1} Dateien fehlerhaft','{0} of {1} files failed'],
   ['✅ App-Installer kopiert: {0}','✅ App installer copied: {0}'],
+  ['🌡️ Durchsatzbegrenzung aktiv: {0} MB/s','🌡️ Throughput limit active: {0} MB/s'],
+  ['{0} MiB geschrieben · gedrosselt auf {1} MB/s','{0} MiB written · throttled to {1} MB/s'],
+  ['Durchsatzbegrenzung ist bereits aktiv','Throughput limit is already active'],
 ];
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // Prefer specific templates over generic prefixes such as "Archiving {0}...".

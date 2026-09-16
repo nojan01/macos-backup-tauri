@@ -184,6 +184,19 @@
         </label>
         <p class="settings-hint" data-i18n="keepSessionUnlockedHint">Verzögert die Passwortsperre nur während des Backups und stellt deine bisherige Einstellung danach wieder her.</p>
       </div>
+
+      <div class="settings-section">
+        <h3>🌡️ <span data-i18n="throttleTitle">Durchsatzbegrenzung</span></h3>
+        <label class="checkbox-label">
+          <input type="checkbox" id="throttle-enabled" />
+          <span data-i18n="throttleEnabled">Lese-/Schreibdurchsatz auf das Backup-Ziel begrenzen</span>
+        </label>
+        <label class="inline-field" for="throttle-mb-per-s">
+          <span data-i18n="throttleMbPerS">Maximal (MB/s)</span>
+          <input type="number" id="throttle-mb-per-s" min="1" max="5000" step="1" inputmode="numeric" />
+        </label>
+        <p class="settings-hint" data-i18n="throttleHint">Für externe SSDs, deren USB-Controller bei vollem Tempo überhitzt und ausgeworfen wird. Gilt für Backup, Prüfung und Wiederherstellung dieses Profils.</p>
+      </div>
       
       <div class="settings-section">
         <h3 data-i18n="appSettingsTitle">App-Einstellungen</h3>

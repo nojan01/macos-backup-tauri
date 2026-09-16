@@ -28,3 +28,6 @@ npm-debug.log*
 
 # Tauri
 src-tauri/target/
+
+# Design-Hook-Cache
+.impeccable/

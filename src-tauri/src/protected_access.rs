@@ -32,13 +32,20 @@ pub(crate) fn retry<T>(mut operation: impl FnMut() -> io::Result<T>) -> Result<T
 
 /// A failed tar creation only wrote a private, unpublished archive. Re-running
 /// the command truncates that partial file; the source manifest and readback
-/// checks still have to pass before anything is published.
+/// checks still have to pass before anything is published. `output` is the
+/// archive being written; an active throughput limit for its volume paces the
+/// child while it grows.
 pub(crate) fn create_archive(
+    output: &std::path::Path,
     mut command: impl FnMut() -> std::process::Command,
 ) -> Result<std::process::Output, String> {
     let mut last = None;
     let result = retry(|| {
-        let output = crate::run_with_timeout(command(), std::time::Duration::from_secs(24 * 3600));
+        let output = crate::run_with_timeout_governed(
+            command(),
+            std::time::Duration::from_secs(24 * 3600),
+            output,
+        );
         let denied = output.as_ref().is_ok_and(|out| {
             let stderr = String::from_utf8_lossy(&out.stderr);
             stderr.contains("Operation not permitted") || stderr.contains("Permission denied")
@@ -273,7 +280,7 @@ mod tests {
     fn failed_archive_creation_keeps_exit_status_and_stderr() {
         crate::BACKUP_CANCELLED.store(false, std::sync::atomic::Ordering::SeqCst);
         crate::VERIFY_CANCELLED.store(false, std::sync::atomic::Ordering::SeqCst);
-        let output = create_archive(|| {
+        let output = create_archive(&std::env::temp_dir().join("never-written"), || {
             let mut command = std::process::Command::new("/bin/sh");
             command.args([
                 "-c",

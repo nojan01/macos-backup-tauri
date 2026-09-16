@@ -94,6 +94,8 @@ pub(super) fn verify_item(backup: &Path, item: &BackupItem) -> Result<(), String
 pub(super) struct ArchiveInput {
     reader: Box<dyn Read>,
     child: Option<std::process::Child>,
+    /// Feeds a throttled archive stream into the decompressor's stdin.
+    pump: Option<std::thread::JoinHandle<io::Result<u64>>>,
     progress: crate::work_progress::Bytes,
 }
 impl Read for ArchiveInput {
@@ -115,6 +117,13 @@ impl ArchiveInput {
                 return Err("Decompression failed".into());
             }
         }
+        if let Some(pump) = self.pump.take() {
+            match pump.join() {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => return Err(format!("Archive read failed: {e}")),
+                Err(_) => return Err("Archive reader thread failed".into()),
+            }
+        }
         Ok(())
     }
 }
@@ -123,6 +132,10 @@ impl Drop for ArchiveInput {
         if let Some(child) = self.child.as_mut() {
             let _ = child.kill();
             let _ = child.wait();
+        }
+        // Killing the child breaks the pipe, so the pump ends on its next write.
+        if let Some(pump) = self.pump.take() {
+            let _ = pump.join();
         }
     }
 }
@@ -141,24 +154,44 @@ fn compression(archive: &Path) -> Result<bool, String> {
 pub(super) fn open_archive(archive: &Path) -> Result<ArchiveInput, String> {
     if compression(archive)? {
         let zstd = get_zstd_path().ok_or("zstd required to read this backup")?;
-        let mut child = Command::new(zstd)
-            .args(["-d", "-c", "--"])
-            .arg(archive)
+        let mut cmd = Command::new(zstd);
+        cmd.args(["-d", "-c"])
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| e.to_string())?;
+            .stderr(std::process::Stdio::null());
+        let throttled = crate::throttle::limiter_for(archive).is_some();
+        if throttled {
+            // Under a throughput limit the archive bytes flow through a paced
+            // reader into zstd instead of letting zstd read the file itself.
+            cmd.stdin(std::process::Stdio::piped());
+        } else {
+            cmd.arg("--").arg(archive);
+        }
+        let mut child = cmd.spawn().map_err(|e| e.to_string())?;
         let reader = Box::new(child.stdout.take().ok_or("No decompressor output")?);
+        let pump = if throttled {
+            let mut source = crate::throttle::open_throttled(archive).map_err(|e| e.to_string())?;
+            let mut stdin = child.stdin.take().ok_or("No decompressor input")?;
+            Some(std::thread::spawn(move || {
+                match io::copy(&mut source, &mut stdin) {
+                    Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(0),
+                    other => other,
+                }
+            }))
+        } else {
+            None
+        };
         Ok(ArchiveInput {
             reader,
             progress: crate::work_progress::Bytes::new(),
             child: Some(child),
+            pump,
         })
     } else {
-        let f = fs::File::open(archive).map_err(|e| e.to_string())?;
+        let f = crate::throttle::open_throttled(archive).map_err(|e| e.to_string())?;
         Ok(ArchiveInput {
             reader: Box::new(flate2::read::MultiGzDecoder::new(f)),
             child: None,
+            pump: None,
             progress: crate::work_progress::Bytes::new(),
         })
     }
@@ -372,9 +405,15 @@ pub(super) fn unpack_private_with_root(
     } else {
         cmd.arg("-xzpf");
     }
-    cmd.arg(&archive)
-        .args(["--no-same-owner", "-S"])
-        .current_dir(target);
+    // Under a throughput limit tar receives the archive via stdin from a
+    // paced reader; otherwise it opens the file itself as before.
+    let limiter = crate::throttle::limiter_for(&archive);
+    if limiter.is_some() {
+        cmd.arg("-");
+    } else {
+        cmd.arg(&archive);
+    }
+    cmd.args(["--no-same-owner", "-S"]).current_dir(target);
     if flags
         .as_ref()
         .is_some_and(|(_, records)| records.pax_metadata)
@@ -391,7 +430,14 @@ pub(super) fn unpack_private_with_root(
     }
     // Large archives can spend substantial time restoring per-file macOS
     // metadata. Match the creation deadline; cancellation remains available.
-    let output = run_with_timeout(cmd, std::time::Duration::from_secs(24 * 3600))?;
+    let timeout = std::time::Duration::from_secs(24 * 3600);
+    let output = if let Some(limiter) = limiter {
+        let file = fs::File::open(&archive).map_err(|e| e.to_string())?;
+        let reader = crate::throttle::ThrottledReader::new(file, Some(limiter));
+        crate::run_with_timeout_stdin(cmd, timeout, Box::new(reader))?
+    } else {
+        run_with_timeout(cmd, timeout)?
+    };
     require_success("Archive extraction", &output)?;
     if let Some((path, records)) = flags {
         fs::remove_file(target.join(&path)).map_err(|e| e.to_string())?;
@@ -1443,6 +1489,7 @@ mod cancellation_tests {
         let mut reader = ArchiveInput {
             reader: Box::new(io::Cursor::new(vec![1u8; 1024])),
             child: None,
+            pump: None,
             progress: crate::work_progress::Bytes::new(),
         };
         let mut buffer = [0; 16];

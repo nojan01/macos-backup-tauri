@@ -37,7 +37,8 @@ export class ProgressIndicator {
     const labels = this.labels();
     this.fill.classList.toggle("indeterminate", unknown);
     this.fill.classList.toggle("animating", this.busy && !unknown && (this.value ?? 0) < 100);
-    this.fill.style.width = unknown ? "32%" : `${this.value ?? 0}%`;
+    // The bar scales via a CSS variable (transform) rather than animating width.
+    this.fill.style.setProperty("--progress", unknown ? "1" : String((this.value ?? 0) / 100));
     this.bar.setAttribute("role", "progressbar");
     this.bar.setAttribute("aria-valuemin", "0");
     this.bar.setAttribute("aria-valuemax", "100");
