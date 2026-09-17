@@ -43,6 +43,7 @@
 - **Wiederherstellung der App-Einstellungen** – Normale Archive mit vollständiger Inhalts- und Rückleseprüfung; im Wiederherstellungsdialog anhand ihrer ursprünglichen Pfade auswählbar.
 - **Safari** – Lesezeichen, Leseliste, Erweiterungen, Preferences
 - **Konfigurationsdateien** – SSH, Git, Shell-Configs
+- **Durchsatzbegrenzung** – Optionales Limit in MB/s für Lese- und Schreibzugriffe auf das Backup-Ziel (Backup, Prüfung, Wiederherstellung), z. B. für externe SSDs, deren USB-Controller bei vollem Tempo überhitzt. Siehe [Abschnitt unten](#durchsatzbegrenzung-ab-1246).
 
 ### ⚡ Parallele Verarbeitung (NEU in v1.1)
 | Feature | Parallelität | Zeitersparnis |
@@ -358,3 +359,11 @@ Die automatische Archivprüfung entpackt gewöhnliche Dateiinhalte nicht mehr vo
 Der temporäre Metadatenstrom ist auf 512 MiB pro Archiv begrenzt; vor dem Entpacken werden zusätzlicher Platz für Dateisystemeinträge und eine Reserve von 2 GiB geprüft. Große gewöhnliche Dateien und virtuelle Festplatten benötigen daher keine zweite vollständige temporäre Kopie. Außergewöhnlich große Metadaten führen zu einer ausdrücklichen Platz-/Limitmeldung, nicht zum stillen Weglassen von Attributen. Ein vom Benutzer gestarteter **Test-Restore** schreibt weiterhin das gewählte Element vollständig in dessen Test-Zielordner.
 
 Sparse-Dateien werden als normale logische PAX-Daten gespeichert (Nullbereiche werden komprimiert) und beim Wiederherstellen wieder platzsparend mit Sparse-Dateien geschrieben.
+
+## Durchsatzbegrenzung (ab 1.2.46)
+
+Manche externen SSDs in USB-Gehäusen überhitzen bei dauerhaft vollem Durchsatz; macOS wirft das Laufwerk dann mitten im Backup aus. In **Einstellungen → 🌡️ Durchsatzbegrenzung** lässt sich pro Backup-Profil ein Limit in **MB/s** (1–5000, Vorgabe 80) aktivieren. Es gilt für alle Zugriffe auf das Ziel-Volume während Backup, Prüfung und Wiederherstellung; Quellen auf anderen Laufwerken und Zwischenschritte auf der internen SSD werden nicht gebremst.
+
+Technisch begrenzt ein gemeinsamer Token-Bucket alle Lesepfade der App (Prüfsummen, Rücklese- und Wiederherstellungsprüfung, kleine Kopien). Der Archivschreiber `/usr/bin/tar` wird über das Wachstum der Zieldatei gemessen und bei Überschreitung des Limits kurz per SIGSTOP/SIGCONT pausiert; beim Entpacken erhält `tar` das Archiv über einen gebremsten Datenstrom. Pausierte Kindprozesse werden bei Abbruch, Fehler oder Zeitüberschreitung immer zuerst fortgesetzt und dann beendet, sodass kein Prozess angehalten zurückbleibt. Pausenzeiten verlängern die Zeitlimits entsprechend. Im Protokoll erscheint zu Beginn `Durchsatzbegrenzung aktiv: N MB/s`, in der Fortschrittsanzeige `… MiB geschrieben · gedrosselt auf N MB/s`.
+
+Grenzen: Die Messung erfolgt in 20-ms-Schritten über die Dateigröße, kurzfristige Spitzen im Bereich des Schreibpuffers (etwa eine halbe Sekunde Vorlauf) sind möglich. Der macOS-Schreibcache und Dateisystem-Metadaten (z. B. Verzeichnisanlage, Umbenennen, Löschen alter Backups) unterliegen keinem Limit. Für Time Machine oder andere Programme auf demselben Laufwerk gilt die Begrenzung nicht.

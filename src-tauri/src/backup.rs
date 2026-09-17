@@ -605,7 +605,7 @@ pub(super) fn reuse_archive(source: &Path, target: &Path) -> Result<ArchiveReuse
     let method = if fs::hard_link(source, &tmp).is_ok() {
         ArchiveReuse::HardLink
     } else {
-        fs::copy(source, &tmp).map_err(|e| fail(target, e))?;
+        crate::throttle::copy_file(source, &tmp).map_err(|e| fail(target, e))?;
         ArchiveReuse::Copy
     };
     publish(&tmp, target)?;
@@ -824,7 +824,7 @@ pub(super) fn create_verified_archive_from_snapshot(
         let _phase = crate::work_progress::Phase::enter(&format!(
             "Archiv erstellen und komprimieren: {name}"
         ));
-        crate::protected_access::create_archive(|| {
+        crate::protected_access::create_archive(&tmp, || {
             let mut cmd = Command::new("/usr/bin/tar");
             cmd.current_dir(source_parent);
             cmd.args([

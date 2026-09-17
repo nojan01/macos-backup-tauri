@@ -279,6 +279,76 @@ fn actual_backup_finalization_and_restore_roundtrip() {
         b"backup-data"
     );
 }
+fn incompressible(len: usize) -> Vec<u8> {
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 24) as u8
+        })
+        .collect()
+}
+fn throttled_roundtrip(gzip: bool) {
+    let d = fixture();
+    let _throttle = crate::throttle::activate_for_tests(&d.0, 8).unwrap();
+    let source = d.0.join("Documents");
+    fs::create_dir(&source).unwrap();
+    let payload = incompressible(4 * 1024 * 1024);
+    fs::write(source.join("data"), &payload).unwrap();
+    let backup = d.0.join("backup");
+    fs::create_dir(&backup).unwrap();
+    let a = backup.join("docs.tar.gz");
+    let started = std::time::Instant::now();
+    create_verified_archive(&source, &a, gzip).unwrap();
+    let metadata = BackupMetadata {
+        profile_id: "standard".into(),
+        profile_name: "Standard".into(),
+        timestamp: "20260907-120000".into(),
+        items: vec![BackupItem {
+            path: "~/Documents".into(),
+            archive: "docs.tar.gz".into(),
+            hash: hash_file(&a).unwrap(),
+            archive_size_bytes: fs::metadata(&a).unwrap().len(),
+            source_size_bytes: payload.len() as u64,
+        }],
+        hash_algorithm: "sha256".into(),
+        total_source_size_bytes: payload.len() as u64,
+        start_time: "".into(),
+        end_time: "".into(),
+        duration_seconds: 0,
+        incremental_stats_version: 0,
+        new_archive_size_bytes: 0,
+        reused_archive_size_bytes: 0,
+    };
+    let expected = compute_snapshot(&source).unwrap();
+    finish_backup(&backup, &metadata, &[(source, expected)]).unwrap();
+    let home = d.0.join("restored");
+    fs::create_dir(&home).unwrap();
+    let restored = restore_selected(&backup, &["~/Documents".into()], true, &home, None).unwrap();
+    assert_eq!(restored.restored_count, 1);
+    assert_eq!(fs::read(home.join("Documents/data")).unwrap(), payload);
+    // ~4 MiB pass the limit several times (archive, readback, hash, restore);
+    // at 8 MB/s that cannot finish within a single burst window.
+    assert!(
+        started.elapsed() >= std::time::Duration::from_secs(1),
+        "throughput limit did not engage: {:?}",
+        started.elapsed()
+    );
+}
+#[test]
+fn throttled_gzip_backup_and_restore_roundtrip() {
+    throttled_roundtrip(true);
+}
+#[test]
+fn throttled_zstd_backup_and_restore_roundtrip() {
+    if get_zstd_path().is_none() {
+        eprintln!("zstd not installed; skipping");
+        return;
+    }
+    throttled_roundtrip(false);
+}
 #[test]
 fn changed_or_deleted_sources_block_completion_even_after_archive_was_written() {
     let d = fixture();

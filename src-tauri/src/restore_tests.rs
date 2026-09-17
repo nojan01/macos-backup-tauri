@@ -781,3 +781,92 @@ fn actual_software_inventories_backup_and_restore_plan() {
     );
     println!("ACTUAL_SOFTWARE_INVENTORIES_PASSED: {} Homebrew/Bundle entries plus MAS inventory, archive roundtrip and restore preflight; no packages installed",parsed.len());
 }
+
+fn verification_fixture() -> Fixture {
+    let mut f = Fixture::new();
+    let item = f.archive(&f.file("source/note", b"verified backup data"), "~/note");
+    f.metadata(vec![item]);
+    let path = f.root.join("macos-backup-suite/data/20260907-120000");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::rename(&f.backup, &path).unwrap();
+    f.backup = path;
+    f
+}
+
+fn save_verified_fixture(f: &Fixture) -> BackupMetadata {
+    let metadata = load_backup_metadata(&f.backup.join("metadata.json")).unwrap();
+    let before = verification_state::begin(&f.backup, &metadata).unwrap();
+    for item in &metadata.items {
+        assert_eq!(hash_file(&f.backup.join(&item.archive)).unwrap(), item.hash);
+    }
+    assert_eq!(verification_state::record_success(&f.backup, &metadata, &before).unwrap(), None);
+    metadata
+}
+
+#[test]
+fn verification_survives_reloading_backup_list() {
+    let f = verification_fixture();
+    save_verified_fixture(&f);
+    for _ in 0..2 {
+        let backups = list_backups(f.root.to_string_lossy().into()).unwrap();
+        assert_eq!(backups.len(), 1);
+        assert!(backups[0].hash_verified);
+    }
+}
+
+#[test]
+fn verification_is_invalidated_by_same_size_archive_change_even_with_restored_mtime() {
+    let f = verification_fixture();
+    let metadata = save_verified_fixture(&f);
+    let path = f.backup.join(&metadata.items[0].archive);
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[0] ^= 1;
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    fs::write(&path, &bytes).unwrap();
+    fs::File::options().write(true).open(&path).unwrap()
+        .set_times(fs::FileTimes::new().set_modified(modified)).unwrap();
+    assert!(!list_backups(f.root.to_string_lossy().into()).unwrap()[0].hash_verified);
+}
+
+#[test]
+fn new_verification_clears_old_result_before_failure_or_cancellation() {
+    let f = verification_fixture();
+    let metadata = save_verified_fixture(&f);
+    let _unfinished = verification_state::begin(&f.backup, &metadata).unwrap();
+    assert!(!verification_state::is_verified(&f.backup, &metadata));
+    assert!(!list_backups(f.root.to_string_lossy().into()).unwrap()[0].hash_verified);
+}
+
+#[test]
+fn verification_rejects_changes_during_check_and_missing_archives() {
+    let f = verification_fixture();
+    let metadata = save_verified_fixture(&f);
+    let before = verification_state::begin(&f.backup, &metadata).unwrap();
+    fs::write(f.backup.join(&metadata.items[0].archive), b"changed").unwrap();
+    assert!(verification_state::record_success(&f.backup, &metadata, &before).is_err());
+    assert!(!verification_state::is_verified(&f.backup, &metadata));
+    fs::remove_file(f.backup.join(&metadata.items[0].archive)).unwrap();
+    assert!(!list_backups(f.root.to_string_lossy().into()).unwrap()[0].hash_verified);
+}
+
+#[test]
+fn verification_does_not_trust_changed_metadata_or_broken_receipt() {
+    let f = verification_fixture();
+    let mut metadata = save_verified_fixture(&f);
+    metadata.items[0].hash = "0".repeat(64);
+    fs::write(f.backup.join("metadata.json"), serde_json::to_vec(&metadata).unwrap()).unwrap();
+    assert!(!verification_state::is_verified(&f.backup, &metadata));
+    fs::write(f.backup.join(".verification.json"), b"broken").unwrap();
+    assert!(!verification_state::is_verified(&f.backup, &metadata));
+}
+
+#[test]
+fn verification_save_failure_reports_warning_without_persisting_success() {
+    let f = verification_fixture();
+    let metadata = load_backup_metadata(&f.backup.join("metadata.json")).unwrap();
+    let before = verification_state::begin(&f.backup, &metadata).unwrap();
+    fs::create_dir(f.backup.join(".verification.json")).unwrap();
+    assert!(verification_state::record_success(&f.backup, &metadata, &before).unwrap().is_some());
+    assert!(!verification_state::is_verified(&f.backup, &metadata));
+}

@@ -3,7 +3,9 @@ mod archive_flags;
 mod backup;
 mod frozen_sources;
 mod protected_access;
+mod throttle;
 mod work_progress;
+mod verification_state;
 use backup::*;
 mod restore;
 use restore::*;
@@ -141,6 +143,14 @@ pub struct BackupConfig {
     pub backup_chatgpt_settings: bool,
     #[serde(default = "default_app_settings")]
     pub backup_codex_settings: bool,
+    #[serde(default)]
+    pub throttle_enabled: bool,
+    #[serde(default = "default_throttle_mb_per_s")]
+    pub throttle_mb_per_s: u32,
+}
+
+fn default_throttle_mb_per_s() -> u32 {
+    throttle::DEFAULT_MB_PER_S
 }
 
 impl Default for BackupConfig {
@@ -164,6 +174,8 @@ impl Default for BackupConfig {
             backup_vscode_settings: true,
             backup_chatgpt_settings: true,
             backup_codex_settings: true,
+            throttle_enabled: false,
+            throttle_mb_per_s: default_throttle_mb_per_s(),
         }
     }
 }
@@ -431,7 +443,11 @@ fn normalize_profile(config: &mut BackupConfig) -> Result<(), String> {
         config.profile_name = default_profile_name();
     }
     validate_profile_id(&config.profile_id)?;
-    validate_profile_name(&config.profile_name)
+    validate_profile_name(&config.profile_name)?;
+    if config.throttle_enabled {
+        throttle::validate_mb_per_s(config.throttle_mb_per_s)?;
+    }
+    Ok(())
 }
 
 fn save_profile_store(store: &ProfileStore) -> Result<(), String> {
@@ -1270,21 +1286,94 @@ fn run_with_timeout(
     run_streamed(cmd, timeout, None, "", "", 1)
 }
 
+/// Run a command whose output file at `output` is written to the backup
+/// target. When a throughput limit is active for that volume, the child's
+/// process group is paused whenever the file grows faster than allowed.
+fn run_with_timeout_governed(
+    cmd: Command,
+    timeout: std::time::Duration,
+    output: &Path,
+) -> Result<std::process::Output, String> {
+    run_child(
+        cmd,
+        timeout,
+        None,
+        "",
+        "",
+        1,
+        ChildIo {
+            stdin: None,
+            governor: throttle::ChildGovernor::new(output),
+        },
+    )
+}
+
+/// Run a command that reads its input from stdin. The reader is pumped from a
+/// helper thread, so a `ThrottledReader` limits how fast the child can consume.
+fn run_with_timeout_stdin(
+    cmd: Command,
+    timeout: std::time::Duration,
+    stdin: Box<dyn Read + Send>,
+) -> Result<std::process::Output, String> {
+    run_child(
+        cmd,
+        timeout,
+        None,
+        "",
+        "",
+        1,
+        ChildIo {
+            stdin: Some(stdin),
+            governor: None,
+        },
+    )
+}
+
+#[derive(Default)]
+struct ChildIo {
+    stdin: Option<Box<dyn Read + Send>>,
+    governor: Option<throttle::ChildGovernor>,
+}
+
 /// Like `run_with_timeout` but streams stdout+stderr line-by-line to the
 /// given window as `event_name` events (prefixed with `log_prefix` if set).
 /// `emit_every_n_lines` == 0 or 1 emits every line; values > 1 emit every Nth
 /// line (nützlich für sehr gesprächige Kommandos wie `tar -v`).
 /// The collected bytes are still returned in `Output` for downstream parsing.
 fn run_streamed(
-    mut cmd: Command,
+    cmd: Command,
     timeout: std::time::Duration,
     window: Option<&tauri::Window>,
     event_name: &str,
     log_prefix: &str,
     emit_every_n_lines: u32,
 ) -> Result<std::process::Output, String> {
+    run_child(
+        cmd,
+        timeout,
+        window,
+        event_name,
+        log_prefix,
+        emit_every_n_lines,
+        ChildIo::default(),
+    )
+}
+
+fn run_child(
+    mut cmd: Command,
+    timeout: std::time::Duration,
+    window: Option<&tauri::Window>,
+    event_name: &str,
+    log_prefix: &str,
+    emit_every_n_lines: u32,
+    io: ChildIo,
+) -> Result<std::process::Output, String> {
     use std::io::{BufRead, BufReader};
     use std::os::unix::process::CommandExt;
+    let ChildIo {
+        stdin: input,
+        mut governor,
+    } = io;
     fn read_output<R: Read + Send + 'static>(
         input: R,
         window: Option<tauri::Window>,
@@ -1319,13 +1408,31 @@ fn run_streamed(
     }
     // Drain both pipes while the process runs; otherwise verbose installers can
     // fill a pipe and never exit. A separate process group bounds child lifetimes.
-    let mut child = cmd
-        .process_group(0)
+    cmd.process_group(0)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if input.is_some() {
+        cmd.stdin(std::process::Stdio::piped());
+    }
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to spawn command: {e}"))?;
     let pid = child.id();
+    if let Some(governor) = governor.as_mut() {
+        governor.attach(pid);
+    }
+    // The pump owns the child's stdin and closes it at EOF or on the first
+    // failed write (child exited or was killed), so it can never outlive the
+    // process by more than one read chunk.
+    let pump = match input {
+        Some(mut reader) => {
+            let mut stdin = child.stdin.take().ok_or("Missing stdin")?;
+            Some(std::thread::spawn(move || {
+                std::io::copy(&mut reader, &mut stdin).map(|_| ())
+            }))
+        }
+        None => None,
+    };
     let stdout = read_output(
         child.stdout.take().ok_or("Missing stdout")?,
         window.cloned(),
@@ -1340,7 +1447,7 @@ fn run_streamed(
         log_prefix.into(),
         emit_every_n_lines,
     );
-    let deadline = std::time::Instant::now() + timeout;
+    let started = std::time::Instant::now();
     let mut status = None;
     let failure = loop {
         if BACKUP_CANCELLED.load(Ordering::SeqCst) || VERIFY_CANCELLED.load(Ordering::SeqCst) {
@@ -1355,7 +1462,16 @@ fn run_streamed(
         if status.is_some() && stdout.is_finished() && stderr.is_finished() {
             break None;
         }
-        if std::time::Instant::now() >= deadline {
+        let mut paused = std::time::Duration::ZERO;
+        if let Some(governor) = governor.as_mut() {
+            if status.is_none() {
+                governor.tick();
+            }
+            paused = governor.paused_total();
+        }
+        // Time spent deliberately paused by the throughput limit is not the
+        // command's fault and does not count against its deadline.
+        if started.elapsed() >= timeout + paused {
             break Some(format!(
                 "Command timed out after {:.1}s",
                 timeout.as_secs_f64()
@@ -1363,6 +1479,11 @@ fn run_streamed(
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
+    // A stopped process ignores SIGTERM until it runs again: always continue
+    // the group first, on every exit path.
+    if let Some(governor) = governor.as_mut() {
+        governor.resume();
+    }
     if failure.is_some() {
         unsafe {
             libc::kill(-(pid as i32), libc::SIGTERM);
@@ -1373,6 +1494,7 @@ fn run_streamed(
         }
         let _ = child.wait();
     }
+    let pump_result = pump.map(|p| p.join().map_err(|_| "stdin pump failed".to_string()));
     let out = stdout
         .join()
         .map_err(|_| "stdout reader failed")?
@@ -1383,6 +1505,15 @@ fn run_streamed(
         .map_err(|e| e.to_string())?;
     if let Some(error) = failure {
         return Err(error);
+    }
+    // A child may legitimately stop reading before EOF (tar ends at the
+    // end-of-archive marker); only genuine input read failures are errors.
+    if let Some(result) = pump_result {
+        match result? {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+            Err(e) => return Err(format!("Eingabedaten konnten nicht gelesen werden: {e}")),
+        }
     }
     Ok(std::process::Output {
         status: status.ok_or("Command exit status missing")?,
@@ -1748,7 +1879,7 @@ fn load_previous_backup(suite_root: &Path) -> Option<(String, BackupMetadata)> {
 fn hash_file(path: &Path) -> Result<String, String> {
     let _phase = work_progress::Phase::enter("Archiv-Prüfsumme berechnen");
     let mut progress = work_progress::Bytes::new();
-    let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut file = throttle::open_throttled(path).map_err(|e| e.to_string())?;
     let mut hasher = Sha256::new();
     // Larger buffer for less syscalls on multi-GB archives
     let mut buffer = vec![0u8; 1024 * 1024];
@@ -1833,6 +1964,10 @@ fn create_backup_impl(
     }
     let _guard = OperationGuard::acquire_backup(config.keep_session_unlocked_during_backup)?;
     let _progress = BackupProgress::attach(window.clone());
+    let _throttle = throttle::activate(&config, Path::new(&target_path))?;
+    if let Some(note) = throttle::describe() {
+        let _ = window.emit("backup-log", format!("🌡️ {note}"));
+    }
     // Debug-Trace-Closure (No-op in Release-Builds). Für Diagnose kann hier
     // wieder ein Schreiber in /tmp/macos-backup-trace.log aktiviert werden.
     let trace = |_msg: &str| {};
@@ -2635,7 +2770,7 @@ fn create_backup_impl(
 
             if let Some(ref src) = resources_dmg {
                 if src.exists() {
-                    if fs::copy(src, &dmg_dest).is_ok() {
+                    if throttle::copy_file(src, &dmg_dest).is_ok() {
                         let _ = window.emit(
                             "backup-log",
                             format!("✅ App installer copied: {}", dmg_filename),
@@ -2677,7 +2812,7 @@ fn create_backup_impl(
 
         for dev_path in &candidates {
             if dev_path.exists() {
-                if fs::copy(dev_path, &dmg_dest).is_ok() {
+                if throttle::copy_file(dev_path, &dmg_dest).is_ok() {
                     let _ = window.emit(
                         "backup-log",
                         format!("✅ App installer copied: {}", dmg_filename),
@@ -2766,6 +2901,10 @@ fn verify_backup_impl(
 ) -> Result<VerifyResult, String> {
     let _guard = OperationGuard::acquire()?;
     let _progress = BackupProgress::attach(window.clone());
+    let _throttle = throttle::activate(&load_config()?, Path::new(&target_path))?;
+    if let Some(note) = throttle::describe() {
+        let _ = window.emit("backup-log", format!("🌡️ {note}"));
+    }
     validate_component(&timestamp)?;
     let backup_path = profile_root(&target_path, &profile_id)?
         .join("data")
@@ -2777,6 +2916,7 @@ fn verify_backup_impl(
     }
     let metadata = load_backup_metadata(&metadata_path)?;
     validate_backup_profile(&metadata, &profile_id)?;
+    let verification_evidence = verification_state::begin(&backup_path, &metadata)?;
 
     let total_files = metadata.items.len();
     let mut verified_files = 0;
@@ -2840,11 +2980,21 @@ fn verify_backup_impl(
     }
 
     let success = failed_files.is_empty();
-    let message = if success {
+    let mut message = if success {
         format!("All {} files verified successfully!", total_files)
     } else {
         format!("{} of {} files failed", failed_files.len(), total_files)
     };
+
+    if VERIFY_CANCELLED.load(Ordering::SeqCst) {
+        VERIFY_CANCELLED.store(false, Ordering::SeqCst);
+        return Err("Verification cancelled".into());
+    }
+    if success {
+        if let Some(warning) = verification_state::record_success(&backup_path, &metadata, &verification_evidence)? {
+            message.push_str(&format!("\n⚠️ {warning}"));
+        }
+    }
 
     let _ = window.emit("backup-log", &message);
 
@@ -2881,6 +3031,10 @@ fn verify_backup_parallel_impl(
     profile_id: String,
 ) -> Result<VerifyResult, String> {
     let _guard = OperationGuard::acquire()?;
+    let _throttle = throttle::activate(&load_config()?, Path::new(&target_path))?;
+    if let Some(note) = throttle::describe() {
+        let _ = window.emit("backup-log", format!("🌡️ {note}"));
+    }
     validate_component(&timestamp)?;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::Arc;
@@ -2896,6 +3050,7 @@ fn verify_backup_parallel_impl(
     }
     let metadata = load_backup_metadata(&metadata_path)?;
     validate_backup_profile(&metadata, &profile_id)?;
+    let verification_evidence = verification_state::begin(&backup_path, &metadata)?;
 
     let total_files = metadata.items.len();
     let verified_counter = Arc::new(AtomicUsize::new(0));
@@ -2999,7 +3154,7 @@ fn verify_backup_parallel_impl(
     };
 
     let success = failed_files_result.is_empty() && verified_files == total_files;
-    let message = if success {
+    let mut message = if success {
         format!(
             "✅ All {} files verified successfully (parallel)!",
             total_files
@@ -3011,6 +3166,16 @@ fn verify_backup_parallel_impl(
             total_files
         )
     };
+
+    if VERIFY_CANCELLED.load(Ordering::SeqCst) {
+        VERIFY_CANCELLED.store(false, Ordering::SeqCst);
+        return Err("Verification cancelled".into());
+    }
+    if success {
+        if let Some(warning) = verification_state::record_success(&backup_path, &metadata, &verification_evidence)? {
+            message.push_str(&format!("\n⚠️ {warning}"));
+        }
+    }
 
     let _ = window.emit("backup-log", &message);
 
@@ -3082,6 +3247,7 @@ fn list_backups(target_path: String) -> Result<Vec<BackupListItem>, String> {
                     validate_backup_profile(&metadata, &profile_id)?;
                     Ok(metadata)
                 });
+            let hash_verified = metadata.as_ref().is_ok_and(|m| verification_state::is_verified(&entry.path(), m));
             let (metadata_valid, incremental_stats_available, new_archive_size_bytes, reused_archive_size_bytes) = match metadata {
                 Ok(metadata) => (true, metadata.incremental_stats_version >= 1, metadata.new_archive_size_bytes, metadata.reused_archive_size_bytes),
                 Err(_) => (false, false, 0, 0),
@@ -3093,7 +3259,7 @@ fn list_backups(target_path: String) -> Result<Vec<BackupListItem>, String> {
                 incremental_stats_available,
                 new_archive_size_bytes,
                 reused_archive_size_bytes,
-                hash_verified: false,
+                hash_verified,
                 metadata_valid,
             });
         }
@@ -3310,6 +3476,10 @@ fn restore_items_impl(
 ) -> Result<RestoreResult, String> {
     let _guard = OperationGuard::acquire()?;
     let _progress = BackupProgress::attach(window.clone());
+    let _throttle = throttle::activate(&load_config()?, Path::new(&target_path))?;
+    if let Some(note) = throttle::describe() {
+        let _ = window.emit("restore-log", format!("🌡️ {note}"));
+    }
     validate_component(&timestamp)?;
     let backup = profile_root(&target_path, &profile_id)?
         .join("data")
@@ -4158,6 +4328,121 @@ pub fn run() {
 
 #[cfg(test)]
 mod restore_tests;
+
+#[cfg(test)]
+mod governor_tests {
+    use super::*;
+
+    fn writer(output: &Path, blocks: u32) -> Command {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg(format!(
+            "i=0; while [ $i -lt {blocks} ]; do head -c 1048576 /dev/zero >> '{}'; i=$((i+1)); done",
+            output.display()
+        ));
+        cmd
+    }
+    fn process_alive(pid: u32) -> bool {
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+
+    #[test]
+    fn governed_writer_is_paced_and_output_complete() {
+        BACKUP_CANCELLED.store(false, Ordering::SeqCst);
+        VERIFY_CANCELLED.store(false, Ordering::SeqCst);
+        let dir = PrivateDir::temp().unwrap();
+        let output = dir.0.join("archive");
+        let _throttle = throttle::activate_for_tests(&dir.0, 8).unwrap();
+        let started = std::time::Instant::now();
+        let out = run_with_timeout_governed(
+            writer(&output, 24),
+            std::time::Duration::from_secs(60),
+            &output,
+        )
+        .unwrap();
+        assert!(out.status.success());
+        assert_eq!(fs::metadata(&output).unwrap().len(), 24 * 1024 * 1024);
+        // 24 MiB at 8 MB/s ≈ 3.1 s minus the 0.5 s burst allowance.
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(2000),
+            "writer was not slowed down: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn unlimited_writer_runs_at_full_speed_without_governor() {
+        BACKUP_CANCELLED.store(false, Ordering::SeqCst);
+        VERIFY_CANCELLED.store(false, Ordering::SeqCst);
+        let dir = PrivateDir::temp().unwrap();
+        let output = dir.0.join("archive");
+        let out = run_with_timeout_governed(
+            writer(&output, 8),
+            std::time::Duration::from_secs(60),
+            &output,
+        )
+        .unwrap();
+        assert!(out.status.success());
+        assert_eq!(fs::metadata(&output).unwrap().len(), 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn cancelling_a_paused_child_terminates_it() {
+        BACKUP_CANCELLED.store(false, Ordering::SeqCst);
+        VERIFY_CANCELLED.store(false, Ordering::SeqCst);
+        let dir = PrivateDir::temp().unwrap();
+        let output = dir.0.join("archive");
+        let pid_file = dir.0.join("pid");
+        let _throttle = throttle::activate_for_tests(&dir.0, 1).unwrap();
+        // The child writes far more than the limit allows, so it is paused
+        // when the cancellation arrives.
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg(format!(
+            "echo $$ > '{}'; i=0; while [ $i -lt 200 ]; do head -c 1048576 /dev/zero >> '{}'; i=$((i+1)); done",
+            pid_file.display(),
+            output.display()
+        ));
+        let canceller = std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            BACKUP_CANCELLED.store(true, Ordering::SeqCst);
+        });
+        let result = run_with_timeout_governed(cmd, std::time::Duration::from_secs(60), &output);
+        canceller.join().unwrap();
+        BACKUP_CANCELLED.store(false, Ordering::SeqCst);
+        assert_eq!(result.unwrap_err(), "Vorgang abgebrochen");
+        let pid: u32 = fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
+        // Give the kernel a moment to reap the killed process group.
+        for _ in 0..50 {
+            if !process_alive(pid) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!process_alive(pid), "child {pid} survived cancellation");
+        assert!(fs::metadata(&output).unwrap().len() < 200 * 1024 * 1024);
+    }
+
+    #[test]
+    fn stdin_fed_child_receives_throttled_input() {
+        BACKUP_CANCELLED.store(false, Ordering::SeqCst);
+        VERIFY_CANCELLED.store(false, Ordering::SeqCst);
+        let dir = PrivateDir::temp().unwrap();
+        let input = dir.0.join("input");
+        fs::write(&input, vec![7u8; 6 * 1024 * 1024]).unwrap();
+        let _throttle = throttle::activate_for_tests(&dir.0, 8).unwrap();
+        let reader = throttle::open_throttled(&input).unwrap();
+        let mut cmd = Command::new("/usr/bin/wc");
+        cmd.arg("-c");
+        let started = std::time::Instant::now();
+        let out = run_with_timeout_stdin(cmd, std::time::Duration::from_secs(60), Box::new(reader))
+            .unwrap();
+        assert!(out.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            (6 * 1024 * 1024).to_string()
+        );
+        assert!(started.elapsed() >= std::time::Duration::from_millis(250));
+    }
+}
 
 #[cfg(test)]
 mod profile_tests {

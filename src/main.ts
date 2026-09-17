@@ -1,4 +1,6 @@
+import { verificationStatusKey } from "./verification-ui";
 import { localizeMessage } from "./messages";
+import { normalizeThrottleMbPerS, THROTTLE_DEFAULT_MB_PER_S } from "./throttle-ui";
 import { ProgressIndicator } from "./progress-ui";
 import { renderCancelControl } from "./cancel-ui";
 import { browserRestoreGroup, createRestoreRow, restoreStatusKey } from "./restore-ui";
@@ -28,6 +30,8 @@ interface BackupConfig {
   backup_chrome_settings: boolean;
   backup_firefox_settings: boolean;
   keep_session_unlocked_during_backup: boolean;
+  throttle_enabled: boolean;
+  throttle_mb_per_s: number;
   backup_vscode_settings: boolean;
   backup_chatgpt_settings: boolean;
   backup_codex_settings: boolean;
@@ -153,6 +157,10 @@ const translations: Record<string, Record<string, string>> = {
     unattendedBackup: "Unbeaufsichtigtes Backup",
     keepSessionUnlocked: "Monitor darf ausgehen, Sitzung für Backup entsperrt halten",
     keepSessionUnlockedHint: "Verzögert die Passwortsperre nur während des Backups und stellt deine bisherige Einstellung danach wieder her.",
+    throttleTitle: "Durchsatzbegrenzung",
+    throttleEnabled: "Lese-/Schreibdurchsatz auf das Backup-Ziel begrenzen",
+    throttleMbPerS: "Maximal (MB/s)",
+    throttleHint: "Für externe SSDs, deren USB-Controller bei vollem Tempo überhitzt und ausgeworfen wird. Gilt für Backup, Prüfung und Wiederherstellung dieses Profils.",
     browserSettings: "Browser-Einstellungen",
     backupChromeSettings: "Chrome-Profile sichern",
     chromeSettingsHint: "Einstellungen, Lesezeichen und Erweiterungen aller lokalen Profile",
@@ -336,6 +344,7 @@ const translations: Record<string, Record<string, string>> = {
     restoreWithErrors: "Wiederherstellung mit Fehlern beendet",
     restoreNothingChanged: "Keine Änderungen – vorhandene Elemente übersprungen",
     backupNotVerified: "noch nicht verifiziert",
+    backupVerified: "✓ verifiziert",
     backupInvalid: "Metadaten ungültig oder unvollständig",
     operationBusy: "Ein Vorgang läuft bereits. Bitte warten.",
     restoredItems: "Wiederhergestellt",
@@ -425,6 +434,10 @@ const translations: Record<string, Record<string, string>> = {
     unattendedBackup: "Unattended backup",
     keepSessionUnlocked: "Allow display sleep and keep the session unlocked for backup",
     keepSessionUnlockedHint: "Delays the password lock only while the backup runs, then restores your previous setting.",
+    throttleTitle: "Throughput limit",
+    throttleEnabled: "Limit read/write throughput to the backup target",
+    throttleMbPerS: "Maximum (MB/s)",
+    throttleHint: "For external SSDs whose USB controller overheats and gets ejected at full speed. Applies to backup, verification and restore for this profile.",
     browserSettings: "Browser settings",
     backupChromeSettings: "Back up Chrome profiles",
     chromeSettingsHint: "Settings, bookmarks and extensions from all local profiles",
@@ -623,6 +636,7 @@ const translations: Record<string, Record<string, string>> = {
     restoreWithErrors: "Restore finished with errors",
     restoreNothingChanged: "No changes – existing items skipped",
     backupNotVerified: "not yet verified",
+    backupVerified: "✓ verified",
     backupInvalid: "invalid or incomplete metadata",
     operationBusy: "An operation is already running. Please wait.",
     restoredItems: "Restored",
@@ -749,6 +763,8 @@ const backupSafariSettingsCheckbox = document.getElementById("backup-safari-sett
 const backupChromeSettingsCheckbox = document.getElementById("backup-chrome-settings") as HTMLInputElement;
 const backupFirefoxSettingsCheckbox = document.getElementById("backup-firefox-settings") as HTMLInputElement;
 const keepSessionUnlockedCheckbox = document.getElementById("keep-session-unlocked-during-backup") as HTMLInputElement;
+const throttleEnabledCheckbox = document.getElementById("throttle-enabled") as HTMLInputElement;
+const throttleMbPerSInput = document.getElementById("throttle-mb-per-s") as HTMLInputElement;
 const appSettingsControls = ["vscode", "chatgpt", "codex"].map(id => ({
   id,
   key: `backup_${id}_settings` as "backup_vscode_settings" | "backup_chatgpt_settings" | "backup_codex_settings",
@@ -807,6 +823,8 @@ let config: BackupConfig = {
   backup_chrome_settings: false,
   backup_firefox_settings: false,
   keep_session_unlocked_during_backup: false,
+  throttle_enabled: false,
+  throttle_mb_per_s: THROTTLE_DEFAULT_MB_PER_S,
   backup_vscode_settings: true,
   backup_chatgpt_settings: true,
   backup_codex_settings: true,
@@ -1318,6 +1336,8 @@ async function loadBackups(): Promise<void> {
     return;
   }
   
+  const selectedTimestamp = backupSelect.value;
+  const selectedProfile = selectedBackupProfileId();
   try {
     const backups = await invoke<BackupItem[]>("list_backups", {
       targetPath: targetPath,
@@ -1328,7 +1348,7 @@ async function loadBackups(): Promise<void> {
       const option = document.createElement("option");
       option.value = backup.timestamp;
       option.dataset.profileId = backup.profile_id;
-      const verified = backup.metadata_valid ? t("backupNotVerified") : t("backupInvalid");
+      const verified = t(verificationStatusKey(backup));
       const formatted = formatTimestamp(backup.timestamp);
       const delta = backup.incremental_stats_available
         ? ` · +${formatBytesShort(backup.new_archive_size_bytes)} ${t("backupDeltaNew")} · ${formatBytesShort(backup.reused_archive_size_bytes)} ${t("backupDeltaReused")}`
@@ -1336,6 +1356,7 @@ async function loadBackups(): Promise<void> {
       option.textContent = `[${backup.profile_name}] ${formatted}${delta} [${verified}]`;
       option.dataset.label = formatted;
       backupSelect.appendChild(option);
+      if (backup.timestamp === selectedTimestamp && backup.profile_id === selectedProfile) option.selected = true;
     }
     
     if (backups.length === 0) {
@@ -2226,8 +2247,6 @@ btnRestoreTest.addEventListener("click", async () => {
       if (result.success) {
         log(`✅ ${result.message}`);
         setStatusMessage(result.message);
-        const option = Array.from(backupSelect.options).find(o => o.value === timestamp);
-        if (option) option.textContent = `${option.dataset.label || formatTimestamp(timestamp)} [✓]`;
       } else {
         log(`❌ ${result.message}`);
         for (const failure of result.failed_files) {
@@ -2245,6 +2264,7 @@ btnRestoreTest.addEventListener("click", async () => {
       setStatusMessage(t("verifyCancelled"));
     }
   } finally {
+    await loadBackups();
     verifyInProgress = false;
     operationInProgress = false;
     setOperationControls(false);
@@ -2820,9 +2840,19 @@ btnSettings.addEventListener("click", () => {
   if (keepSessionUnlockedCheckbox) {
     keepSessionUnlockedCheckbox.checked = config.keep_session_unlocked_during_backup || false;
   }
+  if (throttleEnabledCheckbox && throttleMbPerSInput) {
+    throttleEnabledCheckbox.checked = config.throttle_enabled || false;
+    throttleMbPerSInput.value = String(normalizeThrottleMbPerS(config.throttle_mb_per_s));
+    throttleMbPerSInput.disabled = !throttleEnabledCheckbox.checked;
+  }
   for (const control of appSettingsControls) control.checkbox.checked = config[control.key];
   settingsDialog.showModal();
   void refreshAppSettingsPreview();
+});
+
+throttleEnabledCheckbox?.addEventListener("change", () => {
+  throttleMbPerSInput.disabled = !throttleEnabledCheckbox.checked;
+  if (throttleEnabledCheckbox.checked) throttleMbPerSInput.focus();
 });
 
 settingsCancelBtn.addEventListener("click", () => {
@@ -2839,6 +2869,8 @@ settingsSaveBtn.addEventListener("click", async () => {
     backup_chrome_settings: backupChromeSettingsCheckbox.checked,
     backup_firefox_settings: backupFirefoxSettingsCheckbox.checked,
     keep_session_unlocked_during_backup: keepSessionUnlockedCheckbox.checked,
+    throttle_enabled: throttleEnabledCheckbox.checked,
+    throttle_mb_per_s: normalizeThrottleMbPerS(throttleMbPerSInput.value, config.throttle_mb_per_s),
   };
   for (const control of appSettingsControls) next[control.key] = control.checkbox.checked;
   settingsSaveBtn.disabled = true;
