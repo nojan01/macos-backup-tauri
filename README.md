@@ -267,6 +267,15 @@ npm run make-updater-manifest -- <version> darwin-aarch64 "src-tauri/target/rele
 Assets in dasselbe GitHub-Release wie die DMG. Der private Schlüssel bleibt
 lokal und wird niemals veröffentlicht.
 
+Wird das Updater-Archiv nach dem Stapeln der Notarisierung von Hand neu
+erzeugt, dürfen keine AppleDouble-Einträge (`._…`) hineingeraten – der Updater
+bricht sonst mit „failed to unpack `._macOS Backup Suite.app`“ ab:
+
+```bash
+COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -czf "macOS Backup Suite.app.tar.gz" "macOS Backup Suite.app"
+npx tauri signer sign --private-key-path "$TAURI_SIGNING_PRIVATE_KEY" --password "" "macOS Backup Suite.app.tar.gz"
+```
+
 ### Projektstruktur
 ```
 macos-backup-tauri/
