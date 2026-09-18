@@ -581,17 +581,14 @@ pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let tmp = stage.0.join("new");
     let mut f = fs::File::create(&tmp).map_err(|e| fail(path, e))?;
     f.write_all(bytes).map_err(|e| fail(path, e))?;
-    f.sync_all().map_err(|e| fail(path, e))?;
+    crate::throttle::sync_file(&f, &tmp).map_err(|e| fail(path, e))?;
     publish(&tmp, path)
 }
+
 fn publish(tmp: &Path, path: &Path) -> Result<(), String> {
-    fs::File::open(tmp)
-        .and_then(|f| f.sync_all())
-        .map_err(|e| fail(path, e))?;
+    crate::throttle::sync_path(tmp).map_err(|e| fail(path, e))?;
     fs::rename(tmp, path).map_err(|e| fail(path, e))?;
-    fs::File::open(path.parent().ok_or("Missing parent")?)
-        .and_then(|f| f.sync_all())
-        .map_err(|e| fail(path, e))
+    crate::throttle::sync_path(path.parent().ok_or("Missing parent")?).map_err(|e| fail(path, e))
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ArchiveReuse {

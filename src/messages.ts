@@ -71,6 +71,8 @@ export const messagePairs: [string,string][] = [
   ['{0} von {1} Dateien fehlerhaft','{0} of {1} files failed'],
   ['✅ App-Installer kopiert: {0}','✅ App installer copied: {0}'],
   ['🌡️ Durchsatzbegrenzung aktiv: {0} MB/s','🌡️ Throughput limit active: {0} MB/s'],
+  ['🌡️ Durchsatzbegrenzung aktiv: {0} MB/s · Laufwerks-Cache wird nicht erzwungen geleert','🌡️ Throughput limit active: {0} MB/s · drive cache flush is not forced'],
+  ['🌡️ Laufwerks-Cache wird nicht erzwungen geleert','🌡️ Drive cache flush is not forced'],
   ['{0} MiB geschrieben · gedrosselt auf {1} MB/s','{0} MiB written · throttled to {1} MB/s'],
   ['Durchsatzbegrenzung ist bereits aktiv','Throughput limit is already active'],
 ];

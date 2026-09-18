@@ -32,6 +32,7 @@ interface BackupConfig {
   keep_session_unlocked_during_backup: boolean;
   throttle_enabled: boolean;
   throttle_mb_per_s: number;
+  gentle_sync: boolean;
   backup_vscode_settings: boolean;
   backup_chatgpt_settings: boolean;
   backup_codex_settings: boolean;
@@ -161,6 +162,8 @@ const translations: Record<string, Record<string, string>> = {
     throttleEnabled: "Lese-/Schreibdurchsatz auf das Backup-Ziel begrenzen",
     throttleMbPerS: "Maximal (MB/s)",
     throttleHint: "Für externe SSDs, deren USB-Controller bei vollem Tempo überhitzt und ausgeworfen wird. Gilt für Backup, Prüfung und Wiederherstellung dieses Profils.",
+    gentleSyncEnabled: "Laufwerks-Cache nicht erzwungen leeren (schont USB-Gehäuse)",
+    gentleSyncHint: "Beim Abschließen eines Archivs verlangt macOS sonst vom Laufwerk, seinen Schreib-Cache vollständig zu leeren (F_FULLFSYNC). Manche USB-NVMe-Gehäuse setzen sich dabei zurück und werden ausgeworfen. Mit dieser Option werden die Daten weiterhin an das Laufwerk übergeben, der erzwungene Cache-Flush entfällt jedoch – bei einem Stromausfall in genau diesem Moment könnte das letzte Archiv unvollständig sein.",
     browserSettings: "Browser-Einstellungen",
     backupChromeSettings: "Chrome-Profile sichern",
     chromeSettingsHint: "Einstellungen, Lesezeichen und Erweiterungen aller lokalen Profile",
@@ -438,6 +441,8 @@ const translations: Record<string, Record<string, string>> = {
     throttleEnabled: "Limit read/write throughput to the backup target",
     throttleMbPerS: "Maximum (MB/s)",
     throttleHint: "For external SSDs whose USB controller overheats and gets ejected at full speed. Applies to backup, verification and restore for this profile.",
+    gentleSyncEnabled: "Do not force the drive cache to flush (protects USB enclosures)",
+    gentleSyncHint: "When an archive is finalized, macOS otherwise asks the drive to flush its entire write cache (F_FULLFSYNC). Some USB NVMe enclosures reset and get ejected at that point. With this option the data is still handed to the drive, but the forced cache flush is skipped – if power is lost at exactly that moment, the last archive could be incomplete.",
     browserSettings: "Browser settings",
     backupChromeSettings: "Back up Chrome profiles",
     chromeSettingsHint: "Settings, bookmarks and extensions from all local profiles",
@@ -765,6 +770,7 @@ const backupFirefoxSettingsCheckbox = document.getElementById("backup-firefox-se
 const keepSessionUnlockedCheckbox = document.getElementById("keep-session-unlocked-during-backup") as HTMLInputElement;
 const throttleEnabledCheckbox = document.getElementById("throttle-enabled") as HTMLInputElement;
 const throttleMbPerSInput = document.getElementById("throttle-mb-per-s") as HTMLInputElement;
+const gentleSyncCheckbox = document.getElementById("throttle-gentle-sync") as HTMLInputElement;
 const appSettingsControls = ["vscode", "chatgpt", "codex"].map(id => ({
   id,
   key: `backup_${id}_settings` as "backup_vscode_settings" | "backup_chatgpt_settings" | "backup_codex_settings",
@@ -825,6 +831,7 @@ let config: BackupConfig = {
   keep_session_unlocked_during_backup: false,
   throttle_enabled: false,
   throttle_mb_per_s: THROTTLE_DEFAULT_MB_PER_S,
+  gentle_sync: false,
   backup_vscode_settings: true,
   backup_chatgpt_settings: true,
   backup_codex_settings: true,
@@ -2845,6 +2852,7 @@ btnSettings.addEventListener("click", () => {
     throttleMbPerSInput.value = String(normalizeThrottleMbPerS(config.throttle_mb_per_s));
     throttleMbPerSInput.disabled = !throttleEnabledCheckbox.checked;
   }
+  if (gentleSyncCheckbox) gentleSyncCheckbox.checked = config.gentle_sync || false;
   for (const control of appSettingsControls) control.checkbox.checked = config[control.key];
   settingsDialog.showModal();
   void refreshAppSettingsPreview();
@@ -2871,6 +2879,7 @@ settingsSaveBtn.addEventListener("click", async () => {
     keep_session_unlocked_during_backup: keepSessionUnlockedCheckbox.checked,
     throttle_enabled: throttleEnabledCheckbox.checked,
     throttle_mb_per_s: normalizeThrottleMbPerS(throttleMbPerSInput.value, config.throttle_mb_per_s),
+    gentle_sync: gentleSyncCheckbox?.checked ?? config.gentle_sync,
   };
   for (const control of appSettingsControls) next[control.key] = control.checkbox.checked;
   settingsSaveBtn.disabled = true;

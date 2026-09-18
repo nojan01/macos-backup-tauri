@@ -147,6 +147,9 @@ pub struct BackupConfig {
     pub throttle_enabled: bool,
     #[serde(default = "default_throttle_mb_per_s")]
     pub throttle_mb_per_s: u32,
+    /// Persist files on the target with plain fsync instead of F_FULLFSYNC.
+    #[serde(default)]
+    pub gentle_sync: bool,
 }
 
 fn default_throttle_mb_per_s() -> u32 {
@@ -176,6 +179,7 @@ impl Default for BackupConfig {
             backup_codex_settings: true,
             throttle_enabled: false,
             throttle_mb_per_s: default_throttle_mb_per_s(),
+            gentle_sync: false,
         }
     }
 }

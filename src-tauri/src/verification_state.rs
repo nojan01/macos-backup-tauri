@@ -54,7 +54,7 @@ fn evidence(root: &Path, metadata: &BackupMetadata) -> Result<Evidence, String> 
 /// Invalidate the old result before any new check, including failure/cancel.
 pub(super) fn begin(root: &Path, metadata: &BackupMetadata) -> Result<Evidence, String> {
     match fs::remove_file(root.join(RECEIPT)) {
-        Ok(()) => fs::File::open(root).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?,
+        Ok(()) => crate::throttle::sync_path(root).map_err(|e| e.to_string())?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
         Err(e) => return Err(format!("Altes Prüfergebnis konnte nicht zurückgesetzt werden: {e}")),
     }
