@@ -1178,12 +1178,41 @@ fn compressed_file_roundtrip_retains_content_and_compression_flag() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let expected = compute_snapshot(&compressed).unwrap();
+    let mut expected = compute_snapshot(&compressed).unwrap();
+    let mut source = compressed.clone();
+    if expected[0].flags & libc::UF_COMPRESSED == 0 {
+        // Newer macOS releases (APFS, 26+) let `ditto --hfsCompression` finish
+        // successfully without compressing anything. The archive logic under
+        // test needs a real kernel-compressed file, so borrow one that an
+        // installer left compressed (read-only use). SIP-restricted system
+        // files are unsuitable: their SF_RESTRICTED flag cannot be restored.
+        const SF_RESTRICTED: u32 = 0x0008_0000;
+        let is_fixture = |p: &Path| {
+            compute_snapshot(p).is_ok_and(|s| {
+                s[0].flags & libc::UF_COMPRESSED != 0 && s[0].flags & SF_RESTRICTED == 0
+            })
+        };
+        let Some(system) = fs::read_dir("/Applications")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path().join("Contents/Info.plist"))
+            .filter(|p| p.is_file())
+            .find(|p| is_fixture(p))
+        else {
+            eprintln!("skipping: ditto did not compress and no compressed Info.plist found in /Applications");
+            return;
+        };
+        source = system;
+        expected = compute_snapshot(&source).unwrap();
+    }
     assert_ne!(expected[0].flags & libc::UF_COMPRESSED, 0);
     let archive = d.0.join("compressed.tar.gz");
-    create_verified_archive_from_snapshot(&compressed, &archive, true, &expected).unwrap();
-    verify_archive_source(&archive, "compressed", &expected).unwrap();
-    assert_eq!(fs::read(&compressed).unwrap(), fs::read(&plain).unwrap());
+    create_verified_archive_from_snapshot(&source, &archive, true, &expected).unwrap();
+    verify_archive_source(&archive, source.file_name().unwrap().to_str().unwrap(), &expected).unwrap();
+    if source == compressed {
+        assert_eq!(fs::read(&compressed).unwrap(), fs::read(&plain).unwrap());
+    }
 }
 
 #[test]
