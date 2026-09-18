@@ -236,6 +236,15 @@ impl Limiter {
         }
         Ok(())
     }
+    /// Like [`acquire`](Self::acquire) but ignores cancellation: cleanup must
+    /// finish gently even after the user has aborted the operation.
+    fn pace(&self, bytes: u64) {
+        let mut wait = self.debit(bytes);
+        while !wait.is_zero() {
+            std::thread::sleep(wait.min(SLICE));
+            wait = self.pending();
+        }
+    }
 }
 
 /// Reader that charges every byte to the target limit (pass-through when unlimited).
@@ -288,6 +297,51 @@ pub(crate) fn copy_file(source: &Path, target: &Path) -> io::Result<u64> {
     }
     writer.set_permissions(metadata.permissions())?;
     Ok(total)
+}
+
+/// Deleting a file frees its extents, and APFS then hands the drive TRIM/UNMAP
+/// commands for them. Several USB NVMe bridges reset under a burst of those, so
+/// removing a large temporary tree from the target is paced like a write of the
+/// freed bytes (plus one block per entry) and never runs concurrently.
+static DELETE_LOCK: Mutex<()> = Mutex::new(());
+const DELETE_ENTRY_COST: u64 = 4096;
+pub(crate) fn remove_dir_all(path: &Path) -> io::Result<()> {
+    let Some(limiter) = limiter_for(path) else {
+        if gentle_sync_for(path) {
+            let _serial = DELETE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            return std::fs::remove_dir_all(path);
+        }
+        return std::fs::remove_dir_all(path);
+    };
+    let _serial = DELETE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    for entry in walkdir::WalkDir::new(path)
+        .follow_links(false)
+        .follow_root_links(false)
+        .contents_first(true)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        let freed = entry
+            .metadata()
+            .map(|m| m.blocks().saturating_mul(512))
+            .unwrap_or(0)
+            .saturating_add(DELETE_ENTRY_COST);
+        let removed = if entry.file_type().is_dir() {
+            std::fs::remove_dir(entry.path())
+        } else {
+            std::fs::remove_file(entry.path())
+        };
+        if removed.is_ok() {
+            limiter.pace(freed);
+        }
+    }
+    // Entries that resisted (read-only modes, flags, ACLs) are left to the
+    // caller's fallback; report the outcome exactly like `fs::remove_dir_all`.
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => std::fs::remove_dir_all(path),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 /// Pauses a child's process group while its output file outruns the limit.
@@ -478,6 +532,36 @@ mod tests {
         }
         assert!(!gentle_sync_for(&file), "guard must clear the mode");
         sync_path(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn paced_removal_deletes_the_whole_tree_and_is_slowed_by_the_limit() {
+        reset_cancel();
+        let dir = std::env::temp_dir().join(format!("throttle-rm-{}", std::process::id()));
+        let tree = dir.join("tree");
+        std::fs::create_dir_all(tree.join("a/b")).unwrap();
+        std::fs::write(tree.join("a/big.bin"), vec![3u8; 2_500_000]).unwrap();
+        std::fs::write(tree.join("a/b/small.txt"), b"x").unwrap();
+        std::os::unix::fs::symlink("missing", tree.join("link")).unwrap();
+        // Without a limit the plain removal is used and the tree still vanishes.
+        remove_dir_all(&tree).unwrap();
+        assert!(!tree.exists());
+        assert!(remove_dir_all(&tree).is_err(), "missing tree reports NotFound like std");
+        std::fs::create_dir_all(tree.join("a/b")).unwrap();
+        std::fs::write(tree.join("a/big.bin"), vec![3u8; 2_500_000]).unwrap();
+        std::fs::write(tree.join("a/b/small.txt"), b"x").unwrap();
+        {
+            let _guard = activate_for_tests(&dir, 2).unwrap();
+            // Cancellation must not skip the pacing or the deletion itself.
+            crate::BACKUP_CANCELLED.store(true, Ordering::SeqCst);
+            let started = Instant::now();
+            remove_dir_all(&tree).unwrap();
+            // 2.5 MB freed at 2 MB/s with a 1 MB burst: at least ~0.5 s.
+            assert!(started.elapsed() >= Duration::from_millis(400), "{:?}", started.elapsed());
+            assert!(!tree.exists());
+        }
+        reset_cancel();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

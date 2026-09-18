@@ -614,7 +614,7 @@ struct ReadbackDir(PrivateDir);
 impl Drop for ReadbackDir {
     fn drop(&mut self) {
         let _phase = crate::work_progress::Phase::enter("Temporäre Rücklesedaten aufräumen");
-        if fs::remove_dir_all(&self.0 .0).is_ok() {
+        if crate::throttle::remove_dir_all(&self.0 .0).is_ok() {
             return;
         }
         unsafe extern "C" {

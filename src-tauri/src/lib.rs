@@ -1835,7 +1835,7 @@ fn discard_resumable_backup(
 /// ACLs or user-set immutable flags behind. The caller has already validated
 /// the timestamp and confines this to a suite-owned backup directory.
 fn remove_protected_tree(path: &Path) -> Result<(), String> {
-    if fs::remove_dir_all(path).is_ok() || !path.exists() {
+    if throttle::remove_dir_all(path).is_ok() || !path.exists() {
         return Ok(());
     }
     unsafe extern "C" {
@@ -1865,7 +1865,7 @@ fn remove_protected_tree(path: &Path) -> Result<(), String> {
                 .map_err(|e| format!("{}: {e}", entry_path.display()))?;
         }
     }
-    fs::remove_dir_all(path).map_err(|e| format!("{}: {e}", path.display()))
+    throttle::remove_dir_all(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// Liefert Timestamp + Metadata des jeweils letzten Backups oder None.
