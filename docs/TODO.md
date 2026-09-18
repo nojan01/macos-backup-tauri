@@ -35,7 +35,22 @@
 - Nur `<div class="settings-section">`-Blöcke in `index.html` umsortieren; IDs/i18n-Keys bleiben, kein Backend betroffen.
 - Ggf. gemeinsame Zwischenüberschrift „Technische Einstellungen“.
 
-### 6. Kleinkram
+### 6. Echte Inkremente statt Verzeichnis-Granularität (Architekturthema)
+- Heute: „Inkrementell“ = ein **ganzes Quellverzeichnis** wird nur dann per Hardlink übernommen, wenn sich **keine einzige Datei**
+  darin geändert hat (`same_source_version` in `lib.rs` ~2416). Sonst wird das gesamte Archiv neu geschrieben.
+- Beleg 15.09. → 18.09.: `~/Pictures` 165,6 GB komplett neu, obwohl nur 151 geänderte + 63 neue Dateien (0,37 GB) –
+  Fotos-Mediathek (`Photos.sqlite`, Spotlight-Index) ändert sich bei jedem Öffnen. `reused_archive_size_bytes` = 22 MB von 317 GB.
+- Bei Fotos-Mediathek, Parallels-VMs, Mail, Messages greift die Wiederverwendung praktisch nie → jedes Backup ≈ Vollbackup.
+- Optionen (Aufwand steigend):
+  a) Große, sich ständig ändernde Bundles als **eigene Quellwurzeln** anlegen (z. B. `Photos Library.photoslibrary/originals`
+     getrennt von `database/`) – dann wird der große, stabile Teil per Hardlink übernommen. Kleine Änderung: Quellenliste/Profil.
+  b) **Datei-Granulare Inkremente**: pro Quelle nur geänderte/neue Dateien in ein Delta-Archiv; Manifest verweist für
+     unveränderte Dateien auf das Archiv des Vorgängers. Restore muss dann mehrere Archive kombinieren; Aufbewahrung darf
+     referenzierte Vorgänger nicht löschen. Prüfsummen-Manifeste existieren bereits (`inventories/<ts>/manifests`).
+  c) Chunk-Deduplizierung (à la borg/restic) – Neubau des Speicherformats, nicht empfohlen.
+- Empfehlung: a) sofort möglich; b) als 1.3-Thema planen.
+
+### 7. Kleinkram
 
 - Separate Funktion „Backup prüfen“ liest alle Archive noch einmal – ggf. Hinweis in README, dass sie seltener nötig ist.
 
