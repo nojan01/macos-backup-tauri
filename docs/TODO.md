@@ -28,7 +28,14 @@
 - TRIM-Status: `diskutil info /Volumes/Backup02 | grep -i trim`
 - Ergebnis eines Backups mit 1.2.49 abwarten (Rückleseprüfung läuft jetzt über die interne SSD).
 
-### 5. Kleinkram
+### 5. Einstellungsdialog: technische Abschnitte ans Ende (UI)
+- Heute (`index.html` ab Z. 136): Standard-Ordner → Software-Inventar → Safari → Browser → Unbeaufsichtigtes Backup → **🌡️ Durchsatzbegrenzung** → App-Einstellungen.
+- Ziel: inhaltliche Auswahl (Ordner, Inventar, Safari, Browser, App-Einstellungen) oben; technische Schutz-/Laufzeitoptionen
+  (🌙 Unbeaufsichtigtes Backup, 🌡️ Durchsatzbegrenzung inkl. Cache-Option) als letzte Abschnitte vor den Dialog-Buttons.
+- Nur `<div class="settings-section">`-Blöcke in `index.html` umsortieren; IDs/i18n-Keys bleiben, kein Backend betroffen.
+- Ggf. gemeinsame Zwischenüberschrift „Technische Einstellungen“.
+
+### 6. Kleinkram
 
 - Separate Funktion „Backup prüfen“ liest alle Archive noch einmal – ggf. Hinweis in README, dass sie seltener nötig ist.
 
