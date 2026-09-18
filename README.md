@@ -359,6 +359,10 @@ cargo check --manifest-path src-tauri/Cargo.toml
 
 Die Rust-Tests prüfen unter anderem Archivkollisionen, SHA-256, korrupte Archive, Datei-Konflikte, Safari/Cache, Symlinks, alte Kompressionsformate und Installationsfehler. Die UI-Tests prüfen die sichere Verarbeitung von Dateinamen und die Ergebnisanzeige. Ein vollständiger macOS-Restore einschließlich Full Disk Access und echter App-Store-/Homebrew-Installationen muss zusätzlich in einem separaten Testkonto oder einer VM geprüft werden.
 
+## Offene Punkte und Pläne
+
+Offene Aufgaben stehen in [`docs/TODO.md`](docs/TODO.md); ausgearbeitete Pläne (z. B. Durchsatzlimit zur Laufzeit ändern) daneben in `docs/`.
+
 ## Sprache und platzsparende Rückleseprüfung (1.2.22)
 
 Einstellungen, Dialoge, Hilfetexte, Fußzeile und laufende Prüfmeldungen folgen der ausgewählten Sprache. Beim Sprachwechsel bleiben der laufende Status und der Prozentwert erhalten; auch das Protokoll wird mit seinen ursprünglichen Zeitpunkten neu dargestellt. Dateipfade und externe Werkzeugausgaben werden nicht übersetzt.
