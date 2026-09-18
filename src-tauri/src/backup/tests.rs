@@ -507,6 +507,23 @@ fn large_file_scan_reports_progress_inside_file_and_matches_manifest() {
     assert_eq!(snapshot, compute_snapshot(&path).unwrap());
 }
 #[test]
+fn scan_on_the_protected_target_is_charged_to_the_limit() {
+    let d = fixture();
+    let tree = d.0.join("tree");
+    fs::create_dir_all(tree.join("sub")).unwrap();
+    fs::write(tree.join("big.bin"), vec![0x5a; 2_500_000]).unwrap();
+    for i in 0..50 {
+        fs::write(tree.join("sub").join(format!("small-{i}")), b"x").unwrap();
+    }
+    let plain = compute_snapshot(&tree).unwrap();
+    let _throttle = crate::throttle::activate_for_tests(&d.0, 2).unwrap();
+    let started = std::time::Instant::now();
+    let limited = compute_snapshot(&tree).unwrap();
+    // 2.5 MB plus 52 entries at 2 MB/s with a 1 MB burst: at least ~0.5 s.
+    assert!(started.elapsed() >= std::time::Duration::from_millis(400), "{:?}", started.elapsed());
+    assert_eq!(limited, plain);
+}
+#[test]
 fn progress_does_not_prevent_cancelling_inside_large_file() {
     let d = fixture();
     let path = d.0.join("large.bin");
