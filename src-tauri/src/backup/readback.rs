@@ -24,22 +24,49 @@ fn full_native_readback(
         .parent()
         .ok_or("Archiv ohne übergeordnetes Verzeichnis")?;
     let payload = expected.iter().fold(0u64, |total, entry| total.saturating_add(entry.s));
+    let required = RESERVE.saturating_add(payload).saturating_add(payload / 10);
     // This path is used only when a PAX metadata probe cannot be proved exact.
-    // Keep the temporary extraction on the backup volume, never on the system
-    // disk, and refuse it before consuming its required capacity.
-    require_free_space(
-        parent,
-        RESERVE.saturating_add(payload).saturating_add(payload / 10),
-    )?;
+    // Normally the temporary extraction stays on the backup volume, never on
+    // the system disk. When the user protects the target (throughput limit or
+    // gentle sync) the drive is presumed fragile, so the tree goes to the
+    // system temp dir if it fits: the target then only sees one sequential,
+    // limited read of the archive instead of writing, statting, hashing and
+    // deleting every single file again. Either way the capacity is refused
+    // before it is consumed.
+    let (stage_parent, label) = match readback_location(parent, required)? {
+        ReadbackLocation::Internal(dir) => (dir, "Vollständige Rückleseprüfung über die interne SSD"),
+        ReadbackLocation::Target => (parent.to_path_buf(), "Vollständige Rückleseprüfung auf dem Backup-Laufwerk"),
+    };
     // Native extraction restores ACLs and immutable flags. Use the cleanup
     // guard that clears those attributes so a failed verification cannot leave
-    // a large temporary readback tree on the backup volume.
-    let stage = ReadbackDir(PrivateDir::new(parent, ".readback-full")?);
-    let _phase = crate::work_progress::Phase::enter(
-        "Vollständige Rückleseprüfung auf dem Backup-Laufwerk",
-    );
+    // a large temporary readback tree behind.
+    let stage = ReadbackDir(PrivateDir::new(&stage_parent, ".readback-full")?);
+    let _phase = crate::work_progress::Phase::enter(label);
     unpack_private_with_root(archive, &stage.0 .0, Some(std::ffi::OsStr::new(root)))?;
     snapshot_with_phase(&stage.0 .0.join(root), "Vollständige Rückleseprüfung")
+}
+
+#[derive(Debug, PartialEq)]
+enum ReadbackLocation {
+    Internal(PathBuf),
+    Target,
+}
+/// Choose where the full readback tree is extracted, see [`full_native_readback`].
+/// Returns an error only when neither location has the required capacity.
+fn readback_location(target_parent: &Path, required: u64) -> Result<ReadbackLocation, String> {
+    let protected = crate::throttle::limiter_for(target_parent).is_some()
+        || crate::throttle::gentle_sync_for(target_parent);
+    if protected {
+        let internal = std::env::temp_dir();
+        let same_volume = std::fs::metadata(&internal)
+            .and_then(|i| std::fs::metadata(target_parent).map(|t| i.dev() == t.dev()))
+            .unwrap_or(true);
+        if !same_volume && require_free_space(&internal, required).is_ok() {
+            return Ok(ReadbackLocation::Internal(internal));
+        }
+    }
+    require_free_space(target_parent, required)?;
+    Ok(ReadbackLocation::Target)
 }
 
 #[derive(Debug)]
@@ -381,6 +408,20 @@ fn verify_with_metadata_limit(
 mod tests {
     use super::*;
     use std::os::unix::ffi::OsStrExt;
+    #[test]
+    fn full_readback_stays_on_the_target_unless_it_is_protected_and_internal_space_differs() {
+        let owned = ReadbackDir(PrivateDir::temp().unwrap());
+        let target = owned.0 .0.join("target");
+        fs::create_dir(&target).unwrap();
+        assert_eq!(readback_location(&target, 1).unwrap(), ReadbackLocation::Target);
+        assert!(readback_location(&target, u64::MAX / 4).is_err(), "refused before consuming capacity");
+        let _throttle = crate::throttle::activate_for_tests(&target, 8).unwrap();
+        // The test target shares the system volume with the temp dir, so moving
+        // the tree would not relieve the drive and the target is kept.
+        assert_eq!(readback_location(&target, 1).unwrap(), ReadbackLocation::Target);
+        let same_dev = fs::metadata(std::env::temp_dir()).unwrap().dev() == fs::metadata(&target).unwrap().dev();
+        assert!(same_dev);
+    }
     #[test]
     fn metadata_limit_uses_full_readback_and_cleans_both_stages() {
         let owned = ReadbackDir(PrivateDir::temp().unwrap());

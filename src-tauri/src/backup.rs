@@ -218,6 +218,10 @@ fn scan_with_activity(
     };
     report(&activity);
     activity.boundary = false;
+    // Scans of a tree on the protected target (readback of an extracted copy)
+    // are charged to the limit like a copy, so hundreds of thousands of small
+    // reads cannot hammer a USB bridge harder than the configured MB/s.
+    let limiter = crate::throttle::limiter_for(root);
     if std::env::var("BACKUP_EXTRA_EXCLUDES").is_ok_and(|v| !v.trim().is_empty()) {
         return Err("BACKUP_EXTRA_EXCLUDES wird nicht mehr stillschweigend angewandt. Variable entfernen; alle ausgewählten Daten werden vollständig gesichert.".into());
     }
@@ -233,7 +237,9 @@ fn scan_with_activity(
         activity.entries += 1;
         activity.elapsed = started.elapsed();
         report(&activity);
-        if let Some(entry) = read_stable_entry(root, path, &mut activity, report)? {
+        if let Some(entry) =
+            read_stable_entry(root, path, &mut activity, report, limiter.as_ref())?
+        {
             entries.push(entry);
         }
     }
@@ -283,17 +289,27 @@ fn read_stable_entry(
     path: &Path,
     activity: &mut ScanActivity,
     report: &mut impl FnMut(&ScanActivity),
+    limiter: Option<&crate::throttle::Limiter>,
 ) -> Result<Option<ManifestEntry>, String> {
-    retry_entry(path, || read_entry(root, path, activity, report))
+    retry_entry(path, || read_entry(root, path, activity, report, limiter))
 }
+/// Every entry costs at least this much against the limit: stat, xattr and ACL
+/// lookups are separate device commands even when the file itself is tiny.
+const SCAN_ENTRY_COST: u64 = 4096;
 fn read_entry(
     root: &Path,
     path: &Path,
     activity: &mut ScanActivity,
     report: &mut impl FnMut(&ScanActivity),
+    limiter: Option<&crate::throttle::Limiter>,
 ) -> Result<Option<ManifestEntry>, EntryReadError> {
     let started = std::time::Instant::now();
     let previous_elapsed = activity.elapsed;
+    if let Some(limiter) = limiter {
+        limiter
+            .acquire(SCAN_ENTRY_COST)
+            .map_err(|e| fail(path, e))?;
+    }
     let md = access_io(path, "Dateistatus lesen", || fs::symlink_metadata(path))?;
     if md.file_type().is_socket() {
         if path == root {
@@ -335,6 +351,9 @@ fn read_entry(
             let n = access_io(path, "Dateiinhalt lesen", || file.read(&mut buf))?;
             if n == 0 {
                 break;
+            }
+            if let Some(limiter) = limiter {
+                limiter.acquire(n as u64).map_err(|e| fail(path, e))?;
             }
             digest.update(&buf[..n]);
             activity.bytes += n as u64;
