@@ -41,7 +41,7 @@ impl PrivateDir {
 impl Drop for PrivateDir {
     fn drop(&mut self) {
         let _phase = crate::work_progress::Phase::enter("Temporäre Dateien aufräumen");
-        let _ = fs::remove_dir_all(&self.0);
+        let _ = crate::throttle::remove_dir_all(&self.0);
     }
 }
 
