@@ -196,6 +196,11 @@
           <input type="number" id="throttle-mb-per-s" min="1" max="5000" step="1" inputmode="numeric" />
         </label>
         <p class="settings-hint" data-i18n="throttleHint">Für externe SSDs, deren USB-Controller bei vollem Tempo überhitzt und ausgeworfen wird. Gilt für Backup, Prüfung und Wiederherstellung dieses Profils.</p>
+        <label class="checkbox-label">
+          <input type="checkbox" id="throttle-gentle-sync" />
+          <span data-i18n="gentleSyncEnabled">Laufwerks-Cache nicht erzwungen leeren (schont USB-Gehäuse)</span>
+        </label>
+        <p class="settings-hint" data-i18n="gentleSyncHint">Beim Abschließen eines Archivs verlangt macOS sonst vom Laufwerk, seinen Schreib-Cache vollständig zu leeren (F_FULLFSYNC). Manche USB-NVMe-Gehäuse setzen sich dabei zurück und werden ausgeworfen. Mit dieser Option werden die Daten weiterhin an das Laufwerk übergeben, der erzwungene Cache-Flush entfällt jedoch – bei einem Stromausfall in genau diesem Moment könnte das letzte Archiv unvollständig sein.</p>
       </div>
       
       <div class="settings-section">

@@ -6,8 +6,15 @@
 //! [`copy_file`]; the archive writer `tar -c` is governed by pausing its process
 //! group (SIGSTOP/SIGCONT) whenever the archive file grows faster than allowed.
 //! A stopped child is always continued before it is terminated or abandoned.
+//!
+//! The same target-volume bookkeeping drives the optional *gentle sync* mode:
+//! some USB bridges reset when the host forces a drive-cache flush
+//! (`F_FULLFSYNC` → SCSI SYNCHRONIZE CACHE), which macOS then reports as an
+//! ejected disk. With gentle sync, files on the target are persisted with a
+//! plain `fsync` instead, and all syncs are serialised process-wide.
 use std::io::{self, Read};
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -77,10 +84,13 @@ impl Bucket {
 
 struct Active {
     dev: u64,
-    mb_per_s: u32,
-    bucket: Arc<Mutex<Bucket>>,
+    /// `None` when only gentle sync is enabled and no rate limit applies.
+    limit: Option<(u32, Arc<Mutex<Bucket>>)>,
+    gentle_sync: bool,
 }
 static ACTIVE: Mutex<Option<Active>> = Mutex::new(None);
+/// Serialises every sync so parallel archives never flush the drive concurrently.
+static SYNC_LOCK: Mutex<()> = Mutex::new(());
 
 fn cancelled() -> bool {
     crate::BACKUP_CANCELLED.load(Ordering::SeqCst) || crate::VERIFY_CANCELLED.load(Ordering::SeqCst)
@@ -97,10 +107,21 @@ pub(crate) fn activate(
     config: &crate::BackupConfig,
     target: &Path,
 ) -> Result<Option<Guard>, String> {
-    if !config.throttle_enabled {
+    if !config.throttle_enabled && !config.gentle_sync {
         return Ok(None);
     }
-    validate_mb_per_s(config.throttle_mb_per_s)?;
+    let limit = if config.throttle_enabled {
+        validate_mb_per_s(config.throttle_mb_per_s)?;
+        Some((
+            config.throttle_mb_per_s,
+            Arc::new(Mutex::new(Bucket::new(
+                u64::from(config.throttle_mb_per_s) * BYTES_PER_MB,
+                Instant::now(),
+            ))),
+        ))
+    } else {
+        None
+    };
     let dev = existing_dev(target)?;
     let mut active = ACTIVE.lock().unwrap();
     if active.is_some() {
@@ -108,11 +129,8 @@ pub(crate) fn activate(
     }
     *active = Some(Active {
         dev,
-        mb_per_s: config.throttle_mb_per_s,
-        bucket: Arc::new(Mutex::new(Bucket::new(
-            u64::from(config.throttle_mb_per_s) * BYTES_PER_MB,
-            Instant::now(),
-        ))),
+        limit,
+        gentle_sync: config.gentle_sync,
     });
     Ok(Some(Guard(())))
 }
@@ -135,13 +153,18 @@ fn existing_dev(path: &Path) -> Result<u64, String> {
         .map_err(|e| format!("{}: {e}", probe.display()))
 }
 
-/// Human-readable description of the active limit, for logs.
+/// Human-readable description of the active protections, for logs.
 pub(crate) fn describe() -> Option<String> {
-    ACTIVE
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|a| format!("Durchsatzbegrenzung aktiv: {} MB/s", a.mb_per_s))
+    let active = ACTIVE.lock().unwrap();
+    let active = active.as_ref()?;
+    let mut parts = Vec::new();
+    if let Some((mb_per_s, _)) = &active.limit {
+        parts.push(format!("Durchsatzbegrenzung aktiv: {mb_per_s} MB/s"));
+    }
+    if active.gentle_sync {
+        parts.push("Laufwerks-Cache wird nicht erzwungen geleert".to_string());
+    }
+    Some(parts.join(" · "))
 }
 
 /// Shared handle to the active bucket; `None` when no limit applies to `path`.
@@ -150,14 +173,46 @@ pub(crate) struct Limiter {
     bucket: Arc<Mutex<Bucket>>,
     mb_per_s: u32,
 }
+fn on_target(active: &Active, path: &Path) -> bool {
+    std::fs::metadata(path).ok().is_some_and(|m| m.dev() == active.dev)
+}
 pub(crate) fn limiter_for(path: &Path) -> Option<Limiter> {
     let active = ACTIVE.lock().unwrap();
     let active = active.as_ref()?;
-    let dev = std::fs::metadata(path).ok()?.dev();
-    (dev == active.dev).then(|| Limiter {
-        bucket: active.bucket.clone(),
-        mb_per_s: active.mb_per_s,
+    let (mb_per_s, bucket) = active.limit.as_ref()?;
+    on_target(active, path).then(|| Limiter {
+        bucket: bucket.clone(),
+        mb_per_s: *mb_per_s,
     })
+}
+/// Whether files at `path` should be persisted without forcing a drive-cache flush.
+pub(crate) fn gentle_sync_for(path: &Path) -> bool {
+    let active = ACTIVE.lock().unwrap();
+    active
+        .as_ref()
+        .is_some_and(|a| a.gentle_sync && on_target(a, path))
+}
+/// Persist `file` (located at `path`) to the device. With gentle sync active for
+/// the volume this is a plain `fsync`, which hands every byte to the drive but
+/// leaves the drive's own write cache alone; otherwise `sync_all` (F_FULLFSYNC).
+/// Syncs never overlap, so several archives finishing together cannot pile
+/// flush commands onto one USB bridge.
+pub(crate) fn sync_file(file: &std::fs::File, path: &Path) -> io::Result<()> {
+    let _serial = SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if gentle_sync_for(path) {
+        // SAFETY: `file` owns a valid open descriptor for the duration of the call.
+        if unsafe { libc::fsync(file.as_raw_fd()) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    } else {
+        file.sync_all()
+    }
+}
+/// Open `path` and persist it like [`sync_file`]; used for directories after renames.
+pub(crate) fn sync_path(path: &Path) -> io::Result<()> {
+    sync_file(&std::fs::File::open(path)?, path)
 }
 impl Limiter {
     pub fn mb_per_s(&self) -> u32 {
@@ -396,6 +451,52 @@ mod tests {
             assert!(started.elapsed() >= Duration::from_millis(200), "{:?}", started.elapsed());
         }
         assert!(limiter_for(&file).is_none(), "guard must clear the limit");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gentle_sync_alone_activates_without_a_rate_limit() {
+        reset_cancel();
+        let dir = std::env::temp_dir().join(format!("throttle-gentle-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("data.bin");
+        std::fs::write(&file, b"payload").unwrap();
+        assert!(!gentle_sync_for(&file));
+        {
+            let mut config = crate::BackupConfig::default();
+            config.gentle_sync = true;
+            let _guard = activate(&config, &dir).unwrap().unwrap();
+            assert_eq!(describe().unwrap(), "Laufwerks-Cache wird nicht erzwungen geleert");
+            assert!(limiter_for(&file).is_none(), "no MB/s limit was configured");
+            assert!(gentle_sync_for(&file));
+            assert!(!gentle_sync_for(Path::new("/dev/null")));
+            sync_file(&std::fs::File::open(&file).unwrap(), &file).unwrap();
+            sync_path(&dir).unwrap();
+            config.throttle_enabled = true;
+            config.throttle_mb_per_s = 8;
+            assert!(activate(&config, &dir).is_err(), "only one activation at a time");
+        }
+        assert!(!gentle_sync_for(&file), "guard must clear the mode");
+        sync_path(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn describe_lists_both_protections() {
+        reset_cancel();
+        let dir = std::env::temp_dir().join(format!("throttle-both-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = crate::BackupConfig::default();
+        config.throttle_enabled = true;
+        config.throttle_mb_per_s = 8;
+        config.gentle_sync = true;
+        let _guard = activate(&config, &dir).unwrap().unwrap();
+        assert_eq!(
+            describe().unwrap(),
+            "Durchsatzbegrenzung aktiv: 8 MB/s · Laufwerks-Cache wird nicht erzwungen geleert"
+        );
+        assert!(limiter_for(&dir).is_some());
+        assert!(gentle_sync_for(&dir));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
