@@ -63,11 +63,12 @@ may remain MIT-licensed.
 ### AppleArchive and LZFSE
 
 Backup, verification and restore invoke `/usr/bin/aa`, provided by macOS.
+The bounded stream verifier also links the system `libAppleArchive` header and ACL APIs.
 AppleArchive/LZFSE are operating-system components, not bundled or relicensed
 under the project's MIT license. No separate compressor is distributed.
 The direct TAR/flate2 backup dependencies and local TAR patch are no longer used.
 The Tauri application updater still uses archive/compression dependencies for
-application-update packages; this is separate from the `.aar` backup format.
+application-update packages; this is separate from the `.aarset` / `.aar` backup formats.
 
 For a new release, repeat this audit after every dependency update. This
 document records license metadata supplied by dependencies; it is not a legal

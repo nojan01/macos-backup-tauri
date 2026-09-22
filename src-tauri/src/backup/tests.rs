@@ -755,7 +755,7 @@ fn regenerated_provenance_is_allowed_only_in_readback_not_source_guards() {
     fs::write(source.join("data"), b"must survive").unwrap();
     xattr::set(&source, "com.example.required", b"keep this metadata").unwrap();
     let archive = d.0.join("archive.aar");
-    create_verified_archive(&source, &archive).unwrap();
+    crate::apple_archive::create(&source, &archive).unwrap();
     let mut expected = compute_snapshot(&source).unwrap();
     for entry in &mut expected {
         entry.xattrs.insert(
@@ -1698,4 +1698,26 @@ fn native_archive_preserves_external_root_symlink_without_reading_target() {
     assert_eq!(fs::read_link(output.join("selected-link")).unwrap(), outside);
     assert_eq!(fs::read_dir(&output).unwrap().count(), 1);
     assert_eq!(fs::read(outside.join("untouched")).unwrap(), b"not selected");
+}
+
+#[test]
+fn resource_fork_manifest_hashes_beyond_the_first_four_kib() {
+    let d = fixture(); let source = d.0.join("fork-file"); fs::write(&source, b"data").unwrap();
+    let mut bytes = vec![43u8; 12293];
+    xattr::set(&source, "com.apple.ResourceFork", &bytes).unwrap();
+    let first = compute_snapshot(&source).unwrap();
+    assert_eq!(first[0].xattrs["com.apple.ResourceFork"], format!("{:x}", Sha256::digest(&bytes)));
+    bytes[12000] = 17; xattr::set(&source, "com.apple.ResourceFork", &bytes).unwrap();
+    let second = compute_snapshot(&source).unwrap();
+    assert_ne!(first[0].xattrs, second[0].xattrs);
+    assert_eq!(second[0].xattrs["com.apple.ResourceFork"], format!("{:x}", Sha256::digest(&bytes)));
+}
+#[test]
+fn segmented_archives_preserve_exact_provenance_in_the_raw_stream() {
+    let d = fixture(); let source = d.0.join("file"); fs::write(&source, b"data").unwrap();
+    let archive = d.0.join("file.aarset"); create_verified_archive(&source, &archive).unwrap();
+    let mut expected = compute_snapshot(&source).unwrap();
+    verify_archive_source(&archive, "file", &expected).unwrap();
+    expected[0].xattrs.insert("com.apple.provenance".into(), "incorrect".into());
+    assert!(verify_archive_source(&archive, "file", &expected).unwrap_err().contains("Attribute im Archiv"));
 }

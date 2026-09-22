@@ -1,7 +1,9 @@
 mod app_settings;
 mod archive_flags;
 mod apple_archive;
+mod segmented;
 mod backup;
+mod capacity;
 mod frozen_sources;
 mod protected_access;
 mod throttle;
@@ -29,29 +31,6 @@ use walkdir::WalkDir;
 static BACKUP_CANCELLED: AtomicBool = AtomicBool::new(false);
 static VERIFY_CANCELLED: AtomicBool = AtomicBool::new(false);
 static ARCHIVE_PID: AtomicU32 = AtomicU32::new(0);
-
-// Allow archive overhead, one full native readback tree, and safety reserve.
-const TARGET_CAPACITY_RESERVE: u64 = 8 * 1024 * 1024 * 1024;
-
-fn required_target_capacity(estimated_new_bytes: u64, largest_source: u64) -> u64 {
-    estimated_new_bytes.saturating_add(estimated_new_bytes / 10)
-        .saturating_add(largest_source).saturating_add(largest_source / 10)
-        .saturating_add(TARGET_CAPACITY_RESERVE)
-}
-
-#[cfg(test)]
-mod target_capacity_tests {
-    use super::*;
-
-    #[test]
-    fn capacity_includes_one_full_readback_and_archive_overhead() {
-        let source = 550 * 1024 * 1024 * 1024;
-        assert_eq!(
-            required_target_capacity(source, source / 2),
-            source + source / 10 + source / 2 + (source / 2) / 10 + TARGET_CAPACITY_RESERVE
-        );
-    }
-}
 
 /// Extract a validated archive into an empty private staging directory.
 fn extract_archive_to(archive: &Path, target_dir: &Path) -> Result<(), String> {
@@ -2117,6 +2096,7 @@ fn create_backup_impl(
     };
     let mut estimated_source_bytes: u64 = 0;
     let mut estimated_new_bytes: u64 = 0;
+    let mut space_sources = Vec::with_capacity(directories.len());
     let pre_total = directories.len().max(1);
 
     // Baseline includes content and metadata for every source. It is compared again
@@ -2154,7 +2134,7 @@ fn create_backup_impl(
         // Solche Einträge fließen daher NICHT in die Bedarfsschätzung ein.
         let mut will_reuse = false;
         if let (Some(snap), Some((prev_ts, prev_meta))) = (snap_opt.as_ref(), previous.as_ref()) {
-            let archive_ext = "aar";
+            let archive_ext = "aarset";
             let archive_name = archive_name_for(original, archive_ext);
             let prev_inventory = suite_root.join("inventories").join(prev_ts);
             if let Some(prev_snapshot) = load_manifest(&prev_inventory, &archive_name) {
@@ -2175,13 +2155,14 @@ fn create_backup_impl(
         }
 
         if let Some(snap) = snap_opt.as_ref() {
-            let ext = "aar";
+            let ext = "aarset";
             let name = archive_name_for(original, ext);
             if let Some(item) = resume_candidate(&inventory_root, dir, &name, snap, &resumed_items)
             {
                 will_reuse |= backup_root.join(&item.archive).is_file();
             }
         }
+        space_sources.push(capacity::SourceSpace::new(added, snap_opt.as_ref().map_or(0, Vec::len), !will_reuse));
         cached_snapshots[pre_i] = snap_opt;
         let dt = t0.elapsed().as_secs_f32();
         trace(&format!(
@@ -2198,23 +2179,24 @@ fn create_backup_impl(
         estimated_source_bytes
     ));
 
+    let space_plan = capacity::plan(&space_sources);
     if estimated_source_bytes > 0 {
         let free_gb = get_free_space_gb(Path::new(&target_path));
-        // Reserve one full native extraction, even when internal staging might fit.
+        // Account for the bounded part workspace, without reserving a full source copy.
         let estimated_gb = (estimated_new_bytes as f64) / (1024.0 * 1024.0 * 1024.0);
         backup::readback_space_preflight()?;
-        let required_bytes = required_target_capacity(estimated_new_bytes, cached_snapshots.iter().flatten().map(|s| s.iter().map(|e| e.s).sum::<u64>()).max().unwrap_or(0));
+        let required_bytes = space_plan.required_bytes;
         let required_gb = required_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
         let _ = window.emit(
             "backup-log",
             format!(
-                "Free space check: {:.2} GB free, ~{:.2} GB new/changed (need ≥ {:.2} GB with readback and reserve)",
+                "Speicherplatzprüfung: {:.2} GiB frei, ~{:.2} GiB neu/geändert (Spitzenbedarf inklusive Teilprüfung und Reserve: {:.2} GiB)",
                 free_gb, estimated_gb, required_gb
             ),
         );
         if ((free_gb * 1024.0 * 1024.0 * 1024.0) as u64) < required_bytes {
             let msg = format!(
-                "Insufficient free space on target: {:.2} GB free, ~{:.2} GB required (new/changed {:.2} GB plus readback and reserve). Aborting.",
+                "Nicht genug Speicherplatz auf dem Ziel: {:.2} GiB frei, Spitzenbedarf ~{:.2} GiB (neu/geändert {:.2} GiB, einschließlich Teilprüfung und Reserve).",
                 free_gb, required_gb, estimated_gb
             );
             let _ = window.emit("backup-log", format!("❌ {}", msg));
@@ -2256,7 +2238,7 @@ fn create_backup_impl(
         }),
     );
 
-    let _ = window.emit("backup-log", "AppleArchive mit LZFSE: Jedes neue Archiv wird vollständig zurückgelesen. Für die temporäre Kopie wird zusätzlicher freier Speicher geprüft.");
+    let _ = window.emit("backup-log", "AppleArchive mit LZFSE: Teilarchive bis 1 GiB werden einzeln zurückgelesen und geprüft. Nur temporäre Prüfkopien werden danach gelöscht. Arbeitsbereich: 5 GiB auf der internen SSD.");
     let manual = get_manual_apps()?.join("\n");
     atomic_write(&inventory_root.join("manual_apps.txt"), manual.as_bytes())?;
 
@@ -2287,7 +2269,9 @@ fn create_backup_impl(
         );
     }
 
-    for (i, dir) in directories.iter().enumerate() {
+    let _ = window.emit("backup-log", "Speicherplanung: Große Quellen zuerst; auch große Einzeldateien werden aufgeteilt. Der Rücklese-Arbeitsbereich bleibt unabhängig von der Quellgröße begrenzt.");
+    for (i, &source_index) in space_plan.order.iter().enumerate() {
+        let dir = &directories[source_index];
         trace(&format!("loop[{}/{}] {}", i + 1, total, dir));
         // Check for cancellation before each directory
         if BACKUP_CANCELLED.load(Ordering::SeqCst) {
@@ -2303,7 +2287,7 @@ fn create_backup_impl(
             return Err("Backup was cancelled".to_string());
         }
 
-        let original = &original_sources[i];
+        let original = &original_sources[source_index];
         let expanded = frozen.get(original)?;
 
         fs::symlink_metadata(&expanded).map_err(|e| format!("{}: {}", expanded.display(), e))?;
@@ -2315,7 +2299,7 @@ fn create_backup_impl(
             .unwrap_or_else(|| "backup".to_string());
 
         // All sources use AppleArchive with LZFSE.
-        let archive_ext = "aar";
+        let archive_ext = "aarset";
         let archive_name = archive_name_for(original, archive_ext);
         let archive_path = backup_root.join(&archive_name);
 
@@ -2331,7 +2315,7 @@ fn create_backup_impl(
 
         // Preflight, AppleArchive, readback and final guards all read the same immutable
         // APFS view. Changes to the live source cannot invalidate this baseline.
-        let current_snapshot = cached_snapshots[i]
+        let current_snapshot = cached_snapshots[source_index]
             .as_ref()
             .ok_or("Quellmanifest fehlt")?
             .clone();
@@ -2490,7 +2474,7 @@ fn create_backup_impl(
             }
             let source = inventory_root.join(filename);
             atomic_write(&source, content.as_bytes())?;
-            let archive_name = format!("{label}.aar");
+            let archive_name = format!("{label}.aarset");
             let archive = backup_root.join(&archive_name);
             create_file_archive(&source, filename, &archive)?;
             let item = BackupItem {
@@ -2525,7 +2509,7 @@ fn create_backup_impl(
             extra_source_guards.push((cache_dir.clone(), cache_manifest));
 
             {
-                let cache_archive_name = "homebrew-cache.aar";
+                let cache_archive_name = "homebrew-cache.aarset";
                 let cache_archive_path = backup_root.join(cache_archive_name);
 
                 let _ = window.emit(
@@ -2613,7 +2597,7 @@ fn create_backup_impl(
         }
 
         if copied_count > 0 {
-            let safari_archive_name = "safari-settings.aar";
+            let safari_archive_name = "safari-settings.aarset";
             let safari_archive_path = backup_root.join(safari_archive_name);
 
             {
@@ -3811,6 +3795,7 @@ fn dry_run_backup(
     let home = dirs::home_dir().unwrap_or_default();
     let mut items: Vec<serde_json::Value> = Vec::new();
     let mut total_bytes: u64 = 0;
+    let mut space_sources = Vec::new();
     let mut missing: Vec<String> = Vec::new();
 
     for dir in &directories {
@@ -3834,16 +3819,15 @@ fn dry_run_backup(
         }
 
         validate_source_target(&expanded, Path::new(&target_path))?;
-        let bytes = compute_snapshot(&expanded)?
-            .iter()
-            .map(|e| e.s)
-            .sum::<u64>();
+        let snapshot = compute_snapshot(&expanded)?;
+        let bytes = snapshot.iter().map(|e| e.s).sum::<u64>();
+        space_sources.push(capacity::SourceSpace::new(bytes, snapshot.len(), true));
         let is_file = fs::symlink_metadata(&expanded)
             .map_err(|e| e.to_string())?
             .is_file();
         total_bytes += bytes;
 
-        let archive_ext = "aar";
+        let archive_ext = "aarset";
         let archive_name = archive_name_for(&expanded, archive_ext);
 
         items.push(serde_json::json!({
@@ -3859,9 +3843,9 @@ fn dry_run_backup(
     let free_gb = get_free_space_gb(Path::new(&target_path));
     let available_bytes: u64 = (free_gb * 1024.0 * 1024.0 * 1024.0) as u64;
     // Conservative bound without assuming compressible source data.
-    let estimated_archive_bytes = total_bytes.saturating_add(total_bytes / 10);
-    let largest_source = items.iter().filter_map(|item| item.get("bytes").and_then(|v| v.as_u64())).max().unwrap_or(0);
-    let required_bytes = required_target_capacity(total_bytes, largest_source);
+    let space_plan = capacity::plan(&space_sources);
+    let estimated_archive_bytes = space_plan.archive_bytes;
+    let required_bytes = space_plan.required_bytes;
 
     Ok(serde_json::json!({
         "target_path": target_path,

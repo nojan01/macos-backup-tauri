@@ -1,6 +1,10 @@
 //! Fail-closed source scanning, durable publication and verified archive creation.
 use super::*;
 mod readback;
+mod native_stream;
+pub(super) fn verify_raw_stream(reader: &mut impl Read, root: &str, expected: &[ManifestEntry]) -> Result<(), String> {
+    native_stream::verify(reader, root, expected)
+}
 pub(super) fn readback_space_preflight() -> Result<(), String> {
     readback::space_preflight()
 }
@@ -157,6 +161,41 @@ fn identity(m: &fs::Metadata) -> (u64, u64, u64, i64, i64, i64, i64, u32) {
         m.mode(),
     )
 }
+// Darwin permits partial reads of resource forks instead of returning ERANGE.
+// xattr::get's initial 4 KiB buffer therefore cannot establish the whole value.
+// Hash through Darwin's positional API with NOFOLLOW, including every byte.
+fn hash_xattr(path: &Path, key: &std::ffi::OsStr) -> Result<String, String> {
+    if key != std::ffi::OsStr::new("com.apple.ResourceFork") {
+        let value = access_io(path, "Dateiattribut lesen", || xattr::get(path, key))?
+            .ok_or_else(|| fail(path, "Dateiattribut während des Lesens entfernt"))?;
+        return Ok(format!("{:x}", Sha256::digest(&value)));
+    }
+    unsafe extern "C" {
+        fn getxattr(path: *const libc::c_char, name: *const libc::c_char, value: *mut libc::c_void,
+            size: usize, position: u32, options: i32) -> libc::ssize_t;
+    }
+    let name = CString::new(path.as_os_str().as_bytes()).map_err(|e| fail(path, e))?;
+    let read = |buffer: *mut libc::c_void, size: usize, position: u32| {
+        access_io(path, "Resource Fork lesen", || {
+            let n = unsafe { getxattr(name.as_ptr(), c"com.apple.ResourceFork".as_ptr(), buffer, size, position, 1) };
+            if n < 0 { Err(std::io::Error::last_os_error()) } else { Ok(n as u64) }
+        })
+    };
+    let size = read(std::ptr::null_mut(), 0, 0)?;
+    let mut offset = 0u64; let mut hash = Sha256::new(); let mut buf = vec![0; 1024 * 1024];
+    while offset < size {
+        cancelled()?;
+        let position = u32::try_from(offset).map_err(|_| fail(path, "Resource Fork überschreitet den macOS-Positionsbereich"))?;
+        let wanted = (size - offset).min(buf.len() as u64) as usize;
+        let n = read(buf.as_mut_ptr().cast(), wanted, position)? as usize;
+        if n == 0 || n > wanted { return Err(fail(path, "Resource Fork während des Lesens geändert")); }
+        if let Some(limiter) = crate::throttle::limiter_for(path) { limiter.acquire(n as u64).map_err(|e| fail(path, e))?; }
+        hash.update(&buf[..n]); offset += n as u64;
+    }
+    if size != read(std::ptr::null_mut(), 0, 0)? { return Err(fail(path, "Resource Fork während des Lesens geändert")); }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
 fn read_acl(path: &Path) -> Result<String, String> {
     unsafe extern "C" {
         fn acl_get_link_np(path: *const libc::c_char, kind: libc::c_int) -> *mut libc::c_void;
@@ -377,11 +416,9 @@ fn read_entry(
     };
     let mut xattrs = BTreeMap::new();
     for key in access_io(path, "Dateiattribute auflisten", || xattr::list(path))? {
-        let value = access_io(path, "Dateiattribut lesen", || xattr::get(path, &key))?
-            .ok_or_else(|| fail(path, "Dateiattribut während des Lesens entfernt"))?;
         xattrs.insert(
             key.to_str().ok_or("Invalid xattr name")?.to_string(),
-            format!("{:x}", Sha256::digest(&value)),
+            hash_xattr(path, &key)?,
         );
     }
     let acl = read_acl(path)?;
@@ -734,6 +771,9 @@ pub(super) fn verify_archive_source(
     root_name: &str,
     expected: &[ManifestEntry],
 ) -> Result<(), String> {
+    if crate::segmented::is_segmented(archive)? {
+        return verify_raw_stream(&mut crate::segmented::open(archive)?, root_name, expected);
+    }
     let owned = ReadbackDir(PrivateDir::temp()?);
     let actual = readback::verify_contents_and_metadata(archive, root_name, expected, &owned.0 .0)?;
     if actual.len() != expected.len() {
@@ -794,13 +834,11 @@ pub(super) fn create_verified_archive_from_snapshot(
     expected: &[ManifestEntry],
 ) -> Result<(), String> {
     cancelled()?;
-    let bytes = expected
-        .iter()
-        .map(|e| e.s.saturating_add(4096))
-        .sum::<u64>();
+    let payload = expected.iter().fold(0u64, |total, e| total.saturating_add(e.s));
+    let budget = crate::capacity::SourceSpace::new(payload, expected.len(), true);
     require_free_space(
         target.parent().ok_or("Missing parent")?,
-        bytes.saturating_mul(2).saturating_add(bytes / 5).saturating_add(2 * 1024 * 1024 * 1024),
+        budget.required_before_creation(),
     )?;
     let name = source
         .file_name()
@@ -808,8 +846,7 @@ pub(super) fn create_verified_archive_from_snapshot(
         .ok_or("Ungültige Quellwurzel")?;
     let stage = PrivateDir::new(target.parent().ok_or("Missing parent")?, ".archive")?;
     let tmp = stage.0.join("archive");
-    crate::apple_archive::create(source, &tmp)?;
-    verify_archive_source(&tmp, name, expected)?;
+    crate::segmented::create(source, &tmp, name, expected)?;
     ensure_unchanged(source, expected)?;
     cancelled()?;
     publish(&tmp, target)

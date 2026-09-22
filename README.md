@@ -34,7 +34,7 @@
   Programme wird erstellt.
 
 ### 📦 Backup
-- **Ordner-Backup** – Wichtige Verzeichnisse als AppleArchive-Archive mit LZFSE (.aar)
+- **Ordner-Backup** – Wichtige Verzeichnisse als Container aus AppleArchive/LZFSE-Teilarchiven (.aarset)
 - **Homebrew** – Paketlisten (Brewfile) + optionaler vollständiger Download-Cache
 - **Mac App Store** – Alle installierten MAS-Apps
 - **App-Einstellungen** – Eigene Checkboxen für VS Code (User-Einstellungen, Profile, Snippets und Erweiterungsliste), ChatGPT und Codex; standardmäßig aktiv, vorhandene Quellen werden vor jedem Backup neu erkannt.
@@ -96,20 +96,36 @@ Essentielle Tools in unter 10 Minuten:
   Nach Abschluss oder Abbruch wird die private Ansicht ausgehängt. Den freigebbaren
   lokalen Snapshot verwaltet Time Machine; bestehende Snapshots werden nicht gelöscht.
   `source-snapshots.json` dokumentiert den Dateistand und die ursprünglichen Quellpfade.
-- Einzeldateien und Ordner werden mit Apples `/usr/bin/aa` als AppleArchive mit
-  LZFSE-Kompression (`.aar`) gespeichert. Backup, Prüfung und Restore benötigen
-  weder TAR noch einen zusätzlich installierten Kompressor. Alte TAR-Backups
-  werden in diesem Entwicklungszweig nicht unterstützt.
-- Jedes neue Archiv wird vollständig in einem privaten temporären Verzeichnis
-  entpackt. Inhalte, Rechte, ACLs, erweiterte Attribute, Dateiflags, Nanosekunden-
-  Zeitstempel und Hard-/Symlinks werden mit dem eingefrorenen Quellmanifest verglichen.
-  Die Wiederherstellung ordnet Dateien dem ausführenden Benutzer zu; fremde UID/GID
-  werden bewusst nicht gespeichert. Eigentümerwechsel ersetzt keine Zugriffsrechte.
-- Die Rückleseprüfung benötigt Platz für jeweils einen vollständigen Quellordner
-  plus Reserve. Der Vorabcheck reserviert konservativ die unkomprimierte Größe neuer
-  Archive, 10 % Aufschlag, den größten Quellordner mit 10 % Aufschlag und 8 GiB Reserve.
-  Bei aktivem Laufwerksschutz wird bevorzugt die interne SSD genutzt, sofern Platz ist.
-  Andernfalls wird auf dem Backup-Laufwerk geprüft. Platzmangel ist ein Fehler.
+- Einzeldateien und Ordner werden aus dem unveränderten nativen AppleArchive-Datenstrom
+  in Abschnitte mit höchstens **1 GiB unkomprimierten Daten** aufgeteilt. Grenzen dürfen
+  mitten durch eine große Einzeldatei oder einen Resource Fork laufen. Jeder Abschnitt
+  ist separat mit Apples `/usr/bin/aa` und LZFSE komprimiert. Alle Teile liegen mit
+  Versionsindex und SHA-256-Prüfsummen in einer selbstständigen `.aarset`-Datei.
+  Dieses Containerformat benötigt die Suite zur Wiederherstellung; es ist selbst kein
+  direkt mit `aa` entpackbares Einzelarchiv. Native `.aar`-Backups der Alpha 1 bleiben
+  lesbar; TAR-Backups werden in diesem Entwicklungszweig nicht unterstützt.
+- Jedes Teil wird vom Ziel zurückgelesen, anhand seiner komprimierten Prüfsumme geprüft,
+  entpackt und erneut mit den ursprünglichen Abschnittsbytes verglichen. Danach werden
+  ausschließlich seine privaten temporären Daten entfernt. Die gesicherten Teile bleiben
+  erhalten. Parallel prüft der native Datenstromvergleich Dateiinhalt, Rechte, ACLs,
+  erweiterte Attribute einschließlich vollständiger Resource Forks, Dateiflags,
+  Nanosekunden-Zeitstempel und Hard-/Symlinks gegen das eingefrorene Quellmanifest.
+  Die Wiederherstellung setzt die Abschnitte in ihrer geprüften Reihenfolge zusammen
+  und übergibt den nativen Datenstrom an AppleArchive. UID/GID werden dem ausführenden
+  Benutzer zugeordnet. Ein Test-Restore prüft zusätzlich die tatsächliche Wiederherstellung.
+- Die Teilprüfung reserviert **5 GiB Arbeitsbereich auf der internen SSD**, unabhängig
+  von der Größe einer einzelnen Quelldatei. Es wird keine vollständige Prüfkopie des
+  Quellordners mehr angelegt. Auf dem Ziel werden Archivbedarf, Eintragskosten,
+  10 % Aufschlag und 8 GiB Reserve geprüft; zusätzlich bleibt dort konservativ der
+  begrenzte Arbeitsbereich eingerechnet. Vor jedem Teil werden die freien Kapazitäten
+  erneut geprüft. Große Quellen werden zuerst verarbeitet, die ursprüngliche
+  Profilauswahl bleibt unverändert. Trockenlauf und Backup nutzen denselben Platzplaner.
+- Ein unvollständiger Container wird nicht veröffentlicht. Fehlende, beschädigte,
+  vertauschte oder zu große Teile sowie ein ungültiger Index führen zum Abbruch.
+  Unveränderte `.aarset`-Container lassen sich weiterhin als Ganzes per Hardlink
+  wiederverwenden. Die Durchsatzbegrenzung gilt für das Schreiben und Rücklesen der
+  Teile auf dem geschützten Zielvolume. Prüfsummen ersetzen keine physische
+  Datenträgerprüfung; Betriebssystem- und Laufwerks-Caches gelten weiterhin.
 - Dateiflags sind native AppleArchive-Metadaten. Kernelverwaltete Zustände wie
   Dateisystemkompression werden nicht durch bloßes Setzen eines Bits vorgetäuscht.
   Schutzflags privater Zwischenkopien werden nur für das Zusammenführen bzw. Aufräumen
@@ -130,7 +146,7 @@ Essentielle Tools in unter 10 Minuten:
   Zeit wird nicht als gemessener Datei- oder Prozentfortschritt ausgegeben.
 - Die Archivierung nutzt das bereits vollständig gelesene Manifest des APFS-Snapshots. Redundante
   Quellscans entfallen. Vor der Extraktion wird der vollständige AppleArchive-Index geprüft.
-  Der vollständige Vergleich mit dem entpackten Archiv, die frische Prüfung des Snapshots danach
+  Der vollständige Vergleich des abschnittsweise geprüften Datenstroms, die frische Prüfung des Snapshots danach
   und die globale Abschlussprüfung bleiben erhalten.
 - Fehlende oder unlesbare Quellen, Lese-/Schreibfehler und nicht unterstützte
   Spezialdateien wie FIFOs/Gerätedateien brechen die Sicherung ab. Echte Unix-Sockets
@@ -370,7 +386,7 @@ Offene Aufgaben stehen in [`docs/TODO.md`](docs/TODO.md); ausgearbeitete Pläne 
 
 Der TAR/Zstandard-Stand ist mit `frozen-tar-1.2.50` am Commit `7cf91b6`
 eingefroren. Die Umstellung läuft auf `codex/applearchive-lzfse` als Version
-`1.3.0-alpha.1`. Dies ist ein neues Backupformat ohne TAR-Kompatibilität.
+`1.3.0-alpha.2`. Dies ist ein neues Backupformat ohne TAR-Kompatibilität.
 Bestehende Dateien auf Backup-Laufwerken werden durch die Migration nicht gelöscht.
 
 Die Archivierung schreibt direkt mit `/usr/bin/aa`; eine TAR-Kompressor-Pipeline
