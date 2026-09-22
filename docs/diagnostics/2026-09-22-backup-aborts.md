@@ -68,3 +68,32 @@ nicht reproduzierten Ursache. Archivprüfung und Fehlerabbruch bleiben erhalten.
 Die vollständige Rust-Testsuite einschließlich neuer Regressionstests für die
 Reihenfolge Fehler → Bereinigung bestand: 163 bestanden, 9 manuelle Tests
 ausgelassen. Die Änderung wurde noch nicht als App-Update veröffentlicht.
+
+## Nachtest mit der notarisierten Testversion 1.2.50
+
+Der vollständige App-Lauf `20260922-132431` brach erneut bei Preferences ab.
+Die neue Anzeige bestätigt die Reihenfolge: Archivierungsfehler um 18:45:38,
+danach Bereinigung. Die App zeigt aktivierten Festplattenvollzugriff an.
+
+Ein erneuter begrenzter Integrationstest mit einem frischen APFS-Snapshot,
+Backup03 als Ziel und 40 MB/s bestand einschließlich Rücklesen, Finalisierung
+und Wiederherstellung (738 Einträge, 7.010.301 Dateibyte). Dafür wurde ausschließlich
+ein eigener temporärer `.macos-backup-probe-*`-Ordner angelegt und entfernt.
+Separate Aufrufe von System-tar mit Zstandard sowie Gzip waren ebenfalls erfolgreich.
+
+Das Systemprotokoll zeigt wiederholte Löschversuche von Time Machine gegen
+den verwendeten Snapshot `com.apple.TimeMachine.2026-09-22-132433.local`.
+**Diese Löschversuche scheiterten ausdrücklich mit „cannot delete mounted
+snapshot“ und „Resource busy“.** Die begleitenden „Device not configured“-Meldungen
+betreffen Löschversuche auf dem Snapshot-Mount. Daraus darf weder ein Verlust
+der Quelle während des Laufs noch ein Auswurf des Backup-Ziellaufwerks abgeleitet
+werden. Erst beim Abbruch hängt die App ihren eigenen Snapshot aus.
+
+Der Snapshot dieses abgebrochenen Laufs war bei Beginn der Nachuntersuchung
+nicht mehr verfügbar. Offen bleibt der kurze Preferences-Einzeltest innerhalb
+der installierten App: Nur dieser kann den App-Ausführungskontext von der
+mehrstündigen Laufzeit trennen. Die Ursache ist weiterhin nicht bewiesen.
+
+Der vorhandene manuelle Integrationstest akzeptiert nun zusätzlich
+`BACKUP_PROBE_TARGET` und `BACKUP_PROBE_MB_PER_S`, damit dieser gezielte Vergleich
+reproduzierbar bleibt. Ohne diese Variablen bleibt sein bisheriges Verhalten erhalten.

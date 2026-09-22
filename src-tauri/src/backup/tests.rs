@@ -1692,7 +1692,13 @@ fn remaining_frozen_sources_backup_and_restore() {
     )
     .unwrap();
     let frozen = crate::frozen_sources::FrozenSources::capture(&sources).unwrap();
-    let d = fixture();
+    let d = match std::env::var("BACKUP_PROBE_TARGET") {
+        Ok(target) => PrivateDir::new(Path::new(&target), ".macos-backup-probe").unwrap(),
+        Err(_) => fixture(),
+    };
+    let _throttle = std::env::var("BACKUP_PROBE_MB_PER_S")
+        .ok()
+        .map(|value| crate::throttle::activate_for_tests(&d.0, value.parse().unwrap()).unwrap());
     let backup = d.0.join("backup");
     fs::create_dir(&backup).unwrap();
     let mut items = Vec::new();
