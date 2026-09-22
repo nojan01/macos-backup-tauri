@@ -2624,7 +2624,8 @@ const helpOverviewHtml: Record<string, string> = {
     <details class="help-topic">
       <summary>📤 Was passiert beim Backup?</summary>
       <div class="help-topic-content"><ol class="help-steps">
-        <li>Die Suite sichert aus einem schreibgeschützten APFS-Snapshot und prüft jedes neue Archiv beim Rücklesen.</li>
+        <li>Die Suite sichert aus einem schreibgeschützten APFS-Snapshot als AppleArchive mit LZFSE (<code>.aar</code>). Alte TAR-Backups werden in dieser Version nicht unterstützt.</li>
+        <li>Jedes neue Archiv wird vollständig probeweise entpackt. Dafür wird vorübergehend zusätzlicher Platz für den größten Quellordner plus Reserve benötigt. Inhalte und macOS-Metadaten werden geprüft.</li>
         <li>„Verifizieren“ prüft die Archive nach Abschluss. Ein Test-Restore prüft zusätzlich die praktische Wiederherstellung.</li>
         <li>Unveränderte ausgewählte Ordner werden per Hardlink wiederverwendet. Ändert sich eine Datei in einem ausgewählten Ordner, wird dessen gesamtes Archiv neu erstellt.</li>
         <li>Finder zeigt bei Hardlinks die volle Größe in jedem Backup-Ordner. Die Backup-Liste zeigt deshalb separat „neu“ und „übernommen“ an.</li>
@@ -2677,7 +2678,8 @@ const helpOverviewHtml: Record<string, string> = {
     <details class="help-topic">
       <summary>📤 What happens during backup?</summary>
       <div class="help-topic-content"><ol class="help-steps">
-        <li>The Suite backs up from a read-only APFS snapshot and read-back verifies every new archive.</li>
+        <li>The Suite backs up from a read-only APFS snapshot using AppleArchive with LZFSE (<code>.aar</code>). This version does not support older TAR backups.</li>
+        <li>Every new archive is fully extracted for verification. Temporary space for the largest source folder plus reserve is required. File contents and macOS metadata are compared.</li>
         <li>“Verify” checks archives after completion. A test restore also confirms practical recovery.</li>
         <li>Unchanged selected folders are reused by hardlink. If one file changes inside a selected folder, that folder's complete archive is rebuilt.</li>
         <li>Finder reports the full size for each hardlink in each backup folder. The backup list therefore shows “new” and “reused” separately.</li>
@@ -2718,8 +2720,8 @@ function openHelpModal() {
   if (licenseText) licenseText.textContent = mitLicenseText;
   const notices = document.getElementById("help-notices");
   if (notices) notices.textContent = currentLanguage === "de"
-    ? "Hinweise zu Komponenten Dritter sind in THIRD_PARTY_NOTICES.md dokumentiert und werden mit der App ausgeliefert."
-    : "Third-party component notices are documented in THIRD_PARTY_NOTICES.md and bundled with the app.";
+    ? "Hinweise zu Komponenten Dritter sind in THIRD_PARTY_NOTICES.md dokumentiert und werden mit der App ausgeliefert. AppleArchive und LZFSE werden als macOS-Systemkomponenten genutzt; sie werden nicht unter der MIT-Lizenz dieser App weitergegeben."
+    : "Third-party component notices are documented in THIRD_PARTY_NOTICES.md and bundled with the app. AppleArchive and LZFSE are used as macOS system components; they are not redistributed under this app’s MIT license.";
 
   helpDialog.showModal();
   helpDialog.scrollTop = 0;

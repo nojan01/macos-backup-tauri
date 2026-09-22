@@ -1,5 +1,6 @@
 mod app_settings;
 mod archive_flags;
+mod apple_archive;
 mod backup;
 mod frozen_sources;
 mod protected_access;
@@ -11,10 +12,6 @@ mod restore;
 use restore::*;
 
 use chrono::Local;
-#[cfg(test)]
-use flate2::write::GzEncoder;
-#[cfg(test)]
-use flate2::Compression;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::ffi::CString;
@@ -24,7 +21,6 @@ use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::OnceLock;
 use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::Emitter;
 use tauri::{AppHandle, Manager};
@@ -32,16 +28,15 @@ use walkdir::WalkDir;
 
 static BACKUP_CANCELLED: AtomicBool = AtomicBool::new(false);
 static VERIFY_CANCELLED: AtomicBool = AtomicBool::new(false);
-static TAR_PID: AtomicU32 = AtomicU32::new(0);
+static ARCHIVE_PID: AtomicU32 = AtomicU32::new(0);
 
-// Archive contents are written once to the target. Readback verifies file data
-// as a stream and materializes at most metadata probes elsewhere, so a
-// percentage-based reserve would grow into tens of GiB for VM images without
-// protecting another large on-target allocation.
+// Allow archive overhead, one full native readback tree, and safety reserve.
 const TARGET_CAPACITY_RESERVE: u64 = 8 * 1024 * 1024 * 1024;
 
-fn required_target_capacity(estimated_new_bytes: u64) -> u64 {
-    estimated_new_bytes.saturating_add(TARGET_CAPACITY_RESERVE)
+fn required_target_capacity(estimated_new_bytes: u64, largest_source: u64) -> u64 {
+    estimated_new_bytes.saturating_add(estimated_new_bytes / 10)
+        .saturating_add(largest_source).saturating_add(largest_source / 10)
+        .saturating_add(TARGET_CAPACITY_RESERVE)
 }
 
 #[cfg(test)]
@@ -49,48 +44,13 @@ mod target_capacity_tests {
     use super::*;
 
     #[test]
-    fn capacity_reserve_is_bounded_for_large_sources() {
+    fn capacity_includes_one_full_readback_and_archive_overhead() {
         let source = 550 * 1024 * 1024 * 1024;
         assert_eq!(
-            required_target_capacity(source),
-            source + TARGET_CAPACITY_RESERVE
+            required_target_capacity(source, source / 2),
+            source + source / 10 + source / 2 + (source / 2) / 10 + TARGET_CAPACITY_RESERVE
         );
     }
-}
-
-/// Cached zstd path - computed once at first use
-static ZSTD_PATH: OnceLock<Option<String>> = OnceLock::new();
-
-/// Find and cache the zstd binary path
-fn get_zstd_path() -> Option<&'static str> {
-    ZSTD_PATH
-        .get_or_init(|| {
-            let candidates = [
-                "/opt/homebrew/bin/zstd", // Apple Silicon
-                "/usr/local/bin/zstd",    // Intel Mac
-            ];
-            for candidate in candidates {
-                if Path::new(candidate).exists() {
-                    return Some(candidate.to_string());
-                }
-            }
-            // Fallback: which zstd
-            if let Ok(output) = Command::new("/usr/bin/which").arg("zstd").output() {
-                if output.status.success() {
-                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if !path.is_empty() {
-                        return Some(path);
-                    }
-                }
-            }
-            None
-        })
-        .as_deref()
-}
-
-/// Check if zstd is available (cached)
-fn is_zstd_available() -> bool {
-    get_zstd_path().is_some()
 }
 
 /// Extract a validated archive into an empty private staging directory.
@@ -264,7 +224,7 @@ fn validate_backup_metadata(meta: &BackupMetadata) -> Result<(), String> {
         validate_component(&item.archive)?;
         let archive = &item.archive;
         // Archive filenames must be plain filenames (no path separators, no ..)
-        // because they are joined onto the backup directory and passed to tar.
+        // because they are joined onto the backup directory and used to open archives.
         if archive.is_empty()
             || archive.contains('/')
             || archive.contains('\\')
@@ -1909,14 +1869,14 @@ fn hash_file(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn create_tar_gz(source: &Path, target: &Path) -> Result<(), String> {
-    create_verified_archive(source, target, false)
+fn create_native_archive(source: &Path, target: &Path) -> Result<(), String> {
+    create_verified_archive(source, target)
 }
 
 fn create_file_archive(source: &Path, entry_name: &str, target: &Path) -> Result<(), String> {
     validate_component(entry_name)?;
     if source.file_name().and_then(|s| s.to_str()) == Some(entry_name) {
-        return create_verified_archive(source, target, true);
+        return create_verified_archive(source, target);
     }
     let expected = compute_snapshot(source)?;
     let stage = PrivateDir::new(target.parent().ok_or("Missing parent")?, ".alias")?;
@@ -1928,7 +1888,7 @@ fn create_file_archive(source: &Path, entry_name: &str, target: &Path) -> Result
         &run_with_timeout(cmd, std::time::Duration::from_secs(3600))?,
     )?;
     ensure_unchanged(source, &expected)?;
-    create_verified_archive(&alias, target, true)
+    create_verified_archive(&alias, target)
 }
 
 #[tauri::command]
@@ -2140,8 +2100,7 @@ fn create_backup_impl(
     // --- Pre-flight: disk space check ---
     // Estimate new source content and compare it with the target capacity. The
     // source-size estimate is already conservative because compression may
-    // reduce the archive. Keep a bounded reserve for tar headers, xattrs and
-    // publication instead of multiplying a large VM image by a percentage.
+    // reduce the archive. Reserve archive overhead and a complete readback tree.
     let _ = window.emit(
         "backup-progress",
         serde_json::json!({ "progress": 1, "message": "Scanne Quellverzeichnisse..." }),
@@ -2195,11 +2154,7 @@ fn create_backup_impl(
         // Solche Einträge fließen daher NICHT in die Bedarfsschätzung ein.
         let mut will_reuse = false;
         if let (Some(snap), Some((prev_ts, prev_meta))) = (snap_opt.as_ref(), previous.as_ref()) {
-            let archive_ext = if is_zstd_available() {
-                "tar.zst"
-            } else {
-                "tar.gz"
-            };
+            let archive_ext = "aar";
             let archive_name = archive_name_for(original, archive_ext);
             let prev_inventory = suite_root.join("inventories").join(prev_ts);
             if let Some(prev_snapshot) = load_manifest(&prev_inventory, &archive_name) {
@@ -2220,11 +2175,7 @@ fn create_backup_impl(
         }
 
         if let Some(snap) = snap_opt.as_ref() {
-            let ext = if expanded.is_file() || !is_zstd_available() {
-                "tar.gz"
-            } else {
-                "tar.zst"
-            };
+            let ext = "aar";
             let name = archive_name_for(original, ext);
             if let Some(item) = resume_candidate(&inventory_root, dir, &name, snap, &resumed_items)
             {
@@ -2249,21 +2200,21 @@ fn create_backup_impl(
 
     if estimated_source_bytes > 0 {
         let free_gb = get_free_space_gb(Path::new(&target_path));
-        // File contents are verified as a stream; only bounded metadata probes use temporary space.
+        // Reserve one full native extraction, even when internal staging might fit.
         let estimated_gb = (estimated_new_bytes as f64) / (1024.0 * 1024.0 * 1024.0);
         backup::readback_space_preflight()?;
-        let required_bytes = required_target_capacity(estimated_new_bytes);
+        let required_bytes = required_target_capacity(estimated_new_bytes, cached_snapshots.iter().flatten().map(|s| s.iter().map(|e| e.s).sum::<u64>()).max().unwrap_or(0));
         let required_gb = required_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
         let _ = window.emit(
             "backup-log",
             format!(
-                "Free space check: {:.2} GB free, ~{:.2} GB new/changed (need ≥ {:.2} GB with bounded reserve)",
+                "Free space check: {:.2} GB free, ~{:.2} GB new/changed (need ≥ {:.2} GB with readback and reserve)",
                 free_gb, estimated_gb, required_gb
             ),
         );
         if ((free_gb * 1024.0 * 1024.0 * 1024.0) as u64) < required_bytes {
             let msg = format!(
-                "Insufficient free space on target: {:.2} GB free, ~{:.2} GB required (new/changed {:.2} GB plus bounded reserve). Aborting.",
+                "Insufficient free space on target: {:.2} GB free, ~{:.2} GB required (new/changed {:.2} GB plus readback and reserve). Aborting.",
                 free_gb, required_gb, estimated_gb
             );
             let _ = window.emit("backup-log", format!("❌ {}", msg));
@@ -2305,7 +2256,7 @@ fn create_backup_impl(
         }),
     );
 
-    let _ = window.emit("backup-log", "Dateiinhalte werden vollständig im Datenstrom geprüft; nur Dateiattribute benötigen begrenzten temporären Speicher.");
+    let _ = window.emit("backup-log", "AppleArchive mit LZFSE: Jedes neue Archiv wird vollständig zurückgelesen. Für die temporäre Kopie wird zusätzlicher freier Speicher geprüft.");
     let manual = get_manual_apps()?.join("\n");
     atomic_write(&inventory_root.join("manual_apps.txt"), manual.as_bytes())?;
 
@@ -2357,22 +2308,14 @@ fn create_backup_impl(
 
         fs::symlink_metadata(&expanded).map_err(|e| format!("{}: {}", expanded.display(), e))?;
 
-        let is_file = expanded.is_file();
 
         let name = expanded
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "backup".to_string());
 
-        // Einzeldateien werden mit system-tar und gzip gepackt,
-        // Verzeichnisse via `create_tar_gz` mit zstd (sofern verfügbar). Die
-        // Endung muss zum tatsächlichen Kompressor passen, sonst schlägt die
-        // zstd-Vorprüfung beim Verify/Restore unnötig fehl.
-        let archive_ext = if !is_file && is_zstd_available() {
-            "tar.zst"
-        } else {
-            "tar.gz"
-        };
+        // All sources use AppleArchive with LZFSE.
+        let archive_ext = "aar";
         let archive_name = archive_name_for(original, archive_ext);
         let archive_path = backup_root.join(&archive_name);
 
@@ -2386,7 +2329,7 @@ fn create_backup_impl(
             }),
         );
 
-        // Preflight, tar, readback and final guards all read the same immutable
+        // Preflight, AppleArchive, readback and final guards all read the same immutable
         // APFS view. Changes to the live source cannot invalidate this baseline.
         let current_snapshot = cached_snapshots[i]
             .as_ref()
@@ -2481,7 +2424,6 @@ fn create_backup_impl(
         create_verified_archive_from_snapshot(
             &expanded,
             &archive_path,
-            is_file,
             &current_snapshot,
         )?;
 
@@ -2548,7 +2490,7 @@ fn create_backup_impl(
             }
             let source = inventory_root.join(filename);
             atomic_write(&source, content.as_bytes())?;
-            let archive_name = format!("{label}.tar.gz");
+            let archive_name = format!("{label}.aar");
             let archive = backup_root.join(&archive_name);
             create_file_archive(&source, filename, &archive)?;
             let item = BackupItem {
@@ -2583,11 +2525,7 @@ fn create_backup_impl(
             extra_source_guards.push((cache_dir.clone(), cache_manifest));
 
             {
-                let cache_archive_name = if is_zstd_available() {
-                    "homebrew-cache.tar.zst"
-                } else {
-                    "homebrew-cache.tar.gz"
-                };
+                let cache_archive_name = "homebrew-cache.aar";
                 let cache_archive_path = backup_root.join(cache_archive_name);
 
                 let _ = window.emit(
@@ -2599,7 +2537,7 @@ fn create_backup_impl(
                 );
 
                 {
-                    create_tar_gz(&cache_dir, &cache_archive_path)?;
+                    create_native_archive(&cache_dir, &cache_archive_path)?;
                     let archive_size = fs::metadata(&cache_archive_path)
                         .map(|m| m.len())
                         .unwrap_or(0);
@@ -2675,15 +2613,11 @@ fn create_backup_impl(
         }
 
         if copied_count > 0 {
-            let safari_archive_name = if is_zstd_available() {
-                "safari-settings.tar.zst"
-            } else {
-                "safari-settings.tar.gz"
-            };
+            let safari_archive_name = "safari-settings.aar";
             let safari_archive_path = backup_root.join(safari_archive_name);
 
             {
-                create_tar_gz(&temp_safari_dir, &safari_archive_path)?;
+                create_native_archive(&temp_safari_dir, &safari_archive_path)?;
                 let source_size = compute_snapshot(&temp_safari_dir)?
                     .iter()
                     .map(|e| e.s)
@@ -3909,11 +3843,7 @@ fn dry_run_backup(
             .is_file();
         total_bytes += bytes;
 
-        let archive_ext = if !is_file && is_zstd_available() {
-            "tar.zst"
-        } else {
-            "tar.gz"
-        };
+        let archive_ext = "aar";
         let archive_name = archive_name_for(&expanded, archive_ext);
 
         items.push(serde_json::json!({
@@ -3928,9 +3858,10 @@ fn dry_run_backup(
     // Verfügbarer Platz am Ziel (in Bytes)
     let free_gb = get_free_space_gb(Path::new(&target_path));
     let available_bytes: u64 = (free_gb * 1024.0 * 1024.0 * 1024.0) as u64;
-    // Grobe Schätzung: zstd ~2.5x Kompressionsrate → halber Platz reicht meist
+    // Conservative bound without assuming compressible source data.
     let estimated_archive_bytes = total_bytes.saturating_add(total_bytes / 10);
-    let required_bytes = estimated_archive_bytes;
+    let largest_source = items.iter().filter_map(|item| item.get("bytes").and_then(|v| v.as_u64())).max().unwrap_or(0);
+    let required_bytes = required_target_capacity(total_bytes, largest_source);
 
     Ok(serde_json::json!({
         "target_path": target_path,
@@ -3941,7 +3872,7 @@ fn dry_run_backup(
         "available_bytes": available_bytes,
         "required_bytes_including_readback": required_bytes,
         "sufficient_space": missing.is_empty() && available_bytes >= required_bytes,
-        "zstd_available": is_zstd_available(),
+        "archive_format": "applearchive-lzfse",
     }))
 }
 
@@ -4129,7 +4060,7 @@ fn build_menu(app_handle: &AppHandle) -> Result<(), Box<dyn std::error::Error>> 
 
 /// Terminate the tar process group, first politely with SIGTERM and then,
 /// if the process is still alive after a short grace period, forcefully with
-/// SIGKILL. Using the process group (negative PID) also reaps child zstd
+/// SIGKILL. Using the process group (negative PID) also reaps child archive
 /// workers spawned via `--use-compress-program`.
 fn terminate_tar_process(pid: u32) {
     if pid == 0 {
@@ -4158,7 +4089,7 @@ fn cancel_backup() -> Result<(), String> {
     BACKUP_CANCELLED.store(true, Ordering::SeqCst);
 
     // Kill any running tar process (group), escalating TERM -> KILL.
-    let pid = TAR_PID.swap(0, Ordering::SeqCst);
+    let pid = ARCHIVE_PID.swap(0, Ordering::SeqCst);
     if pid > 0 {
         // Run the escalation off the Tauri command thread so we return quickly.
         std::thread::spawn(move || terminate_tar_process(pid));
@@ -4174,7 +4105,7 @@ fn cancel_operation() -> Result<(), String> {
     VERIFY_CANCELLED.store(true, Ordering::SeqCst);
 
     // Kill any running tar process (group), escalating TERM -> KILL.
-    let pid = TAR_PID.swap(0, Ordering::SeqCst);
+    let pid = ARCHIVE_PID.swap(0, Ordering::SeqCst);
     if pid > 0 {
         std::thread::spawn(move || terminate_tar_process(pid));
     }

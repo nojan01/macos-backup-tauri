@@ -44,20 +44,9 @@ impl Fixture {
         .unwrap();
     }
     fn archive(&self, source: &Path, item: &str) -> BackupItem {
-        let name = archive_name_for(source, "tar.gz");
+        let name = archive_name_for(source, "aar");
         let a = self.backup.join(&name);
-        let f = fs::File::create(&a).unwrap();
-        let gz = GzEncoder::new(f, Compression::default());
-        let mut tar = tar::Builder::new(gz);
-        tar.follow_symlinks(false);
-        if fs::symlink_metadata(source).unwrap().is_dir() {
-            tar.append_dir_all(source.file_name().unwrap(), source)
-                .unwrap();
-        } else {
-            tar.append_path_with_name(source, source.file_name().unwrap())
-                .unwrap();
-        }
-        tar.into_inner().unwrap().finish().unwrap();
+        crate::apple_archive::create(source, &a).unwrap();
         BackupItem {
             path: item.into(),
             archive: name,
@@ -155,7 +144,7 @@ fn merge_adds_missing_files_and_keeps_existing() {
 #[test]
 fn corrupted_archive_never_creates_live_target() {
     let f = Fixture::new();
-    let a = f.file("broken.tar.gz", b"broken");
+    let a = f.file("broken.aar", b"broken");
     assert!(staged_restore(&a, &f.home.join("Documents"), true).is_err());
     assert!(!f.home.join("Documents").exists());
 }
@@ -201,8 +190,8 @@ fn distinct_sources_get_distinct_archives() {
     assert_ne!(a.archive, b.archive);
     assert_eq!(hash_file(&f.backup.join(&a.archive)).unwrap(), hash);
     assert_ne!(
-        archive_name_for(Path::new("/a/Foo Bar"), "tar.gz"),
-        archive_name_for(Path::new("/a/foo-bar"), "tar.gz")
+        archive_name_for(Path::new("/a/Foo Bar"), "aar"),
+        archive_name_for(Path::new("/a/foo-bar"), "aar")
     );
 }
 #[test]
@@ -231,25 +220,17 @@ fn invalid_hashes_and_algorithm_are_rejected() {
 #[test]
 fn archive_failure_is_not_reported_as_success() {
     let f = Fixture::new();
-    let archive = f.root.join(if is_zstd_available() {
-        "bad.tar.zst"
-    } else {
-        "bad.tar.gz"
-    });
-    assert!(create_tar_gz(&f.root.join("missing-source"), &archive).is_err());
+    let archive = f.root.join("bad.aar");
+    assert!(create_native_archive(&f.root.join("missing-source"), &archive).is_err());
     assert!(!archive.exists());
 }
 #[test]
-fn system_tar_archive_roundtrip() {
+fn native_apple_archive_roundtrip() {
     let f = Fixture::new();
     f.file("source/Ordner mit Umlaut ä/note", b"data");
     let source = f.root.join("source/Ordner mit Umlaut ä");
-    let a = f.root.join(if is_zstd_available() {
-        "archive.tar.zst"
-    } else {
-        "archive.tar.gz"
-    });
-    create_tar_gz(&source, &a).unwrap();
+    let a = f.root.join("archive.aar");
+    create_native_archive(&source, &a).unwrap();
     staged_restore(&a, &f.home.join("Ordner mit Umlaut ä"), false).unwrap();
     assert_eq!(
         fs::read(f.home.join("Ordner mit Umlaut ä/note")).unwrap(),
@@ -418,25 +399,33 @@ fn timestamp_traversal_is_rejected() {
     }
 }
 fn crafted_archive(f: &Fixture, entries: &[(&str, u8, &str)]) -> PathBuf {
-    let p = f.root.join("crafted.tar.gz");
-    let gz = GzEncoder::new(fs::File::create(&p).unwrap(), Compression::default());
-    let mut tar = tar::Builder::new(gz);
+    // Construct raw AppleArchive headers so validation sees malicious paths
+    // instead of having a filesystem-backed archive builder sanitize them.
+    let mut raw = Vec::new();
     for (name, kind, link) in entries {
-        let mut h = tar::Header::new_gnu();
-        h.set_mode(0o600);
-        h.set_size(0);
-        h.set_entry_type(tar::EntryType::new(*kind));
-        // Set raw bytes so unsafe paths can exercise our validator, not the builder's.
-        h.as_mut_bytes()[..100].fill(0);
-        h.as_mut_bytes()[..name.len()].copy_from_slice(name.as_bytes());
-        if !link.is_empty() {
-            h.set_link_name(link).unwrap();
+        let kind = match kind { b'0' => b'F', b'1' => b'H', b'2' => b'L', b'5' => b'D', b'6' => b'P', _ => panic!("unknown kind") };
+        let mut fields = b"TYP1".to_vec();
+        fields.push(kind);
+        for (key, value) in [(b"PATP", *name), (b"LNKP", *link)] {
+            if key == b"LNKP" && value.is_empty() { continue; }
+            fields.extend_from_slice(key);
+            fields.extend_from_slice(&(value.len() as u16).to_le_bytes());
+            fields.extend_from_slice(value.as_bytes());
         }
-        h.set_cksum();
-        tar.append(&h, std::io::empty()).unwrap();
+        raw.extend_from_slice(b"AA01");
+        raw.extend_from_slice(&((fields.len() + 6) as u16).to_le_bytes());
+        raw.extend(fields);
     }
-    tar.into_inner().unwrap().finish().unwrap();
-    p
+    // pbze permits uncompressed blocks when compression would not help.
+    // Wrap raw headers directly so aa's converter cannot reject them first.
+    let mut container = b"pbze".to_vec();
+    container.extend_from_slice(&(4u64 * 1024 * 1024).to_be_bytes());
+    container.extend_from_slice(&(raw.len() as u64).to_be_bytes());
+    container.extend_from_slice(&(raw.len() as u64).to_be_bytes());
+    container.extend(raw);
+    let archive = f.root.join("crafted.aar");
+    fs::write(&archive, container).unwrap();
+    archive
 }
 #[test]
 fn archive_traversal_and_special_files_are_rejected() {
@@ -467,7 +456,7 @@ fn archive_symlink_ancestors_and_external_hardlinks_are_rejected() {
 fn mismatched_extension_is_detected_by_magic() {
     let f = Fixture::new();
     let item = f.archive(&f.file("source/note", b"bytes"), "~/note");
-    let a = f.root.join("incorrect.tar.zst");
+    let a = f.root.join("incorrect.extension");
     fs::copy(f.backup.join(item.archive), &a).unwrap();
     staged_restore(&a, &f.home.join("note"), false).unwrap();
     assert_eq!(fs::read(f.home.join("note")).unwrap(), b"bytes");
@@ -524,7 +513,7 @@ fn safari_root_symlink_is_never_followed() {
     assert!(!f.home.join("Library/Safari/Bookmarks.plist").exists());
 }
 #[test]
-fn truncated_gzip_is_rejected_even_with_matching_hash() {
+fn truncated_lzfse_is_rejected_even_with_matching_hash() {
     let f = Fixture::new();
     let mut item = f.archive(&f.file("source/note", b"backup"), "~/note");
     let a = f.backup.join(&item.archive);
@@ -573,13 +562,13 @@ fn rebuilding_a_hardlinked_archive_does_not_modify_previous_backup() {
     let f = Fixture::new();
     f.file("source/Documents/note", b"first");
     let source = f.root.join("source/Documents");
-    let previous = f.root.join("previous.tar");
-    let resumed = f.root.join("resumed.tar");
-    create_tar_gz(&source, &previous).unwrap();
+    let previous = f.root.join("previous.aar");
+    let resumed = f.root.join("resumed.aar");
+    create_native_archive(&source, &previous).unwrap();
     let hash = hash_file(&previous).unwrap();
     fs::hard_link(&previous, &resumed).unwrap();
     f.file("source/Documents/note", b"second");
-    create_tar_gz(&source, &resumed).unwrap();
+    create_native_archive(&source, &resumed).unwrap();
     assert_eq!(hash_file(&previous).unwrap(), hash);
     assert_ne!(hash_file(&resumed).unwrap(), hash);
 }
@@ -588,17 +577,17 @@ fn failed_archive_rebuild_keeps_previous_archive() {
     let f = Fixture::new();
     f.file("source/Documents/note", b"first");
     let source = f.root.join("source/Documents");
-    let archive = f.root.join("archive.tar");
-    create_tar_gz(&source, &archive).unwrap();
+    let archive = f.root.join("archive.aar");
+    create_native_archive(&source, &archive).unwrap();
     let hash = hash_file(&archive).unwrap();
-    assert!(create_tar_gz(&f.root.join("missing"), &archive).is_err());
+    assert!(create_native_archive(&f.root.join("missing"), &archive).is_err());
     assert_eq!(hash_file(&archive).unwrap(), hash);
 }
 #[test]
 fn production_single_file_archive_roundtrip() {
     let f = Fixture::new();
     let source = f.file("source/.gitconfig", b"[user]\nname=Test\n");
-    let archive = f.root.join("single.tar.gz");
+    let archive = f.root.join("single.aar");
     create_file_archive(&source, ".gitconfig", &archive).unwrap();
     staged_restore(&archive, &f.home.join(".gitconfig"), false).unwrap();
     assert_eq!(
@@ -751,7 +740,7 @@ fn actual_software_inventories_backup_and_restore_plan() {
         ("mas-apps", "mas_apps.txt", mas),
     ] {
         let source = f.file(&format!("source/{name}"), text.as_bytes());
-        let archive = f.backup.join(format!("{label}.tar.gz"));
+        let archive = f.backup.join(format!("{label}.aar"));
         create_file_archive(&source, name, &archive).unwrap();
         assert_eq!(read_inventory(&archive, name).unwrap(), text);
         items.push(BackupItem {

@@ -493,8 +493,8 @@ mod tests {
         assert_eq!(sources.len(), 4);
         for (i, source) in sources.iter().enumerate() {
             let path = expand(source, &home.0);
-            let archive = home.0.join(format!("{i}.tar.gz"));
-            create_verified_archive(&path, &archive, true).unwrap();
+            let archive = home.0.join(format!("{i}.aar"));
+            create_verified_archive(&path, &archive).unwrap();
             let stage = PrivateDir::temp().unwrap();
             unpack_private(&archive, &stage.0).unwrap();
             let mut expected = serde_json::to_value(compute_snapshot(&path).unwrap()).unwrap();

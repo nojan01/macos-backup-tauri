@@ -34,7 +34,7 @@
   Programme wird erstellt.
 
 ### 📦 Backup
-- **Ordner-Backup** – Wichtige Verzeichnisse als komprimierte Archive (.tar.zst)
+- **Ordner-Backup** – Wichtige Verzeichnisse als AppleArchive-Archive mit LZFSE (.aar)
 - **Homebrew** – Paketlisten (Brewfile) + optionaler vollständiger Download-Cache
 - **Mac App Store** – Alle installierten MAS-Apps
 - **App-Einstellungen** – Eigene Checkboxen für VS Code (User-Einstellungen, Profile, Snippets und Erweiterungsliste), ChatGPT und Codex; standardmäßig aktiv, vorhandene Quellen werden vor jedem Backup neu erkannt.
@@ -96,21 +96,24 @@ Essentielle Tools in unter 10 Minuten:
   Nach Abschluss oder Abbruch wird die private Ansicht ausgehängt. Den freigebbaren
   lokalen Snapshot verwaltet Time Machine; bestehende Snapshots werden nicht gelöscht.
   `source-snapshots.json` dokumentiert den Dateistand und die ursprünglichen Quellpfade.
-- Einzeldateien und Ordner werden mit macOS-System-tar im PAX-Format archiviert.
-  Jedes neue oder wiederverwendete Datenarchiv wird probeweise in ein privates lokales
-  Verzeichnis entpackt. Inhalte, Rechte, ACLs, erweiterte Attribute, Zeitstempel und
-  Verknüpfungen werden mit der Quelle verglichen. Die Rückleseprüfung benötigt lokalen
-  temporären Speicher für jeweils einen entpackten Quellordner; der Platz wird geprüft.
-- Dateiflags werden zusätzlich als versionierte Metadaten im Archiv gespeichert,
-  da System-tar unter anderem `UF_TRACKED` nicht serialisiert. Die SHA-256-Prüfsumme
-  des Archivs umfasst diese Metadaten. Normale Wiederherstellung, Test-Restore und
-  Rückleseprüfung setzen die Flags aus dem Archiv; das Original wird nicht benötigt.
-  Die Rückleseprüfung verlangt weiterhin identische Flags. Kernelverwaltete Zustände
-  wie Dateisystemkompression werden nicht durch bloßes Setzen eines Bits vorgetäuscht.
-  Unveränderlichkeits- und Append-Schutz der privaten Zwischenkopie werden für das
-  Verschieben gelöst und am endgültigen Restore-Ziel wieder gesetzt.
-  Ältere Archive bleiben lesbar. Beim manuellen Entpacken nur mit System-tar bleiben
-  dessen Einschränkungen bestehen; für die zusätzlichen Flags ist mindestens Suite v1.2.17 nötig.
+- Einzeldateien und Ordner werden mit Apples `/usr/bin/aa` als AppleArchive mit
+  LZFSE-Kompression (`.aar`) gespeichert. Backup, Prüfung und Restore benötigen
+  weder TAR noch einen zusätzlich installierten Kompressor. Alte TAR-Backups
+  werden in diesem Entwicklungszweig nicht unterstützt.
+- Jedes neue Archiv wird vollständig in einem privaten temporären Verzeichnis
+  entpackt. Inhalte, Rechte, ACLs, erweiterte Attribute, Dateiflags, Nanosekunden-
+  Zeitstempel und Hard-/Symlinks werden mit dem eingefrorenen Quellmanifest verglichen.
+  Die Wiederherstellung ordnet Dateien dem ausführenden Benutzer zu; fremde UID/GID
+  werden bewusst nicht gespeichert. Eigentümerwechsel ersetzt keine Zugriffsrechte.
+- Die Rückleseprüfung benötigt Platz für jeweils einen vollständigen Quellordner
+  plus Reserve. Der Vorabcheck reserviert konservativ die unkomprimierte Größe neuer
+  Archive, 10 % Aufschlag, den größten Quellordner mit 10 % Aufschlag und 8 GiB Reserve.
+  Bei aktivem Laufwerksschutz wird bevorzugt die interne SSD genutzt, sofern Platz ist.
+  Andernfalls wird auf dem Backup-Laufwerk geprüft. Platzmangel ist ein Fehler.
+- Dateiflags sind native AppleArchive-Metadaten. Kernelverwaltete Zustände wie
+  Dateisystemkompression werden nicht durch bloßes Setzen eines Bits vorgetäuscht.
+  Schutzflags privater Zwischenkopien werden nur für das Zusammenführen bzw. Aufräumen
+  gelöst; Quellrechte und Quellattribute werden nicht verändert.
 - Das von macOS beim Kopieren neu vergebene Herkunftsattribut `com.apple.provenance`
   wird weiter archiviert und bei Quelländerungen berücksichtigt. Ausschließlich beim
   Vergleich der entpackten Kopie darf es abweichen. Dateiinhalte, ACLs, Resource Forks
@@ -126,7 +129,7 @@ Essentielle Tools in unter 10 Minuten:
   sekündliche Laufzeitanzeige bleibt auch bei stillen Unterprozessen aktiv; verstrichene
   Zeit wird nicht als gemessener Datei- oder Prozentfortschritt ausgegeben.
 - Die Archivierung nutzt das bereits vollständig gelesene Manifest des APFS-Snapshots. Redundante
-  Quellscans und der doppelte Archivdurchlauf vor derselben Rücklese-Extraktion entfallen.
+  Quellscans entfallen. Vor der Extraktion wird der vollständige AppleArchive-Index geprüft.
   Der vollständige Vergleich mit dem entpackten Archiv, die frische Prüfung des Snapshots danach
   und die globale Abschlussprüfung bleiben erhalten.
 - Fehlende oder unlesbare Quellen, Lese-/Schreibfehler und nicht unterstützte
@@ -169,7 +172,7 @@ Das Backup behandelt symbolische Links bewusst **als Symlinks** und folgt ihnen
 nicht — weder beim Archivieren noch beim Berechnen von Snapshots oder Größen.
 Das hat konkrete Konsequenzen, die Sie kennen sollten:
 
-- **Archivierung (tar):** `tar` speichert Symlinks standardmäßig als Links,
+- **Archivierung:** AppleArchive speichert Symlinks standardmäßig als Links,
   nicht als Kopie des Zielinhalts. Ein Symlink, der auf ein Verzeichnis
   außerhalb des Backup-Scopes zeigt, wird also nur als Verweis gesichert.
   Zeigt der Link nach der Wiederherstellung ins Leere, ist das **kein Fehler
@@ -188,7 +191,7 @@ Das hat konkrete Konsequenzen, die Sie kennen sollten:
   externe Homebrew-Pfade nach Hardware-Wechsel), bleibt der Link als
   „dangling symlink" bestehen, bis die referenzierten Pfade wiederhergestellt
   werden.
-- **Sicherheit:** Vor dem Restore werden die SHA-256-Prüfsummen aller ausgewählten Archive und deren tar-Header geprüft. Absolute Eintragspfade, `..`, Pfadkollisionen, Gerätedateien und Einträge unterhalb eines Archiv-Symlinks werden abgelehnt. Die Extraktion erfolgt zuerst in einem privaten Zwischenverzeichnis. Symlinks werden als Links wiederhergestellt; beim Zusammenführen werden vorhandene Ziel-Symlinks nicht als Verzeichnisse verfolgt.
+- **Sicherheit:** Vor dem Restore werden die SHA-256-Prüfsummen aller ausgewählten Archive und deren AppleArchive-Einträge geprüft. Absolute Eintragspfade, `..`, Pfadkollisionen, Gerätedateien und Einträge unterhalb eines Archiv-Symlinks werden abgelehnt. Die Extraktion erfolgt zuerst in einem privaten Zwischenverzeichnis. Symlinks werden als Links wiederhergestellt; beim Zusammenführen werden vorhandene Ziel-Symlinks nicht als Verzeichnisse verfolgt.
 
 **Empfehlung:** Vermeiden Sie Symlinks, die aus dem Backup-Scope in
 ungesicherte Bereiche zeigen, wenn diese Inhalte mit der Wiederherstellung
@@ -230,7 +233,7 @@ Laden Sie die neueste Version herunter:
 ### Technologie-Stack
 - **Frontend:** TypeScript, HTML, CSS (Vanilla)
 - **Backend:** Rust (Tauri 2.x)
-- **Kompression:** zstd (mit gzip-Fallback)
+- **Archivierung und Kompression:** AppleArchive mit LZFSE über macOS `/usr/bin/aa`
 
 ### Build
 ```bash
@@ -330,9 +333,9 @@ Homebrew-Bundle-Einträge für Cargo, npm, Go, uv und krew sowie die plattformsp
 
 Während einer Vorbereitung ohne bekannte Gesamtmenge bleibt der Balken als Aktivitätsanzeige sichtbar. Sobald Prozentwerte vorliegen, werden sie als Zahl und Balken angezeigt. Phasenwechsel setzen den Fortschritt nicht zurück; bei Ende oder Abbruch stoppt die Animation.
 
-## Archivformat ab 1.2.19
+## Archivformat ab 1.3.0-alpha.1
 
-Metadaten werden in PAX-Headern gespeichert. Echte Dateien und Verzeichnisse mit `._` im Namen bleiben eigenständige Einträge; sie werden nicht als AppleDouble-Metadaten verbraucht. Erweiterte Attribute einschließlich Resource Forks, ACLs und Dateiflags werden weiterhin gesichert und beim Rücklesen geprüft. Ein Formatmerkmal im internen Metadateneintrag steuert das Entpacken; vorhandene Archive ohne dieses Merkmal verwenden weiterhin die bisherige AppleDouble-Wiederherstellung.
+Metadaten werden nativ in AppleArchive gespeichert. Echte Dateien und Verzeichnisse mit `._` im Namen bleiben eigenständige Einträge; sie werden nicht als AppleDouble-Metadaten verbraucht. Erweiterte Attribute einschließlich Resource Forks, ACLs und Dateiflags werden weiterhin gesichert und beim Rücklesen geprüft. Es gibt keine zusätzlichen TAR-Metadateneinträge und keinen alten AppleDouble-Wiederherstellungspfad.
 
 Beim Fortsetzen werden vorhandene, bereits rückgelesene Archive nur übernommen, wenn das vollständige Quellmanifest zum neuen APFS-Snapshot passt und die Archiv-Prüfsumme stimmt. Veränderte Quellen und beschädigte Archive werden neu erstellt. Erfolgreiche Zwischenstände bleiben bei einem weiteren Abbruch erhalten.
 
@@ -340,9 +343,9 @@ Beim Fortsetzen werden vorhandene, bereits rückgelesene Archive nur übernommen
 
 - Ohne **Überschreiben** werden vorhandene Ordner zusammengeführt: fehlende Dateien kommen hinzu, vorhandene Dateien und Links bleiben erhalten. Mit Überschreiben werden einzelne Dateien/Links atomar ersetzt. Konflikte zwischen einer Datei und einem Verzeichnis werden als Fehler gemeldet; Verzeichnisbäume werden nicht automatisch gelöscht.
 - Alle ausgewählten Archive müssen vor Beginn die Hash- und Inhaltsprüfung bestehen. Ein Test-Restore führt dieselbe Vorprüfung aus und schreibt anschließend in einen eigenen Unterordner.
-- Neue Archive erhalten einen Namen mit einem Hash des vollständigen Quellpfads. Bestehende gzip-/zstd-Backups sind weiterhin lesbar. Alte Backups mit kollidierenden Archivnamen oder ungültigen Hashes werden abgelehnt; bereits überschriebene Archivdaten lassen sich dadurch nicht zurückholen. Dafür ist ein neues Backup erforderlich.
+- Neue Archive erhalten einen Namen mit einem Hash des vollständigen Quellpfads. Dieser Entwicklungszweig akzeptiert ausschließlich AppleArchive mit LZFSE. Alte Backups mit kollidierenden Archivnamen oder ungültigen Hashes werden abgelehnt; bereits überschriebene Archivdaten lassen sich dadurch nicht zurückholen. Dafür ist ein neues Backup erforderlich.
 - Archive werden zunächst separat erstellt und danach umbenannt. Auch beim Fortsetzen einer Sicherung bleiben bereits vorhandene, eventuell mit älteren Backups hartverlinkte Archive bei Fehlern unberührt.
-- Das Backup-Menü unterscheidet **Metadaten lesbar** von **verifiziert**. Ein Häkchen erscheint erst nach einer erfolgreichen Prüfung in der aktuellen Sitzung; beim Neuladen wird es zurückgesetzt. Restore prüft die Daten unabhängig davon erneut.
+- Das Backup-Menü unterscheidet **Metadaten lesbar** von **verifiziert**. Ein Häkchen erscheint nach erfolgreicher Prüfung; der gespeicherte Prüfstatus wird beim Neuladen auf Gültigkeit geprüft. Restore prüft die Daten unabhängig davon erneut.
 - Safari enthält auch die allgemeinen Preferences und den Favicon-Cache. Safari sollte vor einem echten Restore beendet sein, damit die laufende Anwendung die zurückgespielten Daten nicht wieder überschreibt.
 - Homebrew-Paketnamen werden aus dem Brewfile gelesen und über direkte Prozessargumente installiert. Ruby-/Shell-Code aus der Datei wird nicht ausgeführt. Bundle-spezifische Optionen für Dienste und Verlinkungen werden nicht automatisch angewendet; dies wird im Protokoll angezeigt. MAS- und VS-Code-Installationsfehler führen auch bei Teilerfolg zu einer Fehlermeldung.
 - Neue Standardordner verwenden `~/Documents` und `~/Desktop`. Bereits gespeicherte absolute Pfade bleiben absolute Ziele, auch bei einem anderen Benutzerkonto. Für einen solchen Umzug zuerst den Test-Restore verwenden und die Dateien in das gewünschte Konto übernehmen.
@@ -357,44 +360,30 @@ npm run build
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
-Die Rust-Tests prüfen unter anderem Archivkollisionen, SHA-256, korrupte Archive, Datei-Konflikte, Safari/Cache, Symlinks, alte Kompressionsformate und Installationsfehler. Die UI-Tests prüfen die sichere Verarbeitung von Dateinamen und die Ergebnisanzeige. Ein vollständiger macOS-Restore einschließlich Full Disk Access und echter App-Store-/Homebrew-Installationen muss zusätzlich in einem separaten Testkonto oder einer VM geprüft werden.
+Die Rust-Tests prüfen unter anderem Archivkollisionen, SHA-256, korrupte Archive, Datei-Konflikte, Safari/Cache, Symlinks, ungültige Archivstrukturen und Installationsfehler. Die UI-Tests prüfen die sichere Verarbeitung von Dateinamen und die Ergebnisanzeige. Ein vollständiger macOS-Restore einschließlich Full Disk Access und echter App-Store-/Homebrew-Installationen muss zusätzlich in einem separaten Testkonto oder einer VM geprüft werden.
 
 ## Offene Punkte und Pläne
 
 Offene Aufgaben stehen in [`docs/TODO.md`](docs/TODO.md); ausgearbeitete Pläne (z. B. Durchsatzlimit zur Laufzeit ändern) daneben in `docs/`.
 
-## Sprache und platzsparende Rückleseprüfung (1.2.22)
+## AppleArchive/LZFSE-Entwicklungszweig
 
-Einstellungen, Dialoge, Hilfetexte, Fußzeile und laufende Prüfmeldungen folgen der ausgewählten Sprache. Beim Sprachwechsel bleiben der laufende Status und der Prozentwert erhalten; auch das Protokoll wird mit seinen ursprünglichen Zeitpunkten neu dargestellt. Dateipfade und externe Werkzeugausgaben werden nicht übersetzt.
+Der TAR/Zstandard-Stand ist mit `frozen-tar-1.2.50` am Commit `7cf91b6`
+eingefroren. Die Umstellung läuft auf `codex/applearchive-lzfse` als Version
+`1.3.0-alpha.1`. Dies ist ein neues Backupformat ohne TAR-Kompatibilität.
+Bestehende Dateien auf Backup-Laufwerken werden durch die Migration nicht gelöscht.
 
-Die automatische Archivprüfung entpackt gewöhnliche Dateiinhalte nicht mehr vollständig auf die interne SSD. Alle Bytes werden aus dem Archiv gelesen und mit SHA-256 gegen das Quellmanifest geprüft. Kleine Metadatenproben prüfen weiterhin die native Wiederherstellung von ACLs, xattrs, Dateiflags, Zeitstempeln sowie symbolischen und harten Links. Für das macOS-Kompressionsflag wird eine kleine komprimierbare Probe verwendet; der Inhaltsvergleich verwendet weiterhin den vollständigen Original-Datenstrom. Ältere AppleDouble-Metadaten bleiben lesbar.
+Die Archivierung schreibt direkt mit `/usr/bin/aa`; eine TAR-Kompressor-Pipeline
+entfällt. Native Rückleseprüfung, SHA-256, APFS-Quellsnapshots und Abbruchschutz bleiben
+aktiv. Nullbereiche werden komprimiert und mit `-enable-holes` wiederhergestellt.
+Eine vollständige Rückleseprüfung erzeugt zusätzliche Lese-/Schreibarbeit.
 
-Der temporäre Metadatenstrom ist auf 512 MiB pro Archiv begrenzt; vor dem Entpacken werden zusätzlicher Platz für Dateisystemeinträge und eine Reserve von 2 GiB geprüft. Große gewöhnliche Dateien und virtuelle Festplatten benötigen daher keine zweite vollständige temporäre Kopie. Außergewöhnlich große Metadaten führen zu einer ausdrücklichen Platz-/Limitmeldung, nicht zum stillen Weglassen von Attributen. Ein vom Benutzer gestarteter **Test-Restore** schreibt weiterhin das gewählte Element vollständig in dessen Test-Zielordner.
+Die Durchsatzbegrenzung steuert den Archivschreiber anhand des Dateiwachstums.
+Archivlesevorgänge werden über einen gebremsten Eingabestrom geführt. Auch das
+Einlesen und Aufräumen von Testkopien auf dem geschützten Ziel wird begrenzt.
+Kurzzeitige Spitzen und macOS-Dateisystem-Metadaten sind dadurch nicht vollständig
+begrenzt. Die optionale Vermeidung von `F_FULLFSYNC` bleibt verfügbar.
 
-Sparse-Dateien werden als normale logische PAX-Daten gespeichert (Nullbereiche werden komprimiert) und beim Wiederherstellen wieder platzsparend mit Sparse-Dateien geschrieben.
-
-## Durchsatzbegrenzung (ab 1.2.46)
-
-Manche externen SSDs in USB-Gehäusen überhitzen bei dauerhaft vollem Durchsatz; macOS wirft das Laufwerk dann mitten im Backup aus. In **Einstellungen → 🌡️ Durchsatzbegrenzung** lässt sich pro Backup-Profil ein Limit in **MB/s** (1–5000, Vorgabe 80) aktivieren. Es gilt für alle Zugriffe auf das Ziel-Volume während Backup, Prüfung und Wiederherstellung; Quellen auf anderen Laufwerken und Zwischenschritte auf der internen SSD werden nicht gebremst.
-
-Technisch begrenzt ein gemeinsamer Token-Bucket alle Lesepfade der App (Prüfsummen, Rücklese- und Wiederherstellungsprüfung, kleine Kopien). Der Archivschreiber `/usr/bin/tar` wird über das Wachstum der Zieldatei gemessen und bei Überschreitung des Limits kurz per SIGSTOP/SIGCONT pausiert; beim Entpacken erhält `tar` das Archiv über einen gebremsten Datenstrom. Pausierte Kindprozesse werden bei Abbruch, Fehler oder Zeitüberschreitung immer zuerst fortgesetzt und dann beendet, sodass kein Prozess angehalten zurückbleibt. Pausenzeiten verlängern die Zeitlimits entsprechend. Im Protokoll erscheint zu Beginn `Durchsatzbegrenzung aktiv: N MB/s`, in der Fortschrittsanzeige `… MiB geschrieben · gedrosselt auf N MB/s`.
-
-Grenzen: Die Messung erfolgt in 20-ms-Schritten über die Dateigröße, kurzfristige Spitzen im Bereich des Schreibpuffers (etwa eine halbe Sekunde Vorlauf) sind möglich. Der macOS-Schreibcache und Dateisystem-Metadaten (z. B. Verzeichnisanlage, Umbenennen, Löschen alter Backups) unterliegen keinem Limit. Für Time Machine oder andere Programme auf demselben Laufwerk gilt die Begrenzung nicht.
-
-### Laufwerks-Cache-Flush vermeiden (ab 1.2.47)
-
-Wird ein Laufwerk trotz Durchsatzbegrenzung immer genau beim Abschließen eines Archivs („Temporäre Dateien aufräumen“) ausgeworfen, liegt das meist nicht an der Datenmenge, sondern an einem Befehl: Beim Veröffentlichen eines fertig geprüften Archivs verlangt die App vom Dateisystem, die Daten dauerhaft zu sichern. Rust setzt das auf macOS als `fcntl(F_FULLFSYNC)` um – APFS schreibt dann das gesamte Volume zurück und schickt dem Laufwerk ein *SYNCHRONIZE CACHE*. Einige USB-NVMe-Bridges (z. B. RTL9210- oder JMS583-basierte Gehäuse) setzen sich bei diesem Befehl zurück, worauf macOS das Volume aushängt. Werden mehrere Archive gleichzeitig fertig, trifft das Laufwerk gleich eine Serie solcher Befehle.
-
-Die Option **Laufwerks-Cache nicht erzwungen leeren (schont USB-Gehäuse)** in **Einstellungen → 🌡️ Durchsatzbegrenzung** ersetzt diese Aufrufe durch ein gewöhnliches `fsync`: Alle Daten werden vollständig an das Laufwerk übergeben, nur der erzwungene Flush des laufwerksinternen Schreib-Caches entfällt. Außerdem werden diese Sicherungsschritte seit 1.2.47 grundsätzlich nacheinander statt parallel ausgeführt. Die Option ist unabhängig vom MB/s-Limit nutzbar und gilt nur für das Ziel-Volume des Profils. Preis: Fällt genau in diesem Moment der Strom aus oder wird das Gehäuse abgezogen, kann das zuletzt geschriebene Archiv unvollständig sein – die Prüfung im nächsten Lauf würde das aufdecken. Im Protokoll erscheint `Laufwerks-Cache wird nicht erzwungen geleert`.
-
-### Gebremstes Löschen (ab 1.2.48)
-
-Die zweite Befehlsflut entsteht beim Löschen: Bei sehr großen Quellbäumen (Entwicklungsordner mit `target/`, `node_modules/` o. Ä.) reicht die 512-MiB-Metadaten-Probe nicht aus, und die Rückleseprüfung entpackt den gesamten Baum vorübergehend auf das Backup-Laufwerk („Vollständige Rückleseprüfung auf dem Backup-Laufwerk“). Beim anschließenden „Temporäre Rücklesedaten aufräumen“ werden hunderttausende Dateien gelöscht; APFS meldet jede freigewordene Blockgruppe per TRIM/UNMAP an das Laufwerk, und dieselben USB-Bridges quittieren das mit einem Reset. Mit aktiver Durchsatzbegrenzung wird das Löschen temporärer Bäume auf dem Ziel (Rücklesedaten, Stagingverzeichnisse, alte Backups bei der Aufbewahrung) deshalb wie ein Schreibvorgang gegen das MB/s-Limit gerechnet (freigegebene Blöcke plus 4 KiB je Eintrag), läuft immer nacheinander und wird auch durch einen Abbruch nicht beschleunigt. Ohne MB/s-Limit, aber mit aktivierter Cache-Option, werden Löschvorgänge auf dem Ziel zumindest serialisiert.
-
-Ob dein Gehäuse TRIM überhaupt meldet, zeigt bei eingestecktem Laufwerk `diskutil info /Volumes/<Name> | grep -i trim` bzw. `system_profiler SPUSBDataType`.
-
-### Rückleseprüfung großer Bäume über die interne SSD (ab 1.2.49)
-
-Die Protokollzeilen „… aufräumen“ erscheinen erst, während ein bereits aufgetretener Fehler weitergereicht wird; der eigentliche Auswurf passiert bei sehr großen Bäumen schon **während** der vollständigen Rückleseprüfung, wenn jede entpackte Datei auf dem USB-Laufwerk gelesen wird. Ist die Durchsatzbegrenzung oder die Cache-Option aktiv, entpackt die App diesen Baum deshalb bevorzugt in den temporären Ordner der internen SSD (Voraussetzung: Nutzdaten + 10 % + 2 GiB Reserve frei) und liest nur das Archiv gebremst vom Ziel – Phase „Vollständige Rückleseprüfung über die interne SSD“. Reicht der Platz nicht oder ist kein Schutz aktiv, bleibt der Baum auf dem Ziel; dann wird dort seit 1.2.49 auch das Einlesen jeder Datei gegen das MB/s-Limit gerechnet (mindestens 4 KiB je Eintrag für Status, Attribute und ACLs).
-
-Ergänzender Rat: Build-Ordner wie `target/` oder `node_modules/` aus den Quellen ausnehmen, damit die 512-MiB-Metadaten-Probe ausreicht und gar keine vollständige Rückleseprüfung nötig wird. Bleibt der Auswurf trotzdem, hilft der Kernel-Log: `sudo log show --start "<Datum> <Uhrzeit>" --end "<Datum> <Uhrzeit>" --predicate 'process == "kernel"' | grep -iE "usb|disk|apfs|reset|terminat"`.
+Die Ursachen der bisherigen mehrstündigen Abbrüche sind nicht abschließend geklärt.
+Die Formatumstellung allein belegt keine Fehlerbehebung. Vor produktiver Freigabe
+sind lange vollständige Backups und anschließende Test-Restores erforderlich.

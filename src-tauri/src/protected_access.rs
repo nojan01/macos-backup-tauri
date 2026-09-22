@@ -30,7 +30,7 @@ pub(crate) fn retry<T>(mut operation: impl FnMut() -> io::Result<T>) -> Result<T
     )
 }
 
-/// A failed tar creation only wrote a private, unpublished archive. Re-running
+/// A failed native archive creation only wrote a private, unpublished archive. Re-running
 /// the command truncates that partial file; the source manifest and readback
 /// checks still have to pass before anything is published. `output` is the
 /// archive being written; an active throughput limit for its volume paces the

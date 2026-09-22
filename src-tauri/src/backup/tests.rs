@@ -124,8 +124,8 @@ fn archived_tree_includes_previously_excluded_names_and_roundtrips_metadata() {
     )
     .unwrap();
     fs::set_permissions(p.join("Caches/data"), fs::Permissions::from_mode(0o600)).unwrap();
-    let archive = d.0.join("archive.tar.gz");
-    create_verified_archive(&p, &archive, true).unwrap();
+    let archive = d.0.join("archive.aar");
+    create_verified_archive(&p, &archive).unwrap();
     verify_archive_source(&archive, "Logs", &compute_snapshot(&p).unwrap()).unwrap();
 }
 #[test]
@@ -135,7 +135,7 @@ fn single_file_preserves_xattrs_and_nanoseconds() {
     fs::write(&p, b"payload").unwrap();
     xattr::set(&p, "com.example.backup-audit", b"extended value").unwrap();
     set_times(&p, 1700000000, 123456789);
-    let a = d.0.join("file.tar.gz");
+    let a = d.0.join("file.aar");
     create_file_archive(&p, "data", &a).unwrap();
     verify_archive_source(&a, "data", &compute_snapshot(&p).unwrap()).unwrap();
 }
@@ -153,7 +153,7 @@ fn acl_changes_are_detected_and_preserved() {
     assert!(out.status.success());
     let after = compute_snapshot(&p).unwrap();
     assert_ne!(before[0].acl, after[0].acl);
-    create_file_archive(&p, "data", &d.0.join("file.tar.gz")).unwrap();
+    create_file_archive(&p, "data", &d.0.join("file.aar")).unwrap();
 }
 #[test]
 fn target_inside_source_or_backup_as_source_is_rejected() {
@@ -170,11 +170,11 @@ fn legacy_weak_manifest_cannot_be_reused() {
     let d = fixture();
     fs::create_dir(d.0.join("manifests")).unwrap();
     fs::write(
-        manifest_path_for(&d.0, "data.tar.gz"),
+        manifest_path_for(&d.0, "data.aar"),
         br#"[{"p":"file","s":4,"m":1700000000}]"#,
     )
     .unwrap();
-    assert!(load_manifest(&d.0, "data.tar.gz").is_none());
+    assert!(load_manifest(&d.0, "data.aar").is_none());
 }
 #[test]
 fn manifests_and_checkpoints_are_durable_and_resume_replaces_old_versions() {
@@ -182,11 +182,11 @@ fn manifests_and_checkpoints_are_durable_and_resume_replaces_old_versions() {
     let p = d.0.join("file");
     fs::write(&p, b"one").unwrap();
     let snapshot = compute_snapshot(&p).unwrap();
-    save_manifest(&d.0, "data.tar.gz", &snapshot).unwrap();
-    assert_eq!(load_manifest(&d.0, "data.tar.gz").unwrap(), snapshot);
+    save_manifest(&d.0, "data.aar", &snapshot).unwrap();
+    assert_eq!(load_manifest(&d.0, "data.aar").unwrap(), snapshot);
     let mut item = BackupItem {
         path: "~/file".into(),
-        archive: "data.tar.gz".into(),
+        archive: "data.aar".into(),
         hash: "a".repeat(64),
         archive_size_bytes: 1,
         source_size_bytes: 3,
@@ -205,7 +205,7 @@ fn failed_publication_keeps_old_archive_and_hardlink_reuse_does_not_truncate_it(
     let target = d.0.join("target");
     fs::write(&old, b"previous").unwrap();
     fs::hard_link(&old, &target).unwrap();
-    assert!(create_verified_archive(&d.0.join("missing"), &target, true).is_err());
+    assert!(create_verified_archive(&d.0.join("missing"), &target).is_err());
     assert_eq!(fs::read(&old).unwrap(), b"previous");
     let newer = d.0.join("newer");
     fs::write(&newer, b"new").unwrap();
@@ -220,7 +220,7 @@ fn cancellation_never_publishes_successful_archive() {
     fs::write(&p, b"data").unwrap();
     let a = d.0.join("archive");
     BACKUP_CANCELLED.store(true, Ordering::SeqCst);
-    let r = create_verified_archive(&p, &a, true);
+    let r = create_verified_archive(&p, &a);
     BACKUP_CANCELLED.store(false, Ordering::SeqCst);
     assert!(r.is_err());
     assert!(!a.exists());
@@ -240,15 +240,15 @@ fn completed_fixture(d: &PrivateDir) -> (PathBuf, PathBuf, BackupMetadata, Vec<M
     fs::write(source.join("data"), b"backup-data").unwrap();
     let backup = d.0.join("backup");
     fs::create_dir(&backup).unwrap();
-    let a = backup.join("docs.tar.gz");
-    create_verified_archive(&source, &a, true).unwrap();
+    let a = backup.join("docs.aar");
+    create_verified_archive(&source, &a).unwrap();
     let metadata = BackupMetadata {
         profile_id: "standard".into(),
         profile_name: "Standard".into(),
         timestamp: "20260907-120000".into(),
         items: vec![BackupItem {
             path: "~/Documents".into(),
-            archive: "docs.tar.gz".into(),
+            archive: "docs.aar".into(),
             hash: hash_file(&a).unwrap(),
             archive_size_bytes: fs::metadata(&a).unwrap().len(),
             source_size_bytes: 11,
@@ -290,7 +290,7 @@ fn incompressible(len: usize) -> Vec<u8> {
         })
         .collect()
 }
-fn throttled_roundtrip(gzip: bool) {
+fn throttled_roundtrip() {
     let d = fixture();
     let _throttle = crate::throttle::activate_for_tests(&d.0, 8).unwrap();
     let source = d.0.join("Documents");
@@ -299,16 +299,16 @@ fn throttled_roundtrip(gzip: bool) {
     fs::write(source.join("data"), &payload).unwrap();
     let backup = d.0.join("backup");
     fs::create_dir(&backup).unwrap();
-    let a = backup.join("docs.tar.gz");
+    let a = backup.join("docs.aar");
     let started = std::time::Instant::now();
-    create_verified_archive(&source, &a, gzip).unwrap();
+    create_verified_archive(&source, &a).unwrap();
     let metadata = BackupMetadata {
         profile_id: "standard".into(),
         profile_name: "Standard".into(),
         timestamp: "20260907-120000".into(),
         items: vec![BackupItem {
             path: "~/Documents".into(),
-            archive: "docs.tar.gz".into(),
+            archive: "docs.aar".into(),
             hash: hash_file(&a).unwrap(),
             archive_size_bytes: fs::metadata(&a).unwrap().len(),
             source_size_bytes: payload.len() as u64,
@@ -338,16 +338,8 @@ fn throttled_roundtrip(gzip: bool) {
     );
 }
 #[test]
-fn throttled_gzip_backup_and_restore_roundtrip() {
-    throttled_roundtrip(true);
-}
-#[test]
-fn throttled_zstd_backup_and_restore_roundtrip() {
-    if get_zstd_path().is_none() {
-        eprintln!("zstd not installed; skipping");
-        return;
-    }
-    throttled_roundtrip(false);
+fn throttled_lzfse_backup_and_restore_roundtrip() {
+    throttled_roundtrip();
 }
 #[test]
 fn changed_or_deleted_sources_block_completion_even_after_archive_was_written() {
@@ -370,7 +362,7 @@ fn damaged_archive_or_metadata_write_failure_cannot_complete_backup() {
     assert!(finish_backup(&backup, &meta, &[(source.clone(), expected.clone())]).is_err());
     assert!(load_backup_metadata(&backup.join("metadata.json")).is_err());
     fs::remove_dir(backup.join("metadata.json")).unwrap();
-    fs::write(backup.join("docs.tar.gz"), b"corrupt").unwrap();
+    fs::write(backup.join("docs.aar"), b"corrupt").unwrap();
     assert!(finish_backup(&backup, &meta, &[(source, expected)]).is_err());
     assert!(!backup.join("metadata.json").exists());
 }
@@ -378,13 +370,13 @@ fn damaged_archive_or_metadata_write_failure_cannot_complete_backup() {
 fn resumed_archive_is_replaced_with_current_source_and_old_backup_survives() {
     let d = fixture();
     let (source, backup, mut meta, _) = completed_fixture(&d);
-    let archive = backup.join("docs.tar.gz");
-    let previous = d.0.join("previous.tar.gz");
+    let archive = backup.join("docs.aar");
+    let previous = d.0.join("previous.aar");
     fs::hard_link(&archive, &previous).unwrap();
     let old_hash = hash_file(&previous).unwrap();
     append_resume_entry(&backup, &meta.items[0]).unwrap();
     fs::write(source.join("data"), b"new-version").unwrap();
-    create_verified_archive(&source, &archive, true).unwrap();
+    create_verified_archive(&source, &archive).unwrap();
     meta.items[0].hash = hash_file(&archive).unwrap();
     meta.items[0].archive_size_bytes = fs::metadata(&archive).unwrap().len();
     append_resume_entry(&backup, &meta.items[0]).unwrap();
@@ -454,7 +446,7 @@ fn overwrite_restores_metadata_of_existing_directories() {
     fs::set_permissions(&source, fs::Permissions::from_mode(0o700)).unwrap();
     set_times(&source, 1700000000, 123456789);
     let a = d.0.join("archive");
-    create_verified_archive(&source, &a, true).unwrap();
+    create_verified_archive(&source, &a).unwrap();
     let target = d.0.join("home/Documents");
     fs::create_dir_all(&target).unwrap();
     fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
@@ -566,8 +558,8 @@ fn git_runtime_socket_does_not_block_archiving_or_restore() {
         .iter()
         .any(|e| e.p.ends_with("fsmonitor--daemon.ipc")));
     assert!(snapshot.iter().any(|e| e.p == "ordinary.sock"));
-    let archive = d.0.join("project.tar.gz");
-    create_verified_archive(&source, &archive, true).unwrap();
+    let archive = d.0.join("project.aar");
+    create_verified_archive(&source, &archive).unwrap();
     let target = d.0.join("restored/project");
     fs::create_dir(target.parent().unwrap()).unwrap();
     staged_restore(&archive, &target, true).unwrap();
@@ -594,7 +586,7 @@ fn a_regular_file_named_like_git_socket_is_still_backed_up() {
     assert!(snapshot
         .iter()
         .any(|e| e.p == ".git/fsmonitor--daemon.ipc" && e.kind == "file"));
-    create_verified_archive(&root, &d.0.join("archive"), true).unwrap();
+    create_verified_archive(&root, &d.0.join("archive")).unwrap();
 }
 #[test]
 fn explicit_socket_source_and_nested_fifo_remain_errors() {
@@ -619,7 +611,7 @@ fn archive_validation_and_restore_merge_honor_cancellation() {
     let source = d.0.join("source");
     fs::write(&source, b"data").unwrap();
     let archive = d.0.join("archive");
-    create_verified_archive(&source, &archive, true).unwrap();
+    create_verified_archive(&source, &archive).unwrap();
     cancel_operation().unwrap();
     assert!(archive_index(&archive).unwrap_err().contains("abgebrochen"));
     let target = d.0.join("target");
@@ -708,8 +700,8 @@ fn representative_backup_roundtrip() {
     }
     let start = std::time::Instant::now();
     let initial = compute_snapshot(&source).unwrap();
-    let archive = d.0.join("documents.tar.gz");
-    create_verified_archive_from_snapshot(&source, &archive, true, &initial).unwrap();
+    let archive = d.0.join("documents.aar");
+    create_verified_archive_from_snapshot(&source, &archive, &initial).unwrap();
     let _hash = hash_file(&archive).unwrap();
     ensure_unchanged(&source, &initial).unwrap();
     println!(
@@ -733,9 +725,9 @@ fn cached_source_baseline_rejects_changed_added_and_removed_files() {
             "added" => fs::write(source.join("new"), b"new data").unwrap(),
             _ => fs::remove_file(&file).unwrap(),
         }
-        let target = d.0.join("archive.tar.gz");
+        let target = d.0.join("archive.aar");
         assert!(
-            create_verified_archive_from_snapshot(&source, &target, true, &baseline).is_err(),
+            create_verified_archive_from_snapshot(&source, &target, &baseline).is_err(),
             "{change} source accepted"
         );
         assert!(!target.exists(), "{change} source published");
@@ -746,8 +738,8 @@ fn single_validation_unpack_still_rejects_wrong_root_before_writing() {
     let d = fixture();
     let source = d.0.join("actual");
     fs::write(&source, b"payload").unwrap();
-    let archive = d.0.join("archive.tar.gz");
-    create_verified_archive(&source, &archive, true).unwrap();
+    let archive = d.0.join("archive.aar");
+    create_verified_archive(&source, &archive).unwrap();
     let stage = PrivateDir::temp().unwrap();
     assert!(
         unpack_private_with_root(&archive, &stage.0, Some(std::ffi::OsStr::new("wrong"))).is_err()
@@ -762,8 +754,8 @@ fn regenerated_provenance_is_allowed_only_in_readback_not_source_guards() {
     fs::create_dir(&source).unwrap();
     fs::write(source.join("data"), b"must survive").unwrap();
     xattr::set(&source, "com.example.required", b"keep this metadata").unwrap();
-    let archive = d.0.join("archive.tar.gz");
-    create_verified_archive(&source, &archive, true).unwrap();
+    let archive = d.0.join("archive.aar");
+    create_verified_archive(&source, &archive).unwrap();
     let mut expected = compute_snapshot(&source).unwrap();
     for entry in &mut expected {
         entry.xattrs.insert(
@@ -850,7 +842,7 @@ fn actual_directory_root_metadata_roundtrip() {
         acl: read_acl(&root).unwrap(),
     };
     let d = fixture();
-    let archive = d.0.join("root.tar.gz");
+    let archive = d.0.join("root.aar");
     let mut cmd = Command::new("/usr/bin/tar");
     cmd.args([
         "--format=pax",
@@ -891,9 +883,9 @@ fn actual_source_backup_finalize_and_test_restore() {
     fs::create_dir(&backup).unwrap();
     let expected = compute_snapshot(&source).unwrap();
     let bytes = expected.iter().map(|e| e.s).sum();
-    let name = archive_name_for(&source, "tar.gz");
+    let name = archive_name_for(&source, "aar");
     let archive = backup.join(&name);
-    create_verified_archive_from_snapshot(&source, &archive, true, &expected).unwrap();
+    create_verified_archive_from_snapshot(&source, &archive, &expected).unwrap();
     let meta = BackupMetadata {
         profile_id: "standard".into(),
         profile_name: "Standard".into(),
@@ -1077,8 +1069,8 @@ fn quarantine_survives_roundtrip_with_os_regenerated_value() {
     )
     .unwrap();
     let expected = compute_snapshot(&source).unwrap();
-    let archive = d.0.join("file.tar.gz");
-    create_verified_archive_from_snapshot(&source, &archive, true, &expected).unwrap();
+    let archive = d.0.join("file.aar");
+    create_verified_archive_from_snapshot(&source, &archive, &expected).unwrap();
     let output = d.0.join("restored");
     fs::create_dir(&output).unwrap();
     unpack_private(&archive, &output).unwrap();
@@ -1126,8 +1118,8 @@ fn tracked_document_roundtrips_with_hidden_flag_content_and_metadata() {
     );
     let expected = compute_snapshot(&source).unwrap();
     assert_eq!(expected[0].flags, libc::UF_TRACKED | libc::UF_HIDDEN);
-    let archive = d.0.join("document.tar.gz");
-    create_verified_archive_from_snapshot(&source, &archive, true, &expected).unwrap();
+    let archive = d.0.join("document.aar");
+    create_verified_archive_from_snapshot(&source, &archive, &expected).unwrap();
     let output = d.0.join("restored");
     fs::create_dir(&output).unwrap();
     unpack_private(&archive, &output).unwrap();
@@ -1207,8 +1199,8 @@ fn compressed_file_roundtrip_retains_content_and_compression_flag() {
         expected = compute_snapshot(&source).unwrap();
     }
     assert_ne!(expected[0].flags & libc::UF_COMPRESSED, 0);
-    let archive = d.0.join("compressed.tar.gz");
-    create_verified_archive_from_snapshot(&source, &archive, true, &expected).unwrap();
+    let archive = d.0.join("compressed.aar");
+    create_verified_archive_from_snapshot(&source, &archive, &expected).unwrap();
     verify_archive_source(&archive, source.file_name().unwrap().to_str().unwrap(), &expected).unwrap();
     if source == compressed {
         assert_eq!(fs::read(&compressed).unwrap(), fs::read(&plain).unwrap());
@@ -1234,8 +1226,8 @@ fn tracked_flags_survive_directory_merge_hardlinks_and_symlinks_without_live_sou
         crate::archive_flags::set(&path, libc::UF_TRACKED | libc::UF_HIDDEN).unwrap();
     }
     let baseline = compute_snapshot(&source).unwrap();
-    let archive = d.0.join("tree.tar.gz");
-    create_verified_archive_from_snapshot(&source, &archive, true, &baseline).unwrap();
+    let archive = d.0.join("tree.aar");
+    create_verified_archive_from_snapshot(&source, &archive, &baseline).unwrap();
     fs::remove_dir_all(&source).unwrap();
     let target = d.0.join("restore/tree");
     fs::create_dir_all(target.join("nested")).unwrap();
@@ -1272,7 +1264,7 @@ fn internal_flags_filename_never_replaces_user_data() {
         .unwrap();
         crate::archive_flags::set(&source, libc::UF_TRACKED).unwrap();
         let archive = d.0.join("archive");
-        create_verified_archive(&source, &archive, true).unwrap();
+        create_verified_archive(&source, &archive).unwrap();
         let output = PrivateDir::temp().unwrap();
         unpack_private(&archive, &output.0).unwrap();
         assert_eq!(
@@ -1281,48 +1273,6 @@ fn internal_flags_filename_never_replaces_user_data() {
         );
         assert_eq!(fs::read_dir(&output.0).unwrap().count(), 1);
         fs::remove_file(&source).unwrap();
-    }
-}
-
-#[test]
-fn invalid_flags_metadata_is_rejected_before_extracting_files() {
-    let d = fixture();
-    for entries in [
-        vec![("../outside", libc::UF_TRACKED)],
-        vec![("/outside", libc::UF_TRACKED)],
-        vec![("missing", libc::UF_TRACKED)],
-        vec![("", libc::UF_TRACKED), ("", libc::UF_HIDDEN)],
-    ] {
-        let metadata = crate::archive_flags::write(
-            &d.0,
-            &crate::archive_flags::Flags {
-                root: "file".into(),
-                pax_metadata: false,
-                entries: entries
-                    .into_iter()
-                    .map(|(p, flags)| crate::archive_flags::Record {
-                        path: p.into(),
-                        flags,
-                    })
-                    .collect(),
-            },
-        )
-        .unwrap();
-        let source = d.0.join("file");
-        fs::write(&source, b"payload").unwrap();
-        let archive = d.0.join("invalid.tar.gz");
-        let output = Command::new("/usr/bin/tar")
-            .current_dir(&d.0)
-            .args(["--format=pax", "-czf"])
-            .arg(&archive)
-            .arg("./file")
-            .arg(format!("@{}", metadata.display()))
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        let target = PrivateDir::temp().unwrap();
-        assert!(unpack_private(&archive, &target.0).is_err());
-        assert!(fs::read_dir(&target.0).unwrap().next().is_none());
     }
 }
 
@@ -1349,8 +1299,8 @@ fn immutable_files_and_directories_restore_with_their_protection_flags() {
     crate::archive_flags::set(&file, libc::UF_IMMUTABLE | libc::UF_TRACKED).unwrap();
     crate::archive_flags::set(&source, libc::UF_IMMUTABLE | libc::UF_HIDDEN).unwrap();
     let expected = compute_snapshot(&source).unwrap();
-    let archive = d.0.join("locked.tar.gz");
-    create_verified_archive_from_snapshot(&source, &archive, true, &expected).unwrap();
+    let archive = d.0.join("locked.aar");
+    create_verified_archive_from_snapshot(&source, &archive, &expected).unwrap();
     for existing in [false, true] {
         let target = d.0.join(if existing {
             "merged/locked"
@@ -1412,8 +1362,8 @@ fn frozen_backup_survives_live_content_and_usage_attribute_changes() {
     )
     .unwrap();
     assert!(fs::OpenOptions::new().write(true).open(&stable).is_err());
-    let archive = d.0.join("document.tar.gz");
-    create_verified_archive_from_snapshot(&stable, &archive, true, &baseline).unwrap();
+    let archive = d.0.join("document.aar");
+    create_verified_archive_from_snapshot(&stable, &archive, &baseline).unwrap();
     let output = PrivateDir::temp().unwrap();
     unpack_private(&archive, &output.0).unwrap();
     let restored = compute_snapshot(&output.0.join("document")).unwrap();
@@ -1443,9 +1393,9 @@ fn actual_frozen_source_backup_finalize_and_test_restore() {
     let expected = compute_snapshot(&stable).unwrap();
     let bytes = expected.iter().map(|e| e.s).sum();
     println!("SOURCE_SCANNED {} entries, {} bytes", expected.len(), bytes);
-    let name = archive_name_for(&source, "tar.gz");
+    let name = archive_name_for(&source, "aar");
     let archive = backup.join(&name);
-    create_verified_archive_from_snapshot(&stable, &archive, true, &expected).unwrap();
+    create_verified_archive_from_snapshot(&stable, &archive, &expected).unwrap();
     println!("ARCHIVE_CREATED_AND_READBACK_VERIFIED");
     let meta = BackupMetadata {
         profile_id: "standard".into(),
@@ -1535,8 +1485,8 @@ fn literal_appledouble_names_and_resource_forks_survive_backup_and_merge() {
         .unwrap();
     assert!(result.status.success());
     let expected = compute_snapshot(&source).unwrap();
-    let archive = d.0.join("tree.tar.gz");
-    create_verified_archive_from_snapshot(&source, &archive, true, &expected).unwrap();
+    let archive = d.0.join("tree.aar");
+    create_verified_archive_from_snapshot(&source, &archive, &expected).unwrap();
     fs::remove_dir_all(&source).unwrap();
     let target = d.0.join("restored/tree");
     fs::create_dir_all(&target).unwrap();
@@ -1569,44 +1519,12 @@ fn literal_appledouble_root_and_metadata_companion_are_user_files() {
         fs::write(&source, b"literal user file").unwrap();
         let expected = compute_snapshot(&source).unwrap();
         let archive = d.0.join("archive");
-        create_verified_archive_from_snapshot(&source, &archive, true, &expected).unwrap();
+        create_verified_archive_from_snapshot(&source, &archive, &expected).unwrap();
         let target = d.0.join("out").join(name);
         fs::create_dir_all(target.parent().unwrap()).unwrap();
         staged_restore(&archive, &target, true).unwrap();
         assert_eq!(fs::read(&target).unwrap(), b"literal user file");
     }
-}
-
-#[test]
-fn legacy_appledouble_archive_retains_native_metadata_restore() {
-    let d = fixture();
-    let source = d.0.join("legacy");
-    fs::write(&source, b"legacy bytes").unwrap();
-    xattr::set(&source, "com.apple.ResourceFork", b"legacy resource fork").unwrap();
-    let baseline = compute_snapshot(&source).unwrap();
-    let archive = d.0.join("legacy.tar.gz");
-    let metadata = crate::archive_flags::write(
-        &d.0,
-        &crate::archive_flags::Flags {
-            root: "legacy".into(),
-            pax_metadata: false,
-            entries: Vec::new(),
-        },
-    )
-    .unwrap();
-    let result = Command::new("/usr/bin/tar")
-        .current_dir(&d.0)
-        .args(["--format=pax", "-czf"])
-        .arg(&archive)
-        .arg("./legacy")
-        .arg(format!("@{}", metadata.display()))
-        .output()
-        .unwrap();
-    assert!(result.status.success());
-    verify_archive_source(&archive, "legacy", &baseline).unwrap();
-    let old: crate::archive_flags::Flags =
-        serde_json::from_str(r#"{"root":"legacy","entries":[]}"#).unwrap();
-    assert!(!old.pax_metadata);
 }
 
 #[test]
@@ -1616,7 +1534,7 @@ fn missing_readback_entries_report_exact_paths() {
     fs::create_dir(&source).unwrap();
     fs::write(source.join("present"), b"data").unwrap();
     let archive = d.0.join("archive");
-    create_verified_archive(&source, &archive, true).unwrap();
+    create_verified_archive(&source, &archive).unwrap();
     fs::write(source.join("._missing"), b"missing").unwrap();
     let error =
         verify_archive_source(&archive, "tree", &compute_snapshot(&source).unwrap()).unwrap_err();
@@ -1632,10 +1550,10 @@ fn resume_reuses_only_unchanged_sources_and_verified_archives() {
     let backup = d.0.join("backup");
     let inventory = d.0.join("inventory");
     fs::create_dir(&backup).unwrap();
-    let name = "source.tar.gz";
+    let name = "source.aar";
     let archive = backup.join(name);
     let initial = compute_snapshot(&source).unwrap();
-    create_verified_archive_from_snapshot(&source, &archive, true, &initial).unwrap();
+    create_verified_archive_from_snapshot(&source, &archive, &initial).unwrap();
     save_manifest(&inventory, name, &initial).unwrap();
     let item = BackupItem {
         path: "source".into(),
@@ -1712,9 +1630,9 @@ fn remaining_frozen_sources_backup_and_restore() {
             expected.len(),
             expected.iter().map(|e| e.s).sum::<u64>()
         );
-        let name = archive_name_for(source, "tar.zst");
+        let name = archive_name_for(source, "aar");
         let archive = backup.join(&name);
-        create_verified_archive_from_snapshot(&stable, &archive, false, &expected).unwrap();
+        create_verified_archive_from_snapshot(&stable, &archive, &expected).unwrap();
         items.push(BackupItem {
             path: source.to_str().unwrap().into(),
             archive: name,
@@ -1760,4 +1678,24 @@ fn remaining_frozen_sources_backup_and_restore() {
         println!("PROBE_RESTORE_PASSED {}", source.display());
     }
     println!("ALL_REMAINING_SOURCES_PASSED {}", sources.len());
+}
+
+#[test]
+fn native_archive_preserves_external_root_symlink_without_reading_target() {
+    let d = fixture();
+    let outside = d.0.join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("untouched"), b"not selected").unwrap();
+    let source = d.0.join("selected-link");
+    symlink(&outside, &source).unwrap();
+    crate::archive_flags::set(&source, libc::UF_TRACKED).unwrap();
+    let expected = compute_snapshot(&source).unwrap();
+    let archive = d.0.join("link.aar");
+    create_verified_archive_from_snapshot(&source, &archive, &expected).unwrap();
+    let output = d.0.join("restore");
+    fs::create_dir(&output).unwrap();
+    unpack_private(&archive, &output).unwrap();
+    assert_eq!(fs::read_link(output.join("selected-link")).unwrap(), outside);
+    assert_eq!(fs::read_dir(&output).unwrap().count(), 1);
+    assert_eq!(fs::read(outside.join("untouched")).unwrap(), b"not selected");
 }

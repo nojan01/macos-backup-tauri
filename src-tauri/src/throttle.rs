@@ -259,6 +259,9 @@ impl<R: Read> ThrottledReader<R> {
 }
 impl<R: Read> Read for ThrottledReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if crate::BACKUP_CANCELLED.load(Ordering::SeqCst) || crate::VERIFY_CANCELLED.load(Ordering::SeqCst) {
+            return Err(io::Error::other("Vorgang abgebrochen"));
+        }
         let n = self.inner.read(buf)?;
         if let Some(limiter) = &self.limiter {
             if n > 0 {

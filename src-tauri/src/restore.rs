@@ -90,242 +90,10 @@ pub(super) fn verify_item(backup: &Path, item: &BackupItem) -> Result<(), String
     Ok(())
 }
 
-pub(super) struct ArchiveInput {
-    reader: Box<dyn Read>,
-    child: Option<std::process::Child>,
-    /// Feeds a throttled archive stream into the decompressor's stdin.
-    pump: Option<std::thread::JoinHandle<io::Result<u64>>>,
-    progress: crate::work_progress::Bytes,
-}
-impl Read for ArchiveInput {
-    fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
-        if BACKUP_CANCELLED.load(Ordering::SeqCst) || VERIFY_CANCELLED.load(Ordering::SeqCst) {
-            // Interrupted would be retried automatically by io::copy and could loop forever.
-            return Err(io::Error::other("Vorgang abgebrochen"));
-        }
-        let n = self.reader.read(b)?;
-        self.progress.add(n);
-        Ok(n)
-    }
-}
-impl ArchiveInput {
-    pub(super) fn finish(&mut self) -> Result<(), String> {
-        io::copy(self, &mut io::sink()).map_err(|e| format!("Corrupt archive: {e}"))?;
-        if let Some(child) = self.child.as_mut() {
-            if !child.wait().map_err(|e| e.to_string())?.success() {
-                return Err("Decompression failed".into());
-            }
-        }
-        if let Some(pump) = self.pump.take() {
-            match pump.join() {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => return Err(format!("Archive read failed: {e}")),
-                Err(_) => return Err("Archive reader thread failed".into()),
-            }
-        }
-        Ok(())
-    }
-}
-impl Drop for ArchiveInput {
-    fn drop(&mut self) {
-        if let Some(child) = self.child.as_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        // Killing the child breaks the pipe, so the pump ends on its next write.
-        if let Some(pump) = self.pump.take() {
-            let _ = pump.join();
-        }
-    }
-}
-fn compression(archive: &Path) -> Result<bool, String> {
-    let mut f = fs::File::open(archive).map_err(|e| e.to_string())?;
-    let mut magic = [0; 4];
-    f.read_exact(&mut magic).map_err(|e| e.to_string())?;
-    if magic[..2] == [0x1f, 0x8b] {
-        Ok(false)
-    } else if magic == [0x28, 0xb5, 0x2f, 0xfd] {
-        Ok(true)
-    } else {
-        Err("Unsupported or corrupt archive compression".into())
-    }
-}
-pub(super) fn open_archive(archive: &Path) -> Result<ArchiveInput, String> {
-    if compression(archive)? {
-        let zstd = get_zstd_path().ok_or("zstd required to read this backup")?;
-        let mut cmd = Command::new(zstd);
-        cmd.args(["-d", "-c"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null());
-        let throttled = crate::throttle::limiter_for(archive).is_some();
-        if throttled {
-            // Under a throughput limit the archive bytes flow through a paced
-            // reader into zstd instead of letting zstd read the file itself.
-            cmd.stdin(std::process::Stdio::piped());
-        } else {
-            cmd.arg("--").arg(archive);
-        }
-        let mut child = cmd.spawn().map_err(|e| e.to_string())?;
-        let reader = Box::new(child.stdout.take().ok_or("No decompressor output")?);
-        let pump = if throttled {
-            let mut source = crate::throttle::open_throttled(archive).map_err(|e| e.to_string())?;
-            let mut stdin = child.stdin.take().ok_or("No decompressor input")?;
-            Some(std::thread::spawn(move || {
-                match io::copy(&mut source, &mut stdin) {
-                    Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(0),
-                    other => other,
-                }
-            }))
-        } else {
-            None
-        };
-        Ok(ArchiveInput {
-            reader,
-            progress: crate::work_progress::Bytes::new(),
-            child: Some(child),
-            pump,
-        })
-    } else {
-        let f = crate::throttle::open_throttled(archive).map_err(|e| e.to_string())?;
-        Ok(ArchiveInput {
-            reader: Box::new(flate2::read::MultiGzDecoder::new(f)),
-            child: None,
-            pump: None,
-            progress: crate::work_progress::Bytes::new(),
-        })
-    }
-}
-pub(super) fn relative_path(path: &Path) -> Result<PathBuf, String> {
-    let mut result = PathBuf::new();
-    for c in path.components() {
-        match c {
-            Component::Normal(n) => result.push(n),
-            Component::CurDir => (),
-            _ => return Err(format!("Unsafe archive path: {}", path.display())),
-        }
-    }
-    Ok(result)
-}
-/// Read actual tar headers, not a newline-delimited listing (filenames may contain newlines).
+/// Validate the native JSON index; filenames may contain newlines.
 pub(super) fn archive_index(archive: &Path) -> Result<BTreeSet<PathBuf>, String> {
-    Ok(inspect_archive(archive)?.0)
+    crate::apple_archive::index(archive)
 }
-pub(super) fn inspect_archive(
-    archive: &Path,
-) -> Result<
-    (
-        BTreeSet<PathBuf>,
-        Option<(PathBuf, crate::archive_flags::Flags)>,
-    ),
-    String,
-> {
-    let _phase = crate::work_progress::Phase::enter("Archivstruktur und Kompression prüfen");
-    let mut input = open_archive(archive)?;
-    let mut entries = BTreeMap::new();
-    let mut hardlinks = Vec::new();
-    let mut flags = None;
-    let mut normalized_names = BTreeSet::new();
-    {
-        let mut tar = tar::Archive::new(&mut input);
-        for entry in tar.entries().map_err(|e| e.to_string())? {
-            let mut entry = entry.map_err(|e| e.to_string())?;
-            // Validate every PAX record before trusting path/link/size overrides.
-            // The tar crate's path accessors silently skip invalid extensions.
-            if let Some(extensions) = entry.pax_extensions().map_err(|e| e.to_string())? {
-                for extension in extensions {
-                    extension.map_err(|e| format!("Invalid archive PAX metadata: {e}"))?;
-                }
-            }
-            let path = relative_path(&entry.path().map_err(|e| e.to_string())?)?;
-            let kind = entry.header().entry_type();
-            if !(kind.is_file() || kind.is_dir() || kind.is_symlink() || kind.is_hard_link()) {
-                return Err(format!("Unsupported archive entry: {}", path.display()));
-            }
-            if path.as_os_str().is_empty() {
-                if kind.is_dir() {
-                    continue;
-                }
-                return Err("Empty archive path".into());
-            }
-            // macOS destinations can be case-insensitive and Unicode-normalizing.
-            if !normalized_names.insert(normalized_path(&path)) {
-                return Err(format!(
-                    "Archive names collide on macOS: {}",
-                    path.display()
-                ));
-            }
-            if entries.insert(path.clone(), kind).is_some() {
-                return Err(format!("Duplicate archive entry: {}", path.display()));
-            }
-            if kind.is_hard_link() {
-                let link = entry
-                    .link_name()
-                    .map_err(|e| e.to_string())?
-                    .ok_or("Missing hardlink target")?;
-                hardlinks.push((path.clone(), relative_path(&link)?));
-            }
-            if let Some(records) = crate::archive_flags::read(&path, &mut entry)? {
-                if flags.replace((path.clone(), records)).is_some() {
-                    return Err("Mehrfache Dateiflag-Metadaten".into());
-                }
-            }
-            io::copy(&mut entry, &mut io::sink()).map_err(|e| format!("Corrupt archive: {e}"))?;
-        }
-    }
-    // Validate compression trailers/checksums as well as tar headers.
-    io::copy(&mut input, &mut io::sink()).map_err(|e| format!("Corrupt archive: {e}"))?;
-    if let Some(child) = input.child.as_mut() {
-        if !child.wait().map_err(|e| e.to_string())?.success() {
-            return Err("Decompression failed".into());
-        }
-    }
-    let normalized_entries: BTreeMap<_, _> = entries
-        .iter()
-        .map(|(p, k)| (normalized_path(p), *k))
-        .collect();
-    for path in entries.keys() {
-        for parent in path.ancestors().skip(1) {
-            if normalized_entries
-                .get(&normalized_path(parent))
-                .is_some_and(|k| !k.is_dir())
-            {
-                return Err(format!(
-                    "Archive writes through a non-directory: {}",
-                    parent.display()
-                ));
-            }
-        }
-    }
-    for (path, link) in hardlinks {
-        if !entries.get(&link).is_some_and(|k| k.is_file()) {
-            return Err(format!("Unsafe hardlink: {}", path.display()));
-        }
-    }
-    if entries.is_empty() {
-        return Err("Archive contains no items".into());
-    }
-    if let Some((path, records)) = &flags {
-        entries.remove(path);
-        let companion = crate::archive_flags::companion(path);
-        if let Some(kind) = (!records.pax_metadata)
-            .then(|| entries.remove(&companion))
-            .flatten()
-        {
-            if !kind.is_file() {
-                return Err("Ungültiger Metadaten-Begleiteintrag".into());
-            }
-        }
-        crate::archive_flags::validate(records, &entries)?;
-    }
-    Ok((entries.keys().cloned().collect(), flags))
-}
-fn normalized_path(path: &Path) -> String {
-    path.to_string_lossy()
-        .nfc()
-        .collect::<String>()
-        .to_lowercase()
-}
-
 fn root_matches(path: &Path, root: &std::ffi::OsStr) -> bool {
     let Some(first) = path.components().next() else {
         return false;
@@ -338,9 +106,7 @@ fn root_matches(path: &Path, root: &std::ffi::OsStr) -> bool {
     {
         return true;
     }
-    // bsdtar uses AppleDouble siblings to retain macOS extended attributes.
-    first.as_os_str() == std::ffi::OsString::from(format!("._{}", root.to_string_lossy()))
-        && path.components().count() == 1
+    false
 }
 pub(super) fn require_root(
     index: &BTreeSet<PathBuf>,
@@ -376,81 +142,7 @@ pub(super) fn unpack_private_with_root(
     target: &Path,
     root: Option<&std::ffi::OsStr>,
 ) -> Result<(), String> {
-    let (index, flags) = inspect_archive(archive)?;
-    if let Some(root) = root {
-        require_root(&index, root)?;
-    }
-    let _phase = crate::work_progress::Phase::enter(
-        "Archiv entpacken / macOS-Dateiattribute und Rechte setzen",
-    );
-    let md = fs::symlink_metadata(target).map_err(|e| e.to_string())?;
-    if !md.is_dir()
-        || md.file_type().is_symlink()
-        || fs::read_dir(target)
-            .map_err(|e| e.to_string())?
-            .next()
-            .is_some()
-    {
-        return Err("Extraction requires an empty private directory".into());
-    }
-    let archive = archive.canonicalize().map_err(|e| e.to_string())?;
-    let mut cmd = Command::new("/usr/bin/tar");
-    if compression(&archive)? {
-        cmd.arg(format!(
-            "--use-compress-program={} -d",
-            get_zstd_path().ok_or("zstd required")?
-        ));
-        cmd.arg("-xpf");
-    } else {
-        cmd.arg("-xzpf");
-    }
-    // Under a throughput limit tar receives the archive via stdin from a
-    // paced reader; otherwise it opens the file itself as before.
-    let limiter = crate::throttle::limiter_for(&archive);
-    if limiter.is_some() {
-        cmd.arg("-");
-    } else {
-        cmd.arg(&archive);
-    }
-    cmd.args(["--no-same-owner", "-S"]).current_dir(target);
-    if flags
-        .as_ref()
-        .is_some_and(|(_, records)| records.pax_metadata)
-    {
-        // Disable both AppleDouble name interpretation and copyfile unpacking.
-        // Keep PAX xattrs, ACLs, compression flags and permissions enabled.
-        cmd.args([
-            "--options=!mac-ext",
-            "--no-mac-metadata",
-            "--xattrs",
-            "--acls",
-            "--fflags",
-        ]);
-    }
-    // Large archives can spend substantial time restoring per-file macOS
-    // metadata. Match the creation deadline; cancellation remains available.
-    let timeout = std::time::Duration::from_secs(24 * 3600);
-    let output = if let Some(limiter) = limiter {
-        let file = fs::File::open(&archive).map_err(|e| e.to_string())?;
-        let reader = crate::throttle::ThrottledReader::new(file, Some(limiter));
-        crate::run_with_timeout_stdin(cmd, timeout, Box::new(reader))?
-    } else {
-        run_with_timeout(cmd, timeout)?
-    };
-    require_success("Archive extraction", &output)?;
-    if let Some((path, records)) = flags {
-        fs::remove_file(target.join(&path)).map_err(|e| e.to_string())?;
-        let companion = target.join(crate::archive_flags::companion(&path));
-        if !records.pax_metadata {
-            match fs::remove_file(companion) {
-                Ok(()) => (),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => (),
-                Err(e) => return Err(e.to_string()),
-            }
-        }
-        crate::archive_flags::apply(target, &records)?;
-    }
-    Ok(())
+    crate::apple_archive::extract(archive, target, root)
 }
 
 #[derive(Default, Debug)]
@@ -1485,12 +1177,10 @@ mod cancellation_tests {
     #[test]
     fn archive_reader_stops_between_reads_on_cancel() {
         let _guard = OperationGuard::acquire().unwrap();
-        let mut reader = ArchiveInput {
-            reader: Box::new(io::Cursor::new(vec![1u8; 1024])),
-            child: None,
-            pump: None,
-            progress: crate::work_progress::Bytes::new(),
-        };
+        let source = PrivateDir::temp().unwrap();
+        let path = source.0.join("input");
+        fs::write(&path, vec![1u8;1024]).unwrap();
+        let mut reader = crate::throttle::open_throttled(&path).unwrap();
         let mut buffer = [0; 16];
         assert_eq!(reader.read(&mut buffer).unwrap(), 16);
         cancel_operation().unwrap();

@@ -631,7 +631,7 @@ pub(super) fn reuse_archive(source: &Path, target: &Path) -> Result<ArchiveReuse
 }
 
 /// Only owns newly extracted files, never hardlinks to live sources or old backups.
-struct ReadbackDir(PrivateDir);
+pub(super) struct ReadbackDir(pub(super) PrivateDir);
 impl Drop for ReadbackDir {
     fn drop(&mut self) {
         let _phase = crate::work_progress::Phase::enter("Temporäre Rücklesedaten aufräumen");
@@ -728,7 +728,7 @@ fn readback_differences(actual: &ManifestEntry, expected: &ManifestEntry) -> Vec
     fields
 }
 
-/// Extract and compare actual restored bytes and metadata, rather than trusting tar's exit code.
+/// Extract and compare actual restored bytes and metadata, rather than trusting the archiver exit code.
 pub(super) fn verify_archive_source(
     archive: &Path,
     root_name: &str,
@@ -781,10 +781,9 @@ pub(super) fn verify_archive_source(
 pub(super) fn create_verified_archive(
     source: &Path,
     target: &Path,
-    gzip: bool,
 ) -> Result<(), String> {
     let expected = compute_snapshot(source)?;
-    create_verified_archive_from_snapshot(source, target, gzip, &expected)
+    create_verified_archive_from_snapshot(source, target, &expected)
 }
 
 /// Reuse the caller's full source baseline. It is verified against both the
@@ -792,7 +791,6 @@ pub(super) fn create_verified_archive(
 pub(super) fn create_verified_archive_from_snapshot(
     source: &Path,
     target: &Path,
-    gzip: bool,
     expected: &[ManifestEntry],
 ) -> Result<(), String> {
     cancelled()?;
@@ -802,7 +800,7 @@ pub(super) fn create_verified_archive_from_snapshot(
         .sum::<u64>();
     require_free_space(
         target.parent().ok_or("Missing parent")?,
-        bytes.saturating_add(bytes / 10),
+        bytes.saturating_mul(2).saturating_add(bytes / 5).saturating_add(2 * 1024 * 1024 * 1024),
     )?;
     let name = source
         .file_name()
@@ -810,92 +808,7 @@ pub(super) fn create_verified_archive_from_snapshot(
         .ok_or("Ungültige Quellwurzel")?;
     let stage = PrivateDir::new(target.parent().ok_or("Missing parent")?, ".archive")?;
     let tmp = stage.0.join("archive");
-    let flags_archive = crate::archive_flags::write(
-        &stage.0,
-        &crate::archive_flags::Flags {
-            root: name.into(),
-            pax_metadata: true,
-            entries: expected
-                .iter()
-                .filter(|e| e.flags != 0)
-                .map(|e| crate::archive_flags::Record {
-                    path: e.p.clone(),
-                    flags: e.flags,
-                })
-                .collect(),
-        },
-    )?;
-    // Exact NUL-delimited list; no glob exclusions, no recursive second traversal.
-    let mut members = Vec::new();
-    for item in expected {
-        members.extend_from_slice(b"./");
-        members.extend_from_slice(name.as_bytes());
-        if !item.p.is_empty() {
-            members.push(b'/');
-            members.extend_from_slice(item.p.as_bytes());
-        }
-        members.push(0);
-    }
-    let list = stage.0.join("members");
-    fs::write(&list, members).map_err(|e| e.to_string())?;
-    let source_parent = source.parent().ok_or("Missing source parent")?;
-    let output = {
-        let _phase = crate::work_progress::Phase::enter(&format!(
-            "Archiv erstellen und komprimieren: {name}"
-        ));
-        let result = crate::protected_access::create_archive(&tmp, || {
-            let mut cmd = Command::new("/usr/bin/tar");
-            cmd.current_dir(source_parent);
-            cmd.args([
-                "--format=pax",
-                "--no-mac-metadata",
-                "--acls",
-                "--xattrs",
-                "--fflags",
-                // Use ordinary PAX payloads: the validating tar reader cannot
-                // interpret GNU sparse PAX name/map extensions. Compression still
-                // collapses zero ranges without changing any logical file bytes.
-                "--no-read-sparse",
-                "--no-recursion",
-                "--null",
-            ]);
-            if !gzip && get_zstd_path().is_some() {
-                cmd.arg(format!(
-                    "--use-compress-program={} -T0 -1",
-                    get_zstd_path().unwrap()
-                ))
-                .arg("-cf");
-            } else {
-                cmd.arg("-czf");
-            }
-            // Import the small metadata tar after the exact source member list.
-            // This preserves source traversal order and requires no source edits.
-            cmd.arg(&tmp)
-                .arg("-T")
-                .arg(&list)
-                .arg(format!("@{}", flags_archive.display()));
-            // Stable English diagnostics are used only to identify access errors.
-            cmd.env("LC_ALL", "C");
-            cmd
-        })
-        .and_then(|output| {
-            require_success("Archive creation", &output).map_err(|error| {
-                format!(
-                    "Quelle: {}; Archivziel: {}: {error}",
-                    source.display(),
-                    target.display()
-                )
-            })?;
-            Ok(output)
-        });
-        crate::work_progress::report_result(result)?
-    };
-    if !output.stderr.is_empty() {
-        return Err(fail(
-            source,
-            format!("tar meldet: {}", String::from_utf8_lossy(&output.stderr)),
-        ));
-    }
+    crate::apple_archive::create(source, &tmp)?;
     verify_archive_source(&tmp, name, expected)?;
     ensure_unchanged(source, expected)?;
     cancelled()?;

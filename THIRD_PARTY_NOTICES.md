@@ -4,17 +4,16 @@ macOS Backup Suite is licensed under the MIT License. That license applies to
 the project's own source code; it does not replace the licenses of included
 third-party components.
 
-## Audit result — 10 September 2026
+## Audit result — 22 September 2026
 
-All 525 crates resolved in the locked Cargo metadata were inspected. The
+All 558 third-party crates resolved in the locked Cargo metadata were inspected. The
 macOS normal dependency graph was additionally inspected with
-`cargo tree --target aarch64-apple-darwin --edges normal`; it contains 234
-third-party crates. The frontend runtime packages were inspected from
+`cargo tree --target aarch64-apple-darwin --edges normal`; the application and updater retain their own dependency graphs. The frontend runtime packages were inspected from
 `package-lock.json` and their installed package manifests.
 
 - Every inspected Rust crate declares an SPDX license expression; none is GPL,
   AGPL, SSPL, or another strong-copyleft license.
-- The JavaScript runtime graph contains seven Tauri packages. Each is offered
+- The JavaScript runtime graph contains eight Tauri packages. Each is offered
   under MIT or Apache-2.0.
 - The project can therefore be distributed under MIT. Notices and the terms of
   third-party components remain applicable to those components.
@@ -42,12 +41,11 @@ may remain MIT-licensed.
 | tauri-plugin-opener | 2.5.4 | Apache-2.0 OR MIT |
 | tauri-plugin-shell | 2.3.5 | Apache-2.0 OR MIT |
 | tauri-plugin-store | 2.4.3 | Apache-2.0 OR MIT |
+| tauri-plugin-updater | 2.11.0 | Apache-2.0 OR MIT |
 | serde | 1.0.228 | MIT OR Apache-2.0 |
 | serde_json | 1.0.149 | MIT OR Apache-2.0 |
 | chrono | 0.4.44 | MIT OR Apache-2.0 |
 | sha2 | 0.10.9 | MIT OR Apache-2.0 |
-| flate2 | 1.1.9 | MIT OR Apache-2.0 |
-| tar (local patch) | 0.4.46 | MIT OR Apache-2.0 |
 | walkdir | 2.5.0 | Unlicense OR MIT |
 | dirs | 5.0.1 | MIT OR Apache-2.0 |
 | libc | 0.2.186 | MIT OR Apache-2.0 |
@@ -60,9 +58,16 @@ may remain MIT-licensed.
 | @tauri-apps/plugin-opener | 2.5.4 | MIT OR Apache-2.0 |
 | @tauri-apps/plugin-shell | 2.3.5 | MIT OR Apache-2.0 |
 | @tauri-apps/plugin-store | 2.4.3 | MIT OR Apache-2.0 |
+| @tauri-apps/plugin-updater | 2.11.0 | MIT OR Apache-2.0 |
 
-The release also contains the license files from the locally patched `tar`
-crate in `src-tauri/vendor/tar/` (`LICENSE-MIT` and `LICENSE-APACHE`).
+### AppleArchive and LZFSE
+
+Backup, verification and restore invoke `/usr/bin/aa`, provided by macOS.
+AppleArchive/LZFSE are operating-system components, not bundled or relicensed
+under the project's MIT license. No separate compressor is distributed.
+The direct TAR/flate2 backup dependencies and local TAR patch are no longer used.
+The Tauri application updater still uses archive/compression dependencies for
+application-update packages; this is separate from the `.aar` backup format.
 
 For a new release, repeat this audit after every dependency update. This
 document records license metadata supplied by dependencies; it is not a legal
