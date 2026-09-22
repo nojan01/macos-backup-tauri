@@ -39,6 +39,7 @@ impl Activity {
 }
 struct Reporter {
     activity: Mutex<Activity>,
+    first_failure: Mutex<Option<String>>,
     sink: Sink,
 }
 thread_local! { static REPORTER: RefCell<Option<Arc<Reporter>>> = const { RefCell::new(None) }; }
@@ -59,6 +60,7 @@ impl Session {
     fn with_sink(sink: Sink) -> Self {
         let reporter = Arc::new(Reporter {
             activity: Mutex::new(Activity::new("Backup wird vorbereitet")),
+            first_failure: Mutex::new(None),
             sink,
         });
         REPORTER.with(|r| {
@@ -133,6 +135,49 @@ pub(super) fn detail(message: String, log: bool) {
     });
 }
 
+/// Report at the point of failure, before an owning temporary directory is
+/// dropped. Returning the error to the UI alone can hide it behind long cleanup.
+pub(super) fn report_result<T>(result: Result<T, String>) -> Result<T, String> {
+    if let Err(error) = &result {
+        REPORTER.with(|r| {
+            if let Some(reporter) = r.borrow().as_ref() {
+                let mut first = reporter.first_failure.lock().unwrap();
+                if first.is_none() {
+                    let phase = reporter.activity.lock().unwrap().phase.clone();
+                    (reporter.sink)(
+                        format!("Arbeitsschritt fehlgeschlagen – {phase}: {error}"),
+                        true,
+                    );
+                    *first = Some(error.clone());
+                }
+            }
+        });
+    }
+    result
+}
+
+pub(super) fn cleanup(path: &std::path::Path, remove: impl FnOnce() -> std::io::Result<()>) {
+    let failed = REPORTER.with(|r| {
+        r.borrow()
+            .as_ref()
+            .is_some_and(|reporter| reporter.first_failure.lock().unwrap().is_some())
+    });
+    let _phase = Phase::enter(if failed {
+        "Temporäre Dateien nach Fehler aufräumen"
+    } else {
+        "Temporäre Dateien aufräumen"
+    });
+    detail(format!("Ordner: {}", path.display()), true);
+    if let Err(error) = remove() {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            detail(
+                format!("Aufräumen fehlgeschlagen: {}: {error}", path.display()),
+                true,
+            );
+        }
+    }
+}
+
 /// Byte-based work emits at most twice a second, regardless of buffer size.
 pub(super) struct Bytes {
     total: u64,
@@ -162,6 +207,72 @@ mod tests {
     use super::*;
     use crate::{run_with_timeout, BACKUP_CANCELLED, VERIFY_CANCELLED};
     use std::{process::Command, sync::atomic::Ordering};
+
+    #[test]
+    fn original_failure_is_logged_before_temporary_directory_cleanup() {
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let captured = messages.clone();
+        let session = Session::with_sink(Arc::new(move |message, log| {
+            if log {
+                captured.lock().unwrap().push(message);
+            }
+        }));
+        let path;
+        {
+            let directory = crate::restore::PrivateDir::temp().unwrap();
+            path = directory.0.clone();
+            std::fs::write(path.join("partial-archive"), b"incomplete").unwrap();
+            let _phase = Phase::enter("Archiv erstellen: Preferences");
+            let error = "tar: (null); zstd: Broken pipe".to_string();
+            let result = report_result::<()>(Err(error.clone()));
+            assert_eq!(result.unwrap_err(), error);
+            // Propagating the same failure through another layer must not
+            // replace the first failing phase or emit it a second time.
+            assert!(report_result::<()>(Err(error)).is_err());
+        }
+        assert!(!path.exists());
+        drop(session);
+        let messages = messages.lock().unwrap();
+        let error = messages
+            .iter()
+            .position(|m| m.contains("Arbeitsschritt fehlgeschlagen"))
+            .unwrap();
+        let cleanup = messages
+            .iter()
+            .position(|m| m.contains("Temporäre Dateien nach Fehler aufräumen"))
+            .unwrap();
+        assert!(error < cleanup);
+        assert!(messages[error].contains("Archiv erstellen: Preferences"));
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| m.contains("Arbeitsschritt fehlgeschlagen"))
+                .count(),
+            1
+        );
+        assert!(messages
+            .iter()
+            .any(|m| m.contains(&format!("Ordner: {}", path.display()))));
+    }
+
+    #[test]
+    fn cleanup_failure_is_reported_separately() {
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let captured = messages.clone();
+        let session = Session::with_sink(Arc::new(move |message, _| {
+            captured.lock().unwrap().push(message);
+        }));
+        cleanup(std::path::Path::new("/test/private-staging"), || {
+            Err(std::io::Error::from_raw_os_error(libc::EIO))
+        });
+        drop(session);
+        let messages = messages.lock().unwrap();
+        assert!(messages
+            .iter()
+            .any(|m| m.contains("Aufräumen fehlgeschlagen: /test/private-staging")));
+        assert!(!messages.iter().any(|m| m.contains("nach Fehler aufräumen")));
+    }
+
     #[test]
     fn silent_subprocess_emits_phase_heartbeat_and_stops_on_drop() {
         BACKUP_CANCELLED.store(false, Ordering::SeqCst);

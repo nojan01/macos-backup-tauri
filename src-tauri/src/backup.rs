@@ -419,10 +419,12 @@ fn access_io<T>(
     action: &str,
     operation: impl FnMut() -> std::io::Result<T>,
 ) -> Result<T, String> {
-    crate::protected_access::retry(operation).map_err(|error| match error {
-        crate::protected_access::AccessError::Io(error) => access_error(path, action, error),
-        crate::protected_access::AccessError::Cancelled => "Vorgang abgebrochen".into(),
-    })
+    crate::work_progress::report_result(crate::protected_access::retry(operation).map_err(
+        |error| match error {
+            crate::protected_access::AccessError::Io(error) => access_error(path, action, error),
+            crate::protected_access::AccessError::Cancelled => "Vorgang abgebrochen".into(),
+        },
+    ))
 }
 
 fn access_error(path: &Path, action: &str, error: std::io::Error) -> String {
@@ -633,6 +635,7 @@ struct ReadbackDir(PrivateDir);
 impl Drop for ReadbackDir {
     fn drop(&mut self) {
         let _phase = crate::work_progress::Phase::enter("Temporäre Rücklesedaten aufräumen");
+        crate::work_progress::detail(format!("Ordner: {}", self.0 .0.display()), true);
         if crate::throttle::remove_dir_all(&self.0 .0).is_ok() {
             return;
         }
@@ -840,7 +843,7 @@ pub(super) fn create_verified_archive_from_snapshot(
         let _phase = crate::work_progress::Phase::enter(&format!(
             "Archiv erstellen und komprimieren: {name}"
         ));
-        crate::protected_access::create_archive(&tmp, || {
+        let result = crate::protected_access::create_archive(&tmp, || {
             let mut cmd = Command::new("/usr/bin/tar");
             cmd.current_dir(source_parent);
             cmd.args([
@@ -874,9 +877,19 @@ pub(super) fn create_verified_archive_from_snapshot(
             // Stable English diagnostics are used only to identify access errors.
             cmd.env("LC_ALL", "C");
             cmd
-        })?
+        })
+        .and_then(|output| {
+            require_success("Archive creation", &output).map_err(|error| {
+                format!(
+                    "Quelle: {}; Archivziel: {}: {error}",
+                    source.display(),
+                    target.display()
+                )
+            })?;
+            Ok(output)
+        });
+        crate::work_progress::report_result(result)?
     };
-    require_success("Archive creation", &output)?;
     if !output.stderr.is_empty() {
         return Err(fail(
             source,
