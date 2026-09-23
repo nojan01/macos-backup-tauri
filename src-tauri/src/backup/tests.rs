@@ -1202,6 +1202,10 @@ fn compressed_file_roundtrip_retains_content_and_compression_flag() {
     let archive = d.0.join("compressed.aar");
     create_verified_archive_from_snapshot(&source, &archive, &expected).unwrap();
     verify_archive_source(&archive, source.file_name().unwrap().to_str().unwrap(), &expected).unwrap();
+    let restored = ReadbackDir(PrivateDir::temp().unwrap());
+    unpack_private(&archive, &restored.0.0).unwrap();
+    let actual = compute_snapshot(&restored.0.0.join(source.file_name().unwrap())).unwrap();
+    assert!(readback_differences(&actual[0], &expected[0]).is_empty());
     if source == compressed {
         assert_eq!(fs::read(&compressed).unwrap(), fs::read(&plain).unwrap());
     }

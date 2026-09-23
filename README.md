@@ -72,6 +72,11 @@ Essentielle Tools in unter 10 Minuten:
   Sicherung mit einer sichtbaren Entsperr-Meldung. Nach dem Entsperren wird derselbe
   Zugriff erneut versucht. Abbrechen bleibt wirksam; fehlt die Berechtigung auch
   danach, wird ein Fehler gemeldet. Die App ändert weder Sperre noch Dateirechte.
+  Bei einem nativen AppleArchive-Fehler werden dessen prozessbezogene Fehlereinträge
+  aus dem macOS-Systemprotokoll ergänzt. So bleibt ein verstecktes „Operation not
+  permitted“ samt betroffenem Pfad erkennbar, auch wenn `aa` auf stderr nur
+  „Archive encoding failed“ ausgibt. Ist die Systemdiagnose nicht verfügbar, bleibt
+  der ursprüngliche Fehler bestehen; die App überspringt keine Dateien.
 - Vor den vollständigen Inhaltsprüfungen werden alle ausgewählten Quellen rekursiv
   auf Zugriff geprüft (Dateistatus, ein Byte Leseprobe, Attribute und ACLs). Probleme
   werden gesammelt gemeldet, mit bis zu 100 konkreten Pfaden. Die Vorprüfung ist
@@ -128,6 +133,9 @@ Essentielle Tools in unter 10 Minuten:
   Datenträgerprüfung; Betriebssystem- und Laufwerks-Caches gelten weiterhin.
 - Dateiflags sind native AppleArchive-Metadaten. Kernelverwaltete Zustände wie
   Dateisystemkompression werden nicht durch bloßes Setzen eines Bits vorgetäuscht.
+  Bereits komprimierte Quelldateien werden bei der nativen Wiederherstellung ausdrücklich
+  mit LZFSE behandelt. Ihre Dateiflags werden vor dem Zusammenführen kontrolliert;
+  ein verlorenes Kompressionsmerkmal gilt als Fehler.
   Schutzflags privater Zwischenkopien werden nur für das Zusammenführen bzw. Aufräumen
   gelöst; Quellrechte und Quellattribute werden nicht verändert.
 - Das von macOS beim Kopieren neu vergebene Herkunftsattribut `com.apple.provenance`

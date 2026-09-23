@@ -1,6 +1,7 @@
 mod app_settings;
 mod archive_flags;
 mod apple_archive;
+mod archive_diagnostics;
 mod segmented;
 mod backup;
 mod capacity;

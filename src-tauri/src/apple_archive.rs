@@ -21,6 +21,8 @@ pub(super) struct Entry {
     pub xattr_size: u64,
     #[serde(rename = "ACL", default)]
     pub acl_size: u64,
+    #[serde(rename = "FLG")]
+    pub flags: Option<u32>,
     #[serde(rename = "HLC")]
     pub hardlink: Option<u64>,
     #[serde(rename = "SH2")]
@@ -198,6 +200,10 @@ pub(super) fn extract(
         "uid,gid",
         "-no-ignore-eperm",
         "-enable-holes",
+        // aa's default filesystem codec can silently discard UF_COMPRESSED
+        // when a particular file compresses poorly with that codec.
+        "-afsc",
+        "lzfse",
     ]);
     let output = read_command(cmd, archive)?;
     crate::work_progress::report_result(require_success("AppleArchive extraction", &output))?;
@@ -206,6 +212,19 @@ pub(super) fn extract(
             "AppleArchive meldet: {}",
             String::from_utf8_lossy(&output.stderr)
         ));
+    }
+    // Do not silently publish a restored tree with lost native flags.
+    for entry in entries.values() {
+        if let Some(expected) = entry.flags {
+            use std::os::macos::fs::MetadataExt;
+            let path = target.join(&entry.path);
+            let actual = fs::symlink_metadata(&path)
+                .map_err(|e| e.to_string())?
+                .st_flags();
+            if actual != expected {
+                return Err(format!("{}: AppleArchive-Dateiflags nicht wiederhergestellt (erwartet 0x{expected:08x}, vorhanden 0x{actual:08x})", path.display()));
+            }
+        }
     }
     Ok(())
 }
@@ -216,6 +235,26 @@ mod tests {
     fn checked(json: serde_json::Value) -> Result<BTreeMap<PathBuf, Entry>, String> {
         validate(serde_json::from_value(json).unwrap())
     }
+    #[test]
+    #[ignore = "manual native denial probe; requires local Unified Logging access"]
+    fn native_permission_failure_includes_unified_log_cause_and_path() {
+        use std::os::unix::fs::PermissionsExt;
+        BACKUP_CANCELLED.store(false, Ordering::SeqCst);
+        VERIFY_CANCELLED.store(false, Ordering::SeqCst);
+        let d = PrivateDir::temp().unwrap();
+        let source = d.0.join("blocked.dat");
+        fs::write(&source, b"owned diagnostic fixture").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0)).unwrap();
+        let mut reader = RawSource::open(&source).unwrap();
+        let error = reader.read_to_end(&mut Vec::new()).unwrap_err().to_string();
+        assert!(
+            error.contains("Permission denied") || error.contains("Operation not permitted"),
+            "{error}"
+        );
+        assert!(error.contains("blocked.dat"), "{error}");
+        println!("NATIVE_DENIAL_DIAGNOSED_WITH_EXACT_PATH");
+    }
+
     #[test]
     fn index_rejects_traversal_duplicates_special_files_and_link_ancestors() {
         for path in ["../escape", "/absolute", "root/../escape", ""] {
@@ -338,6 +377,7 @@ pub(super) struct RawSource {
     stdout: std::process::ChildStdout,
     stderr: Option<std::thread::JoinHandle<Vec<u8>>>,
     started: std::time::Instant,
+    started_at: chrono::DateTime<chrono::Local>,
     finished: bool,
     _stage: Option<crate::backup::ReadbackDir>,
 }
@@ -369,6 +409,7 @@ impl RawSource {
             stdout,
             stderr: Some(stderr),
             started: std::time::Instant::now(),
+            started_at: chrono::Local::now(),
             finished: false,
             _stage: stage,
         };
@@ -403,8 +444,16 @@ impl Read for RawSource {
                             .join()
                             .map_err(|_| Error::other("AppleArchive stderr thread"))?;
                         if !status.success() || !stderr.is_empty() {
+                            let details = if !status.success() {
+                                crate::archive_diagnostics::failure_details(
+                                    self.child.id(),
+                                    self.started_at,
+                                )
+                            } else {
+                                String::new()
+                            };
                             return Err(Error::other(format!(
-                                "AppleArchive ({status}): {}",
+                                "AppleArchive ({status}): {}{details}",
                                 String::from_utf8_lossy(&stderr)
                             )));
                         }

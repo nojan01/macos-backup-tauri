@@ -376,6 +376,7 @@ pub(super) fn verify(
             size: actual.s,
             xattr_size: 0,
             acl_size: 0,
+            flags: Some(actual.flags),
             hardlink: cluster,
             hash: Some(actual.hash),
         });

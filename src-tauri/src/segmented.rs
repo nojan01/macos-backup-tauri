@@ -395,6 +395,10 @@ pub(super) fn create(
     root: &str,
     expected: &[crate::backup::ManifestEntry],
 ) -> Result<(), String> {
+    let _phase = crate::work_progress::Phase::enter(&format!(
+        "Teilarchive erstellen: {}",
+        source.file_name().unwrap_or_default().to_string_lossy()
+    ));
     // Keep the established screen-lock pause/retry behavior. Every attempt owns
     // a separate unpublished container, so a retry cannot append duplicate parts.
     if fs::symlink_metadata(target).is_ok() {

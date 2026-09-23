@@ -28,6 +28,7 @@ export const messagePairs: [string,string][] = [
   ['Archiv entpacken / macOS-Metadaten setzen','Extracting archive / restoring macOS metadata'],
   ['Gesicherte macOS-Dateiflags wiederherstellen','Restoring saved macOS file flags'],
   ['Temporäre Rücklesedaten aufräumen','Cleaning up temporary readback data'],
+  ['Teilarchive erstellen: {0}','Creating archive parts: {0}'],
   ['Teilarchive: Quelldaten und macOS-Metadaten prüfen','Archive parts: verifying source data and macOS metadata'],
   ['Teilarchiv {0} komprimieren und zurücklesen','Compressing and reading back archive part {0}'],
   ['Teilarchiv {0} geprüft; temporäre Prüfkopie entfernt','Archive part {0} verified; temporary verification copy removed'],

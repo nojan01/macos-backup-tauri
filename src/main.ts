@@ -2626,6 +2626,7 @@ const helpOverviewHtml: Record<string, string> = {
       <div class="help-topic-content"><ol class="help-steps">
         <li>Die Suite sichert aus einem schreibgeschützten APFS-Snapshot in einem Container aus AppleArchive/LZFSE-Teilarchiven (<code>.aarset</code>). Alte TAR-Backups werden in dieser Version nicht unterstützt.</li>
         <li>Auch große Einzeldateien werden in Abschnitte bis 1 GiB geteilt. Jeder Abschnitt wird vom Ziel zurückgelesen, entpackt und geprüft; seine temporäre Prüfkopie wird sofort gelöscht. Inhalte und macOS-Metadaten werden mit dem Quellmanifest verglichen. Dafür bleiben 5 GiB Arbeitsbereich auf der internen SSD reserviert. Die Backup-Teile bleiben erhalten.</li>
+        <li>Verweigert macOS bei gesperrtem Bildschirm den Zugriff auf geschützte Dateien, pausiert das Backup. Nach dem Entsperren wird derselbe Schritt erneut ausgeführt. Fehlende Rechte bei entsperrtem Mac bleiben ein Fehler.</li>
         <li>„Verifizieren“ prüft die Archive nach Abschluss. Ein Test-Restore prüft zusätzlich die praktische Wiederherstellung.</li>
         <li>Unveränderte ausgewählte Ordner werden per Hardlink wiederverwendet. Ändert sich eine Datei in einem ausgewählten Ordner, wird dessen gesamtes Archiv neu erstellt.</li>
         <li>Finder zeigt bei Hardlinks die volle Größe in jedem Backup-Ordner. Die Backup-Liste zeigt deshalb separat „neu“ und „übernommen“ an.</li>
@@ -2680,6 +2681,7 @@ const helpOverviewHtml: Record<string, string> = {
       <div class="help-topic-content"><ol class="help-steps">
         <li>The Suite backs up from a read-only APFS snapshot using a container of AppleArchive/LZFSE parts (<code>.aarset</code>). This version does not support older TAR backups.</li>
         <li>Large individual files are also split into sections of up to 1 GiB. Each section is read back from the target, decoded and verified; its temporary verification copy is deleted immediately. Contents and macOS metadata are compared with the source manifest. This reserves 5 GiB of workspace on the internal SSD. Backup parts are retained.</li>
+        <li>If macOS denies access to protected files while the screen is locked, the backup pauses and retries the same step after unlock. Missing permissions while unlocked remain an error.</li>
         <li>“Verify” checks archives after completion. A test restore also confirms practical recovery.</li>
         <li>Unchanged selected folders are reused by hardlink. If one file changes inside a selected folder, that folder's complete archive is rebuilt.</li>
         <li>Finder reports the full size for each hardlink in each backup folder. The backup list therefore shows “new” and “reused” separately.</li>
