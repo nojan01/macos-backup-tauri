@@ -9,6 +9,7 @@ mod capacity;
 mod frozen_sources;
 mod protected_access;
 mod throttle;
+mod target_mount;
 mod work_progress;
 mod verification_state;
 use backup::*;
@@ -58,6 +59,8 @@ pub struct BackupConfig {
     #[serde(default = "default_profile_name")]
     pub profile_name: String,
     pub target_volume: String,
+    #[serde(default)]
+    pub target_mount_source: String,
     pub target_directory: String,
     pub directories: Vec<String>,
     pub backup_homebrew: bool,
@@ -103,6 +106,7 @@ impl Default for BackupConfig {
             profile_id: default_profile_id(),
             profile_name: default_profile_name(),
             target_volume: String::new(),
+            target_mount_source: String::new(),
             target_directory: String::new(),
             directories: vec!["~/Documents".to_string(), "~/Desktop".to_string()],
             backup_homebrew: true,
@@ -259,6 +263,8 @@ pub struct Volume {
     pub available: bool,
     pub writable: bool,
     pub is_internal: bool,
+    pub is_network: bool,
+    pub mount_source: String,
     pub free_space_gb: f64,
 }
 
@@ -516,24 +522,13 @@ fn backup_profile_roots(target_path: &str) -> Result<Vec<(String, String, PathBu
 
 // Get free space in GB for a path
 fn get_free_space_gb(path: &Path) -> f64 {
-    let output = Command::new("df")
-        .args(["-k", &path.to_string_lossy()])
-        .output();
-
-    if let Ok(output) = output {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if let Some(line) = stdout.lines().nth(1) {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 4 {
-                    if let Ok(kb) = parts[3].parse::<u64>() {
-                        return (kb as f64) / (1024.0 * 1024.0);
-                    }
-                }
-            }
-        }
+    let Ok(name) = CString::new(path.as_os_str().as_bytes()) else { return 0.0 };
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::statvfs(name.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return 0.0;
     }
-    0.0
+    let stats = unsafe { stats.assume_init() };
+    (stats.f_bavail as f64) * (stats.f_frsize as f64) / (1024.0 * 1024.0 * 1024.0)
 }
 
 // Check if path is Time Machine volume
@@ -543,17 +538,6 @@ fn is_time_machine_volume(path: &Path) -> bool {
     let tm_marker3 = path.join(".com.apple.timemachine.supported");
 
     tm_marker1.exists() || tm_marker2.exists() || tm_marker3.exists()
-}
-
-// Check if volume is writable
-fn is_writable(path: &Path) -> bool {
-    let test_file = path.join(".macos_backup_write_test");
-    if fs::write(&test_file, "test").is_ok() {
-        let _ = fs::remove_file(&test_file);
-        true
-    } else {
-        false
-    }
 }
 
 // Check if a path is readable
@@ -708,52 +692,35 @@ fn delete_profile(profile_id: String) -> Result<(), String> {
 
 #[tauri::command]
 fn get_external_volumes() -> Result<Vec<Volume>, String> {
-    let volumes_path = Path::new("/Volumes");
     let mut volumes = Vec::new();
-
-    if let Ok(entries) = fs::read_dir(volumes_path) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "Unknown".to_string());
-
-                if name == "Macintosh HD" || name == "Macintosh HD - Data" {
-                    continue;
-                }
-
-                if is_time_machine_volume(&path) {
-                    continue;
-                }
-
-                let path_str = path.to_string_lossy().to_string();
-                let available = path.exists() && path.read_dir().is_ok();
-                let writable = is_writable(&path);
-                let free_space_gb = get_free_space_gb(&path);
-
-                if !writable {
-                    continue;
-                }
-
-                let is_internal = name.starts_with("com.apple")
-                    || name == "Recovery"
-                    || name == "Preboot"
-                    || name == "VM"
-                    || name == "Update";
-
-                volumes.push(Volume {
-                    name,
-                    path: path_str,
-                    available,
-                    writable,
-                    is_internal,
-                    free_space_gb,
-                });
-            }
+    for mount in target_mount::mounted()? {
+        let path = &mount.path;
+        let under_volumes = path.starts_with("/Volumes");
+        if path == Path::new("/")
+            || path == Path::new("/System/Volumes/Data")
+            || (!under_volumes && !mount.network)
+            || mount.read_only
+            || is_time_machine_volume(path)
+        {
+            continue;
         }
+        let name = path.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| mount.source.clone());
+        let is_internal = !mount.network && (name.starts_with("com.apple")
+            || matches!(name.as_str(), "Recovery" | "Preboot" | "VM" | "Update"));
+        volumes.push(Volume {
+            name,
+            path: path.to_string_lossy().into_owned(),
+            available: path.read_dir().is_ok(),
+            writable: !mount.read_only,
+            is_internal,
+            is_network: mount.network,
+            mount_source: mount.source,
+            free_space_gb: get_free_space_gb(path),
+        });
     }
+    volumes.sort_by(|a, b| a.name.cmp(&b.name).then(a.path.cmp(&b.path)));
     Ok(volumes)
 }
 
@@ -798,26 +765,9 @@ fn detect_backup_volume() -> Result<Option<DetectedBackupVolume>, String> {
         }
     }
 
-    // 2. Scan all mounted volumes for a macos-backup-suite directory
-    let volumes_path = Path::new("/Volumes");
-    if let Ok(entries) = fs::read_dir(volumes_path) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            // Skip system volumes
-            if name == "Macintosh HD" || name == "Macintosh HD - Data" {
-                continue;
-            }
-            if is_time_machine_volume(&path) {
-                continue;
-            }
-
+    // 2. Scan mounted targets, including NFS and DualBeam mounts outside /Volumes.
+    for volume in get_external_volumes()? {
+            let path = PathBuf::from(&volume.path);
             let suite_root = path.join("macos-backup-suite");
             if suite_root.exists() && suite_root.is_dir() {
                 let data_dir = suite_root.join("data");
@@ -837,12 +787,11 @@ fn detect_backup_volume() -> Result<Option<DetectedBackupVolume>, String> {
                     .and_then(|v| v["latest"].as_str().map(|s| s.to_string()));
                 return Ok(Some(DetectedBackupVolume {
                     volume_path: path.to_string_lossy().to_string(),
-                    volume_name: name,
+                    volume_name: volume.name,
                     backup_count,
                     latest_timestamp: latest,
                 }));
             }
-        }
     }
 
     Ok(None)
@@ -1907,11 +1856,25 @@ fn create_backup_impl(
     if config.profile_id != profile_id {
         return Err("Aktives Backup-Profil wurde geändert; bitte erneut starten".into());
     }
+    let target = Path::new(&target_path);
+    let target_guard = target_mount::Guard::new(
+        target,
+        Path::new(&config.target_volume),
+        &config.target_mount_source,
+    )?;
+    let hardlinks_supported = target_mount::probe(target)?.hardlinks;
     let _guard = OperationGuard::acquire_backup(config.keep_session_unlocked_during_backup)?;
     let _progress = BackupProgress::attach(window.clone());
     let _throttle = throttle::activate(&config, Path::new(&target_path))?;
     if let Some(note) = throttle::describe() {
         let _ = window.emit("backup-log", format!("🌡️ {note}"));
+    }
+    let _ = window.emit("backup-log", format!("Backup-Ziel: {}", target_guard.description()));
+    if target_guard.is_network() {
+        let _ = window.emit("backup-log", "Netzwerkziel: Schreib-/Leseprobe erfolgreich. Die Rückleseprüfung sieht die Daten des eingehängten Dateisystems; bei Cloud-Mounts kann ein lokaler Schreibcache noch auf den Upload warten.");
+    }
+    if !hardlinks_supported {
+        let _ = window.emit("backup-log", "Das Ziel unterstützt keine Hardlinks. Unveränderte Archive werden kopiert und dafür zusätzlicher Speicher eingeplant.");
     }
     // Debug-Trace-Closure (No-op in Release-Builds). Für Diagnose kann hier
     // wieder ein Schreiber in /tmp/macos-backup-trace.log aktiviert werden.
@@ -1950,7 +1913,6 @@ fn create_backup_impl(
     let emit_r2 = window.emit("backup-log", "Starte Backup-Vorbereitung...");
     trace(&format!("first log emit: {:?}", emit_r2));
 
-    let target = Path::new(&target_path);
     if !target.is_absolute()
         || !fs::metadata(target)
             .map_err(|e| format!("Backup-Ziel nicht erreichbar: {e}"))?
@@ -2045,6 +2007,7 @@ fn create_backup_impl(
         .collect::<Result<_, _>>()?;
     validate_source_access(&frozen_directories, &home_settings)?;
     let _=window.emit("backup-log",format!("Konsistenter Dateistand: {}. Geöffnete und weiter bearbeitete Originaldateien beeinflussen dieses Backup nicht.",frozen.snapshot));
+    target_guard.check()?;
     let suite_root = profile_root(&target_path, &config.profile_id)?;
     ensure_profile_manifest(&suite_root, &config)?;
 
@@ -2151,7 +2114,7 @@ fn create_backup_impl(
                         .join(&archive_name)
                         .exists()
                 {
-                    will_reuse = true;
+                    will_reuse = hardlinks_supported;
                 }
             }
         }
@@ -2273,6 +2236,7 @@ fn create_backup_impl(
 
     let _ = window.emit("backup-log", "Speicherplanung: Große Quellen zuerst; auch große Einzeldateien werden aufgeteilt. Der Rücklese-Arbeitsbereich bleibt unabhängig von der Quellgröße begrenzt.");
     for (i, &source_index) in space_plan.order.iter().enumerate() {
+        target_guard.check()?;
         let dir = &directories[source_index];
         trace(&format!("loop[{}/{}] {}", i + 1, total, dir));
         // Check for cancellation before each directory
@@ -2412,6 +2376,7 @@ fn create_backup_impl(
             &archive_path,
             &current_snapshot,
         )?;
+        target_guard.check()?;
 
         // Check for cancellation after archive
         if BACKUP_CANCELLED.load(Ordering::SeqCst) {
@@ -2451,6 +2416,7 @@ fn create_backup_impl(
         trace(&format!("loop[{}/{}] done", i + 1, total));
     }
     trace("main loop complete, archiving inventory");
+    target_guard.check()?;
 
     for (label, filename, content) in [
         ("homebrew-packages", "homebrew_packages.txt", brew_inventory),
@@ -2673,6 +2639,7 @@ fn create_backup_impl(
         reused_archive_size_bytes,
     };
 
+    target_guard.check()?;
     finish_backup(&backup_root, &metadata, &extra_source_guards)?;
 
     // Backup erfolgreich abgeschlossen — Resume-State kann jetzt verworfen werden.
@@ -2755,6 +2722,7 @@ fn create_backup_impl(
         );
     }
 
+    target_guard.check()?;
     let latest = serde_json::json!({
         "latest": timestamp,
         "created_at": end.to_rfc3339()

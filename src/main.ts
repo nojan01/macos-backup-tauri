@@ -18,6 +18,7 @@ interface BackupConfig {
   profile_id: string;
   profile_name: string;
   target_volume: string;
+  target_mount_source: string;
   target_directory: string;
   directories: string[];
   backup_homebrew: boolean;
@@ -91,6 +92,8 @@ interface Volume {
   available: boolean;
   writable: boolean;
   is_internal: boolean;
+  is_network: boolean;
+  mount_source: string;
   free_space_gb: number;
 }
 
@@ -253,6 +256,7 @@ const translations: Record<string, Record<string, string>> = {
     defaultFolders: "Standard-Ordner",
     defaultFoldersHint: "Diese Ordner werden beim Zurücksetzen verwendet:",
     externalVolumes: "Externe Volumes",
+    networkVolumes: "Netzwerk- und Cloud-Mounts",
     internalVolumes: "Interne Volumes",
     noBackups: "Keine Backups vorhanden",
     selectTargetFirst: "Bitte zuerst ein Ziel wählen",
@@ -269,7 +273,7 @@ const translations: Record<string, Record<string, string>> = {
     cancelling: "Abbruch läuft …",
     configLoaded: "Konfiguration geladen.",
     defaultConfigUsed: "Standardkonfiguration verwendet.",
-    volumesFound: "beschreibbare Volumes gefunden (Time Machine ausgeschlossen).",
+    volumesFound: "eingehängte Backup-Ziele gefunden (Time Machine ausgeschlossen).",
     folderAdded: "Ordner hinzugefügt:",
     folderReset: "Ordnerliste auf Standardwerte zurückgesetzt.",
     selectError: "Fehler beim Auswählen:",
@@ -532,6 +536,7 @@ const translations: Record<string, Record<string, string>> = {
     defaultFolders: "Default Folders",
     defaultFoldersHint: "These folders are used when resetting:",
     externalVolumes: "External Volumes",
+    networkVolumes: "Network and cloud mounts",
     internalVolumes: "Internal Volumes",
     noBackups: "No backups available",
     selectTargetFirst: "Please select a target first",
@@ -548,7 +553,7 @@ const translations: Record<string, Record<string, string>> = {
     cancelling: "Cancelling …",
     configLoaded: "Configuration loaded.",
     defaultConfigUsed: "Default configuration used.",
-    volumesFound: "writable volumes found (Time Machine excluded).",
+    volumesFound: "mounted backup targets found (Time Machine excluded).",
     folderAdded: "Folder added:",
     folderReset: "Folder list reset to default.",
     selectError: "Selection error:",
@@ -817,6 +822,7 @@ let config: BackupConfig = {
   profile_id: "standard",
   profile_name: "Standard",
   target_volume: "",
+  target_mount_source: "",
   target_directory: "",
   directories: [],
   backup_homebrew: true,
@@ -1277,8 +1283,21 @@ function selectedBackupProfileId(): string {
 function updateVolumeSelect(): void {
   volumeSelect.innerHTML = `<option value="">${t("pleaseSelect")}</option>`;
   
-  const external = currentVolumes.filter(v => !v.is_internal);
-  const internal = currentVolumes.filter(v => v.is_internal);
+  const network = currentVolumes.filter(v => v.is_network);
+  const external = currentVolumes.filter(v => !v.is_internal && !v.is_network);
+  const internal = currentVolumes.filter(v => v.is_internal && !v.is_network);
+
+  if (network.length > 0) {
+    const group = document.createElement("optgroup");
+    group.label = t("networkVolumes");
+    for (const vol of network) {
+      const option = document.createElement("option");
+      option.value = vol.path;
+      option.textContent = `${vol.name} — ${vol.path} (${formatBytes(vol.free_space_gb)} ${t("freeSpace")})`;
+      group.appendChild(option);
+    }
+    volumeSelect.appendChild(group);
+  }
   
   if (external.length > 0) {
     const extGroup = document.createElement("optgroup");
@@ -1793,6 +1812,7 @@ async function setupEventListeners(): Promise<void> {
 // Event handlers
 volumeSelect.addEventListener("change", async () => {
   config.target_volume = volumeSelect.value;
+  config.target_mount_source = currentVolumes.find(v => v.path === config.target_volume)?.mount_source || "";
   config.target_directory = "";
   updateTargetPathDisplay();
   await saveConfig();
@@ -1819,19 +1839,22 @@ browseTargetBtn?.addEventListener("click", async () => {
     
     if (selected) {
       const selectedPath = selected as string;
-      if (selectedPath.startsWith(config.target_volume)) {
+      if (selectedPath === config.target_volume || selectedPath.startsWith(config.target_volume + "/")) {
         const relativePath = selectedPath.substring(config.target_volume.length);
         config.target_directory = relativePath.replace(/^\//, "");
       } else {
-        config.target_volume = selectedPath;
-        config.target_directory = "";
-        const matchedVol = currentVolumes.find(v => selectedPath.startsWith(v.path));
-        if (matchedVol) {
-          config.target_volume = matchedVol.path;
-          const relativePath = selectedPath.substring(matchedVol.path.length);
-          config.target_directory = relativePath.replace(/^\//, "");
-          volumeSelect.value = matchedVol.path;
+        const matchedVol = currentVolumes
+          .filter(v => selectedPath === v.path || selectedPath.startsWith(v.path + "/"))
+          .sort((a, b) => b.path.length - a.path.length)[0];
+        if (!matchedVol) {
+          log(t("selectVolumeFirst"));
+          return;
         }
+        config.target_volume = matchedVol.path;
+        config.target_mount_source = matchedVol.mount_source;
+        const relativePath = selectedPath.substring(matchedVol.path.length);
+        config.target_directory = relativePath.replace(/^\//, "");
+        volumeSelect.value = matchedVol.path;
       }
       updateTargetPathDisplay();
       await saveConfig();
@@ -2595,7 +2618,7 @@ const helpOverviewHtml: Record<string, string> = {
       <h3>🛡️ Schnellstart für ein sicheres Backup</h3>
       <p>Ein Profil umfasst genau die Daten, die du gemeinsam sichern und wiederherstellen möchtest. Starte mit den empfohlenen Ordnern und ergänze nur Daten, die lokal auf diesem Mac liegen.</p>
       <div class="help-quick-grid">
-        <div><strong>1. Ziel wählen</strong><span>Externes APFS-Volume auswählen.</span></div>
+        <div><strong>1. Ziel wählen</strong><span>Beschreibbares lokales Volume oder eingehängtes NFS-/DualBeam-Ziel auswählen.</span></div>
         <div><strong>2. Quellen prüfen</strong><span>Ordner und Einstellungen des Profils prüfen.</span></div>
         <div><strong>3. Backup erstellen</strong><span>Apps mit Datenbanken oder Mediatheken vorher schließen.</span></div>
         <div><strong>4. Wiederherstellung testen</strong><span>Nach jedem wichtigen Backup einmal testen.</span></div>
@@ -2628,7 +2651,8 @@ const helpOverviewHtml: Record<string, string> = {
         <li>Auch große Einzeldateien werden in Abschnitte bis 1 GiB geteilt. Jeder Abschnitt wird vom Ziel zurückgelesen, entpackt und geprüft; seine temporäre Prüfkopie wird sofort gelöscht. Inhalte und macOS-Metadaten werden mit dem Quellmanifest verglichen. Bei genügend freiem RAM geschieht das für 128-MiB-Teile im Arbeitsspeicher. Sinkt der freie RAM, nutzt die Suite vorübergehend die interne SSD (5 GiB freier Arbeitsbereich erforderlich). Die Backup-Teile bleiben erhalten.</li>
         <li>Verweigert macOS bei gesperrtem Bildschirm den Zugriff auf geschützte Dateien, pausiert das Backup. Nach dem Entsperren wird derselbe Schritt erneut ausgeführt. Fehlende Rechte bei entsperrtem Mac bleiben ein Fehler.</li>
         <li>„Verifizieren“ prüft die Archive nach Abschluss. Ein Test-Restore prüft zusätzlich die praktische Wiederherstellung.</li>
-        <li>Unveränderte ausgewählte Ordner werden per Hardlink wiederverwendet. Ändert sich eine Datei in einem ausgewählten Ordner, wird dessen gesamtes Archiv neu erstellt.</li>
+        <li>Unveränderte ausgewählte Ordner werden wenn möglich per Hardlink wiederverwendet; sonst kopiert. Ändert sich eine Datei in einem ausgewählten Ordner, wird dessen gesamtes Archiv neu erstellt.</li>
+        <li><strong>Netzwerkziele:</strong> NFS- und DualBeam-Mounts werden nach dem Einhängen in der Zielliste angezeigt. Vor dem Backup prüft die Suite Schreiben, Umbenennen und Rücklesen und kontrolliert während des Backups, ob dasselbe Volume eingehängt bleibt. Die Quellen müssen weiterhin auf APFS liegen. Bei DualBeam/rclone kann die Rückleseprüfung zunächst nur dessen lokalen Cache prüfen; der Upload zum Cloud-Anbieter muss zusätzlich abgeschlossen sein. Bei Verbindungsabbruch das Ziel erneut einhängen und das Backup fortsetzen.</li>
         <li>Finder zeigt bei Hardlinks die volle Größe in jedem Backup-Ordner. Die Backup-Liste zeigt deshalb separat „neu“ und „übernommen“ an.</li>
       </ol></div>
     </details>
@@ -2664,7 +2688,7 @@ const helpOverviewHtml: Record<string, string> = {
       <h3>🛡️ Quick start for a safe backup</h3>
       <p>A profile contains exactly the data you want to back up and restore together. Start with the recommended folders, then add only data stored locally on this Mac.</p>
       <div class="help-quick-grid">
-        <div><strong>1. Select target</strong><span>Select an external APFS volume.</span></div>
+        <div><strong>1. Select target</strong><span>Select a writable local volume or mounted NFS/DualBeam target.</span></div>
         <div><strong>2. Review sources</strong><span>Review folders and settings in the profile.</span></div>
         <div><strong>3. Create backup</strong><span>Close apps with databases or media libraries first.</span></div>
         <div><strong>4. Test restore</strong><span>Test every important backup once.</span></div>
@@ -2697,7 +2721,8 @@ const helpOverviewHtml: Record<string, string> = {
         <li>Large individual files are also split into sections of up to 1 GiB. Each section is read back from the target, decoded and verified; its temporary verification copy is deleted immediately. Contents and macOS metadata are compared with the source manifest. With sufficient free RAM, 128 MiB parts are processed in memory. If available RAM drops, the Suite uses temporary space on the internal SSD (5 GiB free required). Backup parts are retained.</li>
         <li>If macOS denies access to protected files while the screen is locked, the backup pauses and retries the same step after unlock. Missing permissions while unlocked remain an error.</li>
         <li>“Verify” checks archives after completion. A test restore also confirms practical recovery.</li>
-        <li>Unchanged selected folders are reused by hardlink. If one file changes inside a selected folder, that folder's complete archive is rebuilt.</li>
+        <li>Unchanged selected folders are reused by hardlink where supported, otherwise copied. If one file changes inside a selected folder, that folder's complete archive is rebuilt.</li>
+        <li><strong>Network targets:</strong> Mounted NFS and DualBeam targets appear in the target list. Before backup, the Suite tests writing, renaming and reading back, and checks that the same volume remains mounted during backup. Sources still need APFS. With DualBeam/rclone, readback can initially validate only its local cache; make sure the upload to the cloud provider finishes. After a disconnection, remount the target and resume the backup.</li>
         <li>Finder reports the full size for each hardlink in each backup folder. The backup list therefore shows “new” and “reused” separately.</li>
       </ol></div>
     </details>
@@ -2995,6 +3020,7 @@ async function init(): Promise<void> {
       if (confirmed) {
         // Auto-select the detected volume and load its backups
         config.target_volume = detected.volume_path;
+        config.target_mount_source = currentVolumes.find(v => v.path === detected.volume_path)?.mount_source || "";
         config.target_directory = "";
         volumeSelect.value = detected.volume_path;
         updateTargetPathDisplay();

@@ -44,6 +44,7 @@
 - **Safari** – Lesezeichen, Leseliste, Erweiterungen, Preferences
 - **Konfigurationsdateien** – SSH, Git, Shell-Configs
 - **Durchsatzbegrenzung** – Optionales Limit in MB/s für Lese- und Schreibzugriffe auf das Backup-Ziel (Backup, Prüfung, Wiederherstellung), z. B. für externe SSDs, deren USB-Controller bei vollem Tempo überhitzt. Siehe [Abschnitt unten](#durchsatzbegrenzung-ab-1246).
+- **Eingehängte Netzwerkziele** – NFS-, SMB- und DualBeam/rclone-Mounts werden auch außerhalb von `/Volumes` als Backup-Ziel angeboten. Ein Ziel-Unterordner kann gewählt werden, selbst wenn der Mount-Wurzelordner nicht beschreibbar ist. Vor dem Backup werden Schreiben, Umbenennen und Rücklesen im Zielordner geprüft; während des Backups wird die Mount-Identität kontrolliert. Die Quelle muss weiterhin auf einem snapshotfähigen APFS-Volume liegen. Bei rclone mit VFS-Schreibcache bestätigt die unmittelbare Rückleseprüfung nur die Mount-Ansicht; der spätere Upload zum Cloud-Anbieter muss separat abgeschlossen sein. Der gemeldete freie Speicher eines rclone-Mounts kann ein Schätzwert sein.
 
 ### ⚡ Parallele Verarbeitung (NEU in v1.1)
 | Feature | Parallelität | Zeitersparnis |
