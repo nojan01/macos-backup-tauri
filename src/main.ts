@@ -1293,7 +1293,8 @@ function updateVolumeSelect(): void {
     for (const vol of network) {
       const option = document.createElement("option");
       option.value = vol.path;
-      option.textContent = `${vol.name} — ${vol.path} (${formatBytes(vol.free_space_gb)} ${t("freeSpace")})`;
+      option.textContent = `${vol.name} (${formatBytes(vol.free_space_gb)} ${t("freeSpace")})`;
+      option.title = vol.path;
       group.appendChild(option);
     }
     volumeSelect.appendChild(group);
@@ -1326,6 +1327,7 @@ function updateVolumeSelect(): void {
   if (config.target_volume) {
     volumeSelect.value = config.target_volume;
   }
+  volumeSelect.title = config.target_volume;
 }
 
 // Update backup select placeholder
@@ -1812,6 +1814,7 @@ async function setupEventListeners(): Promise<void> {
 // Event handlers
 volumeSelect.addEventListener("change", async () => {
   config.target_volume = volumeSelect.value;
+  volumeSelect.title = config.target_volume;
   config.target_mount_source = currentVolumes.find(v => v.path === config.target_volume)?.mount_source || "";
   config.target_directory = "";
   updateTargetPathDisplay();
@@ -1855,6 +1858,7 @@ browseTargetBtn?.addEventListener("click", async () => {
         const relativePath = selectedPath.substring(matchedVol.path.length);
         config.target_directory = relativePath.replace(/^\//, "");
         volumeSelect.value = matchedVol.path;
+        volumeSelect.title = matchedVol.path;
       }
       updateTargetPathDisplay();
       await saveConfig();
