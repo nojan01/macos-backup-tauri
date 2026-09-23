@@ -3,6 +3,7 @@ mod archive_flags;
 mod apple_archive;
 mod archive_diagnostics;
 mod segmented;
+mod ram_parts;
 mod backup;
 mod capacity;
 mod frozen_sources;
@@ -2239,7 +2240,7 @@ fn create_backup_impl(
         }),
     );
 
-    let _ = window.emit("backup-log", "AppleArchive mit LZFSE: Teilarchive bis 1 GiB werden einzeln zurückgelesen und geprüft. Nur temporäre Prüfkopien werden danach gelöscht. Arbeitsbereich: 5 GiB auf der internen SSD.");
+    let _ = window.emit("backup-log", "AppleArchive mit LZFSE: Bei genügend freiem RAM werden 128-MiB-Teile vollständig im Arbeitsspeicher erstellt und zurückgelesen. Sonst werden Teile bis 1 GiB über den temporären Arbeitsbereich der internen SSD geprüft (5 GiB frei erforderlich).");
     let manual = get_manual_apps()?.join("\n");
     atomic_write(&inventory_root.join("manual_apps.txt"), manual.as_bytes())?;
 

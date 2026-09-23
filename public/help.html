@@ -147,6 +147,25 @@
         <h1>📖 macOS Backup Suite - Hilfe</h1>
 
         <div class="section">
+            <h2><span class="emoji">🔒</span>Bildschirmsperre und Ruhezustand</h2>
+        <p><strong>Aufwecken ist nicht Entsperren.</strong> Ein Weckprogramm kann den Mac aus dem Ruhezustand holen; die Benutzersitzung bleibt dabei gegebenenfalls gesperrt. Bestimmte geschützte Dateien können deshalb weiterhin unzugänglich sein.</p>
+        <ul>
+          <li><strong>Monitor ausgeschaltet:</strong> Das Backup kann weiterlaufen, solange der Mac selbst wach ist und auf die benötigten Dateien zugreifen kann.</li>
+          <li><strong>Mac im Ruhezustand:</strong> Die normale Backup-Verarbeitung läuft während des Systemschlafs nicht weiter. Ein geplanter Weckvorgang kann den Mac wieder arbeitsfähig machen, ersetzt aber kein Entsperren.</li>
+          <li><strong>Bildschirm gesperrt:</strong> Lesbare Dateien können weiterhin gesichert werden. Verweigert macOS jedoch den Zugriff auf eine geschützte Datei und erkennt die Suite die aktive Bildschirmsperre, pausiert sie mit einer Entsperr-Meldung.</li>
+          <li><strong>So geht es weiter:</strong> Entsperre den Mac. Die Suite versucht den betroffenen Schritt erneut; sie überspringt die Datei nicht. Bleibt der Zugriff verweigert, wird ein Fehler gemeldet. Während der Wartezeit kannst du abbrechen.</li>
+        </ul>
+        <p class="warning"><strong>Bei Backups über Nacht:</strong> Automatisches Aufwecken allein garantiert keinen vollständigen Durchlauf. Wenn geschützte Dateien das Entsperren erfordern, kann das Backup bis zu deiner Rückkehr warten. Ein ausgeschalteter Monitor und eine gesperrte Sitzung sind unterschiedliche Zustände.</p>
+        <p>Auch Time Machine kann wegen solcher Dateien ein Backup verzögern oder nicht fertigstellen. Apple empfiehlt dann ein Backup bei entsperrtem Mac oder einen späteren automatischen Versuch. Quelle: Apple Support, „Erstellen von Backups oder Wiederherstellen des Mac mit Time Machine nicht möglich“ (support.apple.com/de-de/102220).</p>
+        </div>
+
+        <div class="section">
+            <h2><span class="emoji">🧠</span>Arbeitsspeicher und Prüfkopien</h2>
+            <p>Bei genügend freiem RAM erstellt und prüft die Suite 128-MiB-Teilarchive im Arbeitsspeicher. Sie liest jedes Teil vom Backup-Ziel zurück, entpackt und vergleicht es dort. Danach gibt sie die RAM-Prüfkopie frei.</p>
+            <p>Sinkt der verfügbare RAM, nutzt die Suite den temporären Arbeitsbereich auf der internen SSD; dafür müssen 5 GiB frei sein. Bereits vorhandene Teile mit mehr als 128 MiB werden ebenfalls über diesen Bereich geprüft. Das gesicherte Archiv bleibt immer auf dem Backup-Ziel. macOS kann bei allgemeinem Speicherdruck weiterhin Swap-Daten auf die interne SSD schreiben.</p>
+        </div>
+
+        <div class="section">
             <h2><span class="emoji">✨</span>Neu in v1.2.9</h2>
             <ul>
                 <li><strong>Schnellere Folge-Backups:</strong> Pro Top-Level-Verzeichnis nur noch ein Baum-Walk statt drei – Pre-flight-Scan, Größen- und Snapshot-Berechnung teilen sich jetzt dasselbe Ergebnis.</li>

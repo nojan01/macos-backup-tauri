@@ -2625,12 +2625,26 @@ const helpOverviewHtml: Record<string, string> = {
       <summary>📤 Was passiert beim Backup?</summary>
       <div class="help-topic-content"><ol class="help-steps">
         <li>Die Suite sichert aus einem schreibgeschützten APFS-Snapshot in einem Container aus AppleArchive/LZFSE-Teilarchiven (<code>.aarset</code>). Alte TAR-Backups werden in dieser Version nicht unterstützt.</li>
-        <li>Auch große Einzeldateien werden in Abschnitte bis 1 GiB geteilt. Jeder Abschnitt wird vom Ziel zurückgelesen, entpackt und geprüft; seine temporäre Prüfkopie wird sofort gelöscht. Inhalte und macOS-Metadaten werden mit dem Quellmanifest verglichen. Dafür bleiben 5 GiB Arbeitsbereich auf der internen SSD reserviert. Die Backup-Teile bleiben erhalten.</li>
+        <li>Auch große Einzeldateien werden in Abschnitte bis 1 GiB geteilt. Jeder Abschnitt wird vom Ziel zurückgelesen, entpackt und geprüft; seine temporäre Prüfkopie wird sofort gelöscht. Inhalte und macOS-Metadaten werden mit dem Quellmanifest verglichen. Bei genügend freiem RAM geschieht das für 128-MiB-Teile im Arbeitsspeicher. Sinkt der freie RAM, nutzt die Suite vorübergehend die interne SSD (5 GiB freier Arbeitsbereich erforderlich). Die Backup-Teile bleiben erhalten.</li>
         <li>Verweigert macOS bei gesperrtem Bildschirm den Zugriff auf geschützte Dateien, pausiert das Backup. Nach dem Entsperren wird derselbe Schritt erneut ausgeführt. Fehlende Rechte bei entsperrtem Mac bleiben ein Fehler.</li>
         <li>„Verifizieren“ prüft die Archive nach Abschluss. Ein Test-Restore prüft zusätzlich die praktische Wiederherstellung.</li>
         <li>Unveränderte ausgewählte Ordner werden per Hardlink wiederverwendet. Ändert sich eine Datei in einem ausgewählten Ordner, wird dessen gesamtes Archiv neu erstellt.</li>
         <li>Finder zeigt bei Hardlinks die volle Größe in jedem Backup-Ordner. Die Backup-Liste zeigt deshalb separat „neu“ und „übernommen“ an.</li>
       </ol></div>
+    </details>
+    <details class="help-topic">
+      <summary>🔒 Bildschirmsperre und Ruhezustand</summary>
+      <div class="help-topic-content">
+        <p><strong>Aufwecken ist nicht Entsperren.</strong> Ein Weckprogramm kann den Mac aus dem Ruhezustand holen; die Benutzersitzung bleibt dabei gegebenenfalls gesperrt. Bestimmte geschützte Dateien können deshalb weiterhin unzugänglich sein.</p>
+        <ul class="help-tips">
+          <li><strong>Monitor ausgeschaltet:</strong> Das Backup kann weiterlaufen, solange der Mac selbst wach ist und auf die benötigten Dateien zugreifen kann.</li>
+          <li><strong>Mac im Ruhezustand:</strong> Die normale Backup-Verarbeitung läuft während des Systemschlafs nicht weiter. Ein geplanter Weckvorgang kann den Mac wieder arbeitsfähig machen, ersetzt aber kein Entsperren.</li>
+          <li><strong>Bildschirm gesperrt:</strong> Lesbare Dateien können weiterhin gesichert werden. Verweigert macOS jedoch den Zugriff auf eine geschützte Datei und erkennt die Suite die aktive Bildschirmsperre, pausiert sie mit einer Entsperr-Meldung.</li>
+          <li><strong>So geht es weiter:</strong> Entsperre den Mac. Die Suite versucht den betroffenen Schritt erneut; sie überspringt die Datei nicht. Bleibt der Zugriff verweigert, wird ein Fehler gemeldet. Während der Wartezeit kannst du abbrechen.</li>
+        </ul>
+        <p class="help-warning"><strong>Bei Backups über Nacht:</strong> Automatisches Aufwecken allein garantiert keinen vollständigen Durchlauf. Wenn geschützte Dateien das Entsperren erfordern, kann das Backup bis zu deiner Rückkehr warten. Ein ausgeschalteter Monitor und eine gesperrte Sitzung sind unterschiedliche Zustände.</p>
+        <p>Auch Time Machine kann wegen solcher Dateien ein Backup verzögern oder nicht fertigstellen. Apple empfiehlt dann ein Backup bei entsperrtem Mac oder einen späteren automatischen Versuch. Quelle: Apple Support, „Erstellen von Backups oder Wiederherstellen des Mac mit Time Machine nicht möglich“ (support.apple.com/de-de/102220).</p>
+      </div>
     </details>
     <details class="help-topic">
       <summary>📥 Wie stelle ich Daten wieder her?</summary>
@@ -2680,12 +2694,26 @@ const helpOverviewHtml: Record<string, string> = {
       <summary>📤 What happens during backup?</summary>
       <div class="help-topic-content"><ol class="help-steps">
         <li>The Suite backs up from a read-only APFS snapshot using a container of AppleArchive/LZFSE parts (<code>.aarset</code>). This version does not support older TAR backups.</li>
-        <li>Large individual files are also split into sections of up to 1 GiB. Each section is read back from the target, decoded and verified; its temporary verification copy is deleted immediately. Contents and macOS metadata are compared with the source manifest. This reserves 5 GiB of workspace on the internal SSD. Backup parts are retained.</li>
+        <li>Large individual files are also split into sections of up to 1 GiB. Each section is read back from the target, decoded and verified; its temporary verification copy is deleted immediately. Contents and macOS metadata are compared with the source manifest. With sufficient free RAM, 128 MiB parts are processed in memory. If available RAM drops, the Suite uses temporary space on the internal SSD (5 GiB free required). Backup parts are retained.</li>
         <li>If macOS denies access to protected files while the screen is locked, the backup pauses and retries the same step after unlock. Missing permissions while unlocked remain an error.</li>
         <li>“Verify” checks archives after completion. A test restore also confirms practical recovery.</li>
         <li>Unchanged selected folders are reused by hardlink. If one file changes inside a selected folder, that folder's complete archive is rebuilt.</li>
         <li>Finder reports the full size for each hardlink in each backup folder. The backup list therefore shows “new” and “reused” separately.</li>
       </ol></div>
+    </details>
+    <details class="help-topic">
+      <summary>🔒 Screen lock and sleep</summary>
+      <div class="help-topic-content">
+        <p><strong>Waking is not unlocking.</strong> A wake utility can wake the Mac from sleep, but the user session may remain locked. Certain protected files can therefore remain inaccessible.</p>
+        <ul class="help-tips">
+          <li><strong>Display off:</strong> The backup can continue as long as the Mac itself is awake and can access the required files.</li>
+          <li><strong>Mac asleep:</strong> Normal backup processing does not continue during system sleep. A scheduled wake can let the Mac work again, but does not unlock it.</li>
+          <li><strong>Screen locked:</strong> Readable files can still be backed up. However, if macOS denies access to a protected file and the Suite detects the active screen lock, it pauses and asks you to unlock the Mac.</li>
+          <li><strong>To continue:</strong> Unlock the Mac. The Suite retries the affected step without skipping the file. If access is still denied, it reports an error. You can cancel while waiting.</li>
+        </ul>
+        <p class="help-warning"><strong>Overnight backups:</strong> Automatic waking alone does not guarantee completion. If protected files require unlocking, the backup may wait until you return. A sleeping display and a locked session are different states.</p>
+        <p>Time Machine can also delay or fail to complete a backup because of such files. Apple recommends backing up while the Mac is unlocked or waiting for a later automatic attempt. Source: Apple Support, “If you can't back up or restore your Mac using Time Machine” (support.apple.com/en-gb/102220).</p>
+      </div>
     </details>
     <details class="help-topic">
       <summary>📥 How do I restore data?</summary>

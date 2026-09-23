@@ -4,7 +4,11 @@ use super::*;
 const RESERVE: u64 = 2 * 1024 * 1024 * 1024;
 
 pub(super) fn space_preflight() -> Result<(), String> {
-    require_free_space(&std::env::temp_dir(), crate::segmented::WORK_BYTES)
+    if crate::ram_parts::ready() {
+        Ok(())
+    } else {
+        require_free_space(&std::env::temp_dir(), crate::segmented::WORK_BYTES)
+    }
 }
 
 fn full_native_readback(

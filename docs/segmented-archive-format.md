@@ -48,11 +48,21 @@ container atomically published. Failure or cancellation removes only private sta
 A screen-lock-related permission denial retains the existing wait-for-unlock policy;
 a fresh private container is used for a retry.
 
-The work area reserves 5 GiB on the system temporary volume. Target preflight remains
-conservative (archive budget, entry overhead, 10% margin, bounded workspace and 8 GiB
-reserve). Capacity is rechecked before each part. Reads and writes on the protected
-target share the existing throughput limiter. Readback uses normal filesystem I/O;
-it does not assert that operating-system or device caches were bypassed.
+With enough available memory, new archives use 128 MiB parts. The raw payload,
+compressed AppleArchive stream, and destination readback/decode stay in bounded
+RAM buffers; no bulk verification file is written to the internal SSD. The
+available-memory check is repeated for each part. If RAM runs low, a partially
+buffered part is spooled to the system temporary volume and the disk-backed
+AppleArchive path handles subsequent parts until enough memory is available
+again. The next part then returns to the RAM path. That path requires 5 GiB free local
+workspace. Existing parts larger than 128 MiB use the disk-backed decoder.
+The on-disk `.aarset` version and its SHA-256 checks are unchanged.
+
+Target preflight remains conservative (archive budget, entry overhead, 10% margin,
+bounded workspace and 8 GiB reserve). Capacity is rechecked before each part.
+Reads and writes on the protected target share the existing throughput limiter.
+Readback uses normal filesystem I/O; operating-system or device caches are not
+bypassed. macOS may still swap under unrelated system-wide memory pressure.
 
 ## Restore and compatibility
 

@@ -77,6 +77,14 @@ Essentielle Tools in unter 10 Minuten:
   permitted“ samt betroffenem Pfad erkennbar, auch wenn `aa` auf stderr nur
   „Archive encoding failed“ ausgibt. Ist die Systemdiagnose nicht verfügbar, bleibt
   der ursprüngliche Fehler bestehen; die App überspringt keine Dateien.
+- **Aufwecken ist nicht Entsperren:** Ein ausgeschalteter Monitor verhindert das
+  Backup nicht, solange der Mac wach ist und die Dateien zugänglich sind. Im
+  Systemruhezustand läuft die normale Backup-Verarbeitung nicht weiter. Ein
+  Weckprogramm kann den Mac aufwecken, entsperrt aber nicht die Benutzersitzung.
+  Geschützte Dateien können deshalb weiterhin unzugänglich bleiben. Auch ein
+  automatisch aufgeweckter Mac kann beim Backup bis zum manuellen Entsperren warten;
+  ein unbeaufsichtigter Nachtlauf ist dadurch nicht garantiert. Auch Time Machine
+  kann davon betroffen sein, siehe [Apple Support](https://support.apple.com/de-de/102220).
 - Vor den vollständigen Inhaltsprüfungen werden alle ausgewählten Quellen rekursiv
   auf Zugriff geprüft (Dateistatus, ein Byte Leseprobe, Attribute und ACLs). Probleme
   werden gesammelt gemeldet, mit bis zu 100 konkreten Pfaden. Die Vorprüfung ist
@@ -118,13 +126,16 @@ Essentielle Tools in unter 10 Minuten:
   Die Wiederherstellung setzt die Abschnitte in ihrer geprüften Reihenfolge zusammen
   und übergibt den nativen Datenstrom an AppleArchive. UID/GID werden dem ausführenden
   Benutzer zugeordnet. Ein Test-Restore prüft zusätzlich die tatsächliche Wiederherstellung.
-- Die Teilprüfung reserviert **5 GiB Arbeitsbereich auf der internen SSD**, unabhängig
-  von der Größe einer einzelnen Quelldatei. Es wird keine vollständige Prüfkopie des
-  Quellordners mehr angelegt. Auf dem Ziel werden Archivbedarf, Eintragskosten,
-  10 % Aufschlag und 8 GiB Reserve geprüft; zusätzlich bleibt dort konservativ der
-  begrenzte Arbeitsbereich eingerechnet. Vor jedem Teil werden die freien Kapazitäten
-  erneut geprüft. Große Quellen werden zuerst verarbeitet, die ursprüngliche
-  Profilauswahl bleibt unverändert. Trockenlauf und Backup nutzen denselben Platzplaner.
+- Bei genügend freiem RAM erstellt und prüft die Suite **128-MiB-Teile im Arbeitsspeicher**.
+  Rohdaten, komprimiertes Teil und Rücklesekopie bleiben dort und werden nach jedem
+  Teil freigegeben. Der Speicherzustand wird für jeden Abschnitt erneut geprüft.
+  Sinkt der freie RAM, werden der aktuelle und folgende Teile auf der internen SSD
+  verarbeitet; die vorhandene 5-GiB-Platzprüfung erfolgt dann vor der Nutzung.
+  Ein RAM-Modus ist keine Garantie gegen macOS-Swap bei anderweitigem Speicherdruck.
+  Für große bestehende 1-GiB-Teilarchive bleibt der SSD-Lesepfad erhalten.
+  Es wird keine vollständige Prüfkopie des Quellordners angelegt. Auf dem Ziel
+  bleiben Archivbedarf, Eintragskosten, 10 % Aufschlag und 8 GiB Reserve
+  konservativ berücksichtigt. Große Quellen werden zuerst verarbeitet.
 - Ein unvollständiger Container wird nicht veröffentlicht. Fehlende, beschädigte,
   vertauschte oder zu große Teile sowie ein ungültiger Index führen zum Abbruch.
   Unveränderte `.aarset`-Container lassen sich weiterhin als Ganzes per Hardlink
