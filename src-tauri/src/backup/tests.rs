@@ -355,6 +355,20 @@ fn changed_or_deleted_sources_block_completion_even_after_archive_was_written() 
     assert!(!backup.join("metadata.json").exists());
 }
 #[test]
+fn frozen_backup_finishes_after_mount_is_gone_only_if_archive_is_intact() {
+    let d = fixture();
+    let (source, backup, meta, _) = completed_fixture(&d);
+    fs::remove_dir_all(&source).unwrap();
+    let archive = backup.join(&meta.items[0].archive);
+    let original = fs::read(&archive).unwrap();
+    fs::write(&archive, b"corrupt").unwrap();
+    assert!(finish_frozen_backup(&backup, &meta).is_err());
+    assert!(!backup.join("metadata.json").exists());
+    fs::write(&archive, original).unwrap();
+    finish_frozen_backup(&backup, &meta).unwrap();
+    assert!(backup.join("metadata.json").exists());
+}
+#[test]
 fn damaged_archive_or_metadata_write_failure_cannot_complete_backup() {
     let d = fixture();
     let (source, backup, meta, expected) = completed_fixture(&d);

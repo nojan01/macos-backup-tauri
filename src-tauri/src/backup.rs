@@ -982,6 +982,13 @@ pub(super) fn finish_backup(
     )
 }
 
+/// All app backup sources come from one read-only APFS snapshot. Their archives
+/// were compared with the captured manifests when created (or reused), so a
+/// final rescan only depends on the temporary snapshot mount remaining present.
+pub(super) fn finish_frozen_backup(root: &Path, metadata: &BackupMetadata) -> Result<(), String> {
+    finish_backup(root, metadata, &[])
+}
+
 #[cfg(test)]
 mod tests;
 

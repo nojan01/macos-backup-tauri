@@ -2207,7 +2207,6 @@ fn create_backup_impl(
     let manual = get_manual_apps()?.join("\n");
     atomic_write(&inventory_root.join("manual_apps.txt"), manual.as_bytes())?;
 
-    let mut extra_source_guards: Vec<(PathBuf, Vec<ManifestEntry>)> = Vec::new();
     let mut items = Vec::new();
     let mut reused_archive_size_bytes = 0u64;
     let total = directories.len();
@@ -2474,7 +2473,6 @@ fn create_backup_impl(
             validate_source_target(&cache_dir, Path::new(&target_path))?;
             let cache_manifest = compute_snapshot(&cache_dir)?;
             let cache_size = cache_manifest.iter().map(|e| e.s).sum::<u64>();
-            extra_source_guards.push((cache_dir.clone(), cache_manifest));
 
             {
                 let cache_archive_name = "homebrew-cache.aarset";
@@ -2547,8 +2545,6 @@ fn create_backup_impl(
                 Ok(_) => {}
             }
             {
-                let original_manifest = compute_snapshot(safari_path)?;
-                extra_source_guards.push((safari_path.clone(), original_manifest));
                 let relative_name = safari_path
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
@@ -2608,14 +2604,8 @@ fn create_backup_impl(
 
     let _ = window.emit(
         "backup-log",
-        "Abschlussprüfung: eingefrorener Sicherungsstand und Archive werden erneut geprüft …",
+        "Abschlussprüfung: Archive und Prüfsummen werden erneut geprüft …",
     );
-    for (i, source) in original_sources.iter().enumerate() {
-        extra_source_guards.push((
-            frozen.get(source)?,
-            cached_snapshots[i].clone().ok_or("Quellmanifest fehlt")?,
-        ));
-    }
 
     let end = Local::now();
     let end_time_str = end.format("%d.%m.%Y %H:%M:%S").to_string();
@@ -2640,7 +2630,7 @@ fn create_backup_impl(
     };
 
     target_guard.check()?;
-    finish_backup(&backup_root, &metadata, &extra_source_guards)?;
+    finish_frozen_backup(&backup_root, &metadata)?;
 
     // Backup erfolgreich abgeschlossen — Resume-State kann jetzt verworfen werden.
     clear_resume_state(&backup_root);
