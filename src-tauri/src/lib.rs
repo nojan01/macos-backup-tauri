@@ -696,10 +696,8 @@ fn get_external_volumes() -> Result<Vec<Volume>, String> {
     for mount in target_mount::mounted()? {
         let path = &mount.path;
         let under_volumes = path.starts_with("/Volumes");
-        if path == Path::new("/")
-            || path == Path::new("/System/Volumes/Data")
+        if !target_mount::selectable_target(&mount)
             || (!under_volumes && !mount.network)
-            || mount.read_only
             || is_time_machine_volume(path)
         {
             continue;

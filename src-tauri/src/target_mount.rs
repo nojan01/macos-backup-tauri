@@ -16,6 +16,7 @@ pub(crate) struct Mount {
     pub dev: u64,
     pub network: bool,
     pub read_only: bool,
+    pub dont_browse: bool,
 }
 
 fn field(bytes: &[libc::c_char]) -> String {
@@ -46,7 +47,19 @@ fn mount_from_stat(stat: &libc::statfs) -> Result<Mount, String> {
         dev,
         network: flags & libc::MNT_LOCAL as u32 == 0 || remote_type,
         read_only: flags & libc::MNT_RDONLY as u32 != 0,
+        dont_browse: flags & libc::MNT_DONTBROWSE as u32 != 0,
     })
+}
+
+/// Keep macOS-managed mounts out of the backup target picker and reject them
+/// when a previous profile still points at one. Network mounts may use
+/// DONTBROWSE intentionally (for example when mounted outside /Volumes).
+pub(crate) fn selectable_target(mount: &Mount) -> bool {
+    mount.path != Path::new("/")
+        && !mount.path.starts_with("/System/Volumes")
+        && mount.fs_type != "autofs"
+        && !mount.read_only
+        && (mount.network || !mount.dont_browse)
 }
 
 pub(crate) fn mounted() -> Result<Vec<Mount>, String> {
@@ -117,6 +130,12 @@ impl Guard {
             return Err("Backup-Ziel muss auf dem ausgewählten, eingehängten Volume liegen".into());
         }
         let identity = at(target)?;
+        if !selectable_target(&identity) {
+            return Err(format!(
+                "Backup-Ziel ist ein macOS-Systemvolume oder nicht als Ziel geeignet: {}",
+                identity.path.display()
+            ));
+        }
         // A stale /Volumes directory must never become a backup on the Mac's
         // system disk. For custom remote mounts, the saved source identity
         // catches the same fall-through even when the mount path is elsewhere.
@@ -222,6 +241,49 @@ pub(crate) fn probe(target: &Path) -> Result<Probe, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_mounts_are_not_backup_targets() {
+        let mount = |path: &str, fs_type: &str, network: bool, dont_browse: bool| Mount {
+            path: PathBuf::from(path),
+            source: String::new(),
+            fs_type: fs_type.into(),
+            dev: 0,
+            network,
+            read_only: false,
+            dont_browse,
+        };
+        assert!(!selectable_target(&mount(
+            "/Volumes/Recovery",
+            "apfs",
+            false,
+            true
+        )));
+        assert!(!selectable_target(&mount(
+            "/System/Volumes/Data/home",
+            "autofs",
+            true,
+            true
+        )));
+        assert!(!selectable_target(&mount(
+            "/System/Volumes/Data",
+            "apfs",
+            false,
+            true
+        )));
+        assert!(selectable_target(&mount(
+            "/Volumes/Backup03",
+            "apfs",
+            false,
+            false
+        )));
+        assert!(selectable_target(&mount(
+            "/Users/nojan/Library/Application Support/dualbeam/Remote",
+            "nfs",
+            true,
+            true
+        )));
+    }
     #[test]
     fn write_probe_roundtrips_and_cleans_up() {
         let path = std::env::temp_dir().join(format!("mbs-probe-{}", std::process::id()));
